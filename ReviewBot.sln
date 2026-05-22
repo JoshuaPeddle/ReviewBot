@@ -1,0 +1,16 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ReviewBot.Api", "ReviewBot.Api\ReviewBot.Api.csproj", "{A7ADB4F5-5382-429E-933B-533273390674}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A7ADB4F5-5382-429E-933B-533273390674}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A7ADB4F5-5382-429E-933B-533273390674}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A7ADB4F5-5382-429E-933B-533273390674}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A7ADB4F5-5382-429E-933B-533273390674}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

@@ -1,0 +1,979 @@
+# Build Plan: GitHub PR Review Bot
+
+A step-by-step, test-driven blueprint for building a GitHub App that reviews pull requests using Anthropic or any OpenAI-compatible LLM endpoint. Each step is sized to be implementable in one focused session, ships with tests, and builds directly on the previous step. The final step wires everything together into a runnable service.
+
+## Target stack
+
+- .NET 10, latest C# language version
+- ASP.NET Core for the webhook endpoint
+- `IHostedService` + `System.Threading.Channels` for the worker
+- Octokit.NET for GitHub REST
+- Anthropic.SDK and OpenAI 2.x SDK for the two LLM paths
+- YamlDotNet for the repo config file
+- xUnit + FluentAssertions + NSubstitute for tests
+- EF Core with the SQLite provider for idempotency storage, abstracted behind `IDeliveryStore` so swapping to Postgres later is a one-line provider change
+
+## Phased breakdown
+
+The build is grouped into seven phases. Each phase ends in a runnable, testable state.
+
+1. Foundation: solution scaffolding, shared domain types.
+2. Core logic: diff parsing, prompt building, LLM result parsing. Pure functions, no I/O.
+3. LLM layer: the `IReviewLlm` abstraction and its two implementations.
+4. GitHub integration: App auth, fetching PR data, posting reviews, reading the config file.
+5. HTTP and worker: webhook endpoint, queue, orchestrating worker.
+6. Reliability: idempotency, configuration validation, observability, big-PR handling.
+7. Polish: documentation, sample config, App registration walkthrough.
+
+---
+
+## Phase 1: Foundation
+
+### Step 1: Solution scaffolding and CI
+
+```text
+You are building a .NET solution called ReviewBot. Create the following structure using `dotnet new` commands and `dotnet sln add`:
+
+src/
+  ReviewBot.Api/              (webapi, minimal hosting)
+  ReviewBot.Core/             (classlib)
+  ReviewBot.GitHub/           (classlib)
+  ReviewBot.Llm.Anthropic/    (classlib)
+  ReviewBot.Llm.OpenAi/       (classlib)
+  ReviewBot.Persistence/      (classlib)
+tests/
+  ReviewBot.Core.Tests/       (xunit)
+  ReviewBot.GitHub.Tests/     (xunit)
+  ReviewBot.Llm.Tests/        (xunit)
+  ReviewBot.Persistence.Tests/(xunit)
+  ReviewBot.Api.Tests/        (xunit, references Microsoft.AspNetCore.Mvc.Testing)
+
+Project references:
+- Api depends on Core, GitHub, Llm.Anthropic, Llm.OpenAi, Persistence
+- GitHub, Llm.Anthropic, Llm.OpenAi, Persistence each depend on Core
+- Each test project references its corresponding src project
+- Llm.Tests references both Llm.Anthropic and Llm.OpenAi
+
+Add these NuGet packages where appropriate (do not add them everywhere, scope each one):
+- All test projects: xunit, xunit.runner.visualstudio, FluentAssertions, NSubstitute, Microsoft.NET.Test.Sdk
+- Api.Tests: Microsoft.AspNetCore.Mvc.Testing
+- Persistence: Microsoft.EntityFrameworkCore.Sqlite
+- Api: Microsoft.EntityFrameworkCore.Design (so `dotnet ef` migrations work from the Api as startup project)
+
+Create a Directory.Build.props at the repo root setting:
+- TargetFramework = net10.0
+- Nullable = enable
+- ImplicitUsings = enable
+- TreatWarningsAsErrors = true
+- LangVersion = latest
+
+Create a .editorconfig with sensible C# defaults (file-scoped namespaces, prefer var, expression-bodied members where appropriate).
+
+Create a GitHub Actions workflow at .github/workflows/ci.yml that:
+- Runs on push and pull_request
+- Sets up .NET 10 (use `actions/setup-dotnet@v4` with `dotnet-version: 10.0.x`)
+- Runs `dotnet restore`, `dotnet build --no-restore -c Release`, `dotnet test --no-build -c Release`
+
+Add a single placeholder test in ReviewBot.Core.Tests called `SolutionBuildsTest` that asserts `true.Should().BeTrue()` so CI has something to run.
+
+Deliverable: `dotnet build` succeeds at repo root with zero warnings, `dotnet test` runs the placeholder green.
+```
+
+### Step 2: Core domain records
+
+```text
+In ReviewBot.Core, create the immutable domain model used everywhere downstream. Use file-scoped namespaces and `sealed record` types.
+
+Files to create under ReviewBot.Core/Domain/:
+
+1. FileChange.cs:
+   - Properties: string Path, string Patch, IReadOnlySet<int> CommentableLines, long AdditionsCount, long DeletionsCount, FileChangeStatus Status
+   - FileChangeStatus enum: Added, Modified, Removed, Renamed, Copied
+
+2. ReviewRequest.cs:
+   - Properties: string PrTitle, string PrBody, string BaseSha, string HeadSha, IReadOnlyList<FileChange> Files, ReviewConfig Config
+
+3. ReviewConfig.cs (and its sub-records):
+   - Properties: bool Enabled, ModelConfig Model, ReviewOutputConfig Review, IReadOnlyList<string> Ignore, IReadOnlyList<string> Focus, string Instructions
+   - ModelConfig: string Provider ("anthropic" or "openai"), string Name, string? BaseUrlEnvVar (optional override)
+   - ReviewOutputConfig: bool InlineComments, bool Summary, int MaxFiles, int MaxPatchLines, TriggerConfig Trigger
+   - TriggerConfig: bool OnReviewRequest, bool OnPush
+   - Provide a static `ReviewConfig Default` property with sensible defaults matching the system spec (anthropic claude-opus-4-7, inline+summary on, max 50 files, max 1500 patch lines, on_review_request true, on_push false, empty ignore, focus = [correctness, security, concurrency, error_handling], empty instructions).
+
+4. ReviewResult.cs:
+   - Properties: string Summary, IReadOnlyList<InlineComment> Comments
+   - InlineComment record: string Path, int Line, string Side ("LEFT" or "RIGHT"), string Body, Severity Severity
+   - Severity enum: Info, Warning, Error
+
+In ReviewBot.Core.Tests, add tests asserting:
+- ReviewConfig.Default has Provider == "anthropic", Name == "claude-opus-4-7", InlineComments == true, Summary == true, MaxFiles == 50, MaxPatchLines == 1500
+- Record equality works for InlineComment (two instances with identical fields are equal)
+- FileChangeStatus enum values are stable (use FluentAssertions to compare numeric values explicitly: Added=0, Modified=1, etc.)
+
+Remove the placeholder SolutionBuildsTest from Step 1.
+
+Deliverable: `dotnet test` green with the new domain tests covering defaults and equality.
+```
+
+---
+
+## Phase 2: Core logic (pure functions)
+
+### Step 3: Unified diff parser
+
+```text
+GitHub returns each changed file's diff as a unified-diff "patch" string. To post inline review comments via the GitHub API you must target a line number that exists in the diff hunks of that file on the new side (RIGHT). Posting any other line returns 422.
+
+In ReviewBot.Core/Diff/, create a static class `UnifiedDiffParser` with one public method:
+
+  IReadOnlySet<int> GetCommentableLines(string patch)
+
+Behavior:
+- Returns the set of line numbers on the new file (RIGHT side) that appear in the patch hunks. These are lines marked with '+' or context lines ' ' inside any @@ hunk. Lines marked '-' are old-side and not commentable on RIGHT, so they do not count.
+- Parse hunk headers of the form `@@ -oldStart,oldCount +newStart,newCount @@`. The count fields are optional (default 1). Track the running new-file line number as you walk the hunk body.
+- Ignore lines starting with `\` (such as `\ No newline at end of file`).
+- Return an empty set for null, empty, or patch with no hunks.
+- Throw FormatException only on truly malformed hunk headers, not on minor irregularities.
+
+Tests in ReviewBot.Core.Tests/Diff/UnifiedDiffParserTests.cs covering:
+- Single hunk, all additions: lines 1..N are returned
+- Single hunk, mixed +/- /context: only + and context contribute, with correct line counting
+- Multiple hunks with gaps between them
+- Hunk header with omitted counts (`@@ -1 +1 @@`)
+- Empty / null / whitespace input returns empty set
+- A real fixture string (paste a 20-line patch with two hunks) and assert the exact expected line set
+
+Use FluentAssertions throughout. No I/O, no async.
+
+Deliverable: parser with 100% branch coverage on the parsing logic, all tests green.
+```
+
+### Step 4: Prompt builder
+
+```text
+In ReviewBot.Core/Prompting/, create `PromptBuilder` (static class) with:
+
+  PromptPayload Build(ReviewRequest request)
+
+  public sealed record PromptPayload(string SystemPrompt, string UserPrompt);
+
+The system prompt should:
+- Define the LLM's role as a senior code reviewer
+- State the focus areas from request.Config.Focus
+- Include request.Config.Instructions verbatim if non-empty
+- Instruct it to respond ONLY with a JSON object matching the schema (see below) and nothing else, no markdown fences, no preamble
+- Specify the schema:
+    {
+      "summary": "string, markdown allowed, 1-3 short paragraphs",
+      "comments": [
+        {
+          "path": "string, must match one of the changed files",
+          "line": "integer, must be a commentable line on the new side",
+          "severity": "info|warning|error",
+          "body": "string, markdown allowed; for fixes use GitHub suggestion blocks"
+        }
+      ]
+    }
+- Tell it to omit a comment entirely rather than pick a guessed line, and to keep total comments under 25.
+
+The user prompt should include:
+- PR title and body
+- A section per file: header line `=== {path} ({status}, +{additions} -{deletions}) ===`, then the patch verbatim, fenced with ```diff
+- Files in stable order (sorted by path) for reproducibility
+
+Implement helper sanitization: strip null bytes from patches and truncate any individual patch above request.Config.Review.MaxPatchLines lines, appending a marker `... (truncated, N more lines)`.
+
+Tests in ReviewBot.Core.Tests/Prompting/PromptBuilderTests.cs:
+- System prompt includes each focus area and the schema definition
+- System prompt contains custom Instructions when set
+- User prompt orders files alphabetically by path regardless of input order
+- Patch truncation kicks in above the configured limit and appends the marker
+- Use a snapshot-style test: fixture ReviewRequest in, assert the built payload matches an expected string (store the expected string inline as a C# raw string literal for clarity)
+
+Deliverable: builder produces a deterministic, schema-explicit prompt; tests cover ordering, truncation, focus areas, and instructions.
+```
+
+### Step 5: LLM result parser
+
+```text
+LLMs return JSON of variable cleanliness: sometimes wrapped in markdown fences, sometimes with trailing prose, sometimes with extra fields. Build a tolerant parser.
+
+In ReviewBot.Core/Llm/, create `LlmResultParser` (static) with:
+
+  ParseResult Parse(string rawResponse)
+
+  public sealed record ParseResult(bool Success, ReviewResult? Value, string? Error);
+
+Behavior:
+- Strip any leading/trailing whitespace
+- If the response starts with a markdown code fence (``` or ```json), strip the fence and matching closer
+- Find the first `{` and the matching closing `}` using a brace counter that respects string literals (so braces inside strings do not throw off counting)
+- Parse with System.Text.Json using a permissive options (`PropertyNameCaseInsensitive = true`, `ReadCommentHandling = Skip`, `AllowTrailingCommas = true`)
+- Validate required fields: `summary` (string), `comments` (array, may be empty)
+- For each comment: require path (string), line (positive int), body (string). severity is optional and defaults to Severity.Info; accept case-insensitive "info"/"warning"/"error" and map unknown values to Info. side is optional and defaults to "RIGHT".
+- Drop individual comments that fail validation (do not fail the whole parse) and log via a passed-in optional ILogger? parameter. If logger is null, drop silently.
+- If the JSON is not parseable at all, return Success=false with Error describing the failure.
+- Cap parsed comments at 100 (defense against runaway model output) before returning.
+
+Tests in ReviewBot.Core.Tests/Llm/LlmResultParserTests.cs:
+- Clean JSON parses
+- JSON wrapped in ```json fences parses
+- JSON with leading "Here is the review:" prose parses (brace-finder skips it)
+- Missing summary returns Success=false
+- One invalid comment is dropped, others retained
+- Unknown severity falls back to Info
+- Truly malformed JSON returns Success=false with non-null Error
+- Comment cap at 100 enforced
+
+Deliverable: a robust parser with strong test coverage; downstream code can trust ReviewResult invariants.
+```
+
+---
+
+## Phase 3: LLM layer
+
+### Step 6: IReviewLlm interface and stub
+
+```text
+In ReviewBot.Core/Llm/, define:
+
+  public interface IReviewLlm
+  {
+      Task<ReviewResult> ReviewAsync(ReviewRequest request, CancellationToken ct);
+  }
+
+In ReviewBot.Core/Llm/, also add a `StubReviewLlm : IReviewLlm` for testing and local development. Constructor takes a `ReviewResult` to return; ReviewAsync returns it. Add a second constructor taking `Func<ReviewRequest, ReviewResult>` for dynamic responses.
+
+In ReviewBot.Core.Tests/Llm/, add tests:
+- StubReviewLlm with a fixed result returns it
+- StubReviewLlm with a function calls the function with the request and returns its result
+
+This step is intentionally tiny but it locks the contract that the next two steps will implement against. Do not add Anthropic or OpenAI dependencies yet.
+
+Deliverable: interface defined, stub usable for integration tests in later phases.
+```
+
+### Step 7: Anthropic implementation
+
+```text
+In ReviewBot.Llm.Anthropic, add the Anthropic.SDK NuGet package. Create `AnthropicReviewLlm : IReviewLlm`.
+
+Constructor dependencies (inject via DI later):
+- AnthropicLlmOptions (record with ApiKey, ModelName, MaxTokens default 4096, Temperature default 0.2)
+- ILogger<AnthropicReviewLlm>
+- Optional HttpClient (for tests; default null means SDK manages its own)
+
+Implementation:
+- In ReviewAsync, call PromptBuilder.Build(request) to get system and user prompts
+- Call the Anthropic Messages API with the system prompt as system, user prompt as the single user message
+- Use the SDK's normal text completion mode (not tool use for v1; we will revisit if reliability is poor). Request JSON output via the system prompt itself.
+- Pass the cancellation token through
+- On success, extract the text content and call LlmResultParser.Parse
+- If parser returns Success=false, retry once with an appended user message "Your previous response was not valid JSON. Respond again with ONLY the JSON object."
+- If still fails, throw `LlmResponseException` with the raw response truncated to 2KB in the message
+
+Add `AnthropicLlmOptions` record and a `ReviewBot.Llm.Anthropic.DependencyInjection.AddAnthropicReviewLlm(IServiceCollection, Action<AnthropicLlmOptions>)` extension.
+
+Tests in ReviewBot.Llm.Tests/Anthropic/AnthropicReviewLlmTests.cs:
+- Use Anthropic.SDK's testability hooks (or wrap the SDK call behind an internal interface you can substitute). If the SDK is hard to mock, extract the actual HTTP call into a private virtual or a thin internal `IAnthropicClient` interface and test against that.
+- Happy path: client returns clean JSON, ReviewAsync returns parsed ReviewResult
+- Malformed JSON triggers exactly one retry, then succeeds
+- Malformed twice throws LlmResponseException
+- Cancellation token propagates
+
+Deliverable: Anthropic implementation behind IReviewLlm with retry-on-malformed and proper error surface.
+```
+
+### Step 8: OpenAI-compatible implementation
+
+```text
+In ReviewBot.Llm.OpenAi, add the official `OpenAI` NuGet package (version 2.x). Create `OpenAiReviewLlm : IReviewLlm`.
+
+Constructor dependencies:
+- OpenAiLlmOptions (record with ApiKey, ModelName, BaseUrl (Uri, nullable; null means default api.openai.com), MaxTokens, Temperature, UseJsonMode (bool, default true))
+- ILogger<OpenAiReviewLlm>
+
+Implementation:
+- Build the OpenAI ChatClient with `OpenAIClientOptions { Endpoint = options.BaseUrl }` when BaseUrl is set, otherwise default
+- In ReviewAsync, build prompts via PromptBuilder
+- If UseJsonMode is true, set ChatCompletionOptions.ResponseFormat = ChatResponseFormat.CreateJsonObjectFormat()
+- Send system + user messages, await completion
+- Parse via LlmResultParser; same retry-once behavior as the Anthropic implementation
+- Same LlmResponseException on persistent failure
+
+Add `AddOpenAiReviewLlm` DI extension. The BaseUrl, ApiKey, and ModelName should be bindable from config so Ollama (`http://localhost:11434/v1`), vLLM, LM Studio, etc. all work without code changes.
+
+Tests in ReviewBot.Llm.Tests/OpenAi/OpenAiReviewLlmTests.cs:
+- If the SDK is not easily mockable, hide it behind an internal `IOpenAiChatClient` thin wrapper and test against that interface (same pattern as the Anthropic tests).
+- Happy path, retry-once, persistent-failure-throws, cancellation
+- A test asserting that when BaseUrl is set to a custom value, the constructed client uses it (this can be verified by observing the URL the mocked handler receives)
+
+Deliverable: OpenAI-compatible implementation with custom endpoint support, same contract and error behavior as Anthropic.
+```
+
+### Step 9: LLM provider factory
+
+```text
+In ReviewBot.Core/Llm/, create `ReviewLlmFactory`:
+
+  public sealed class ReviewLlmFactory
+  {
+      public ReviewLlmFactory(IServiceProvider provider);
+      public IReviewLlm Create(ModelConfig modelConfig);
+  }
+
+Behavior:
+- modelConfig.Provider == "anthropic" returns an AnthropicReviewLlm resolved from DI (the registered options can be overridden per-call by re-binding ModelName from modelConfig.Name)
+- modelConfig.Provider == "openai" returns an OpenAiReviewLlm similarly
+- Unknown provider throws InvalidOperationException with a list of supported providers
+- The factory does NOT instantiate the implementations directly; it resolves them from the container so test substitutes work
+
+To make per-call model name overrides clean, define `IReviewLlmFactory` and have the registered implementations expose a `WithModelName(string)` method that returns a new instance with the same dependencies but a different model. Alternative: have the factory hold typed options snapshots and rebuild on demand. Pick whichever is cleaner; document the choice in code comments.
+
+Wire-up extension in ReviewBot.Core:
+  AddReviewLlmFactory(IServiceCollection) registers the factory.
+The Api project's composition root will call AddAnthropicReviewLlm and AddOpenAiReviewLlm with options from configuration, plus AddReviewLlmFactory.
+
+Tests in ReviewBot.Llm.Tests/ReviewLlmFactoryTests.cs:
+- Returns Anthropic impl for "anthropic"
+- Returns OpenAI impl for "openai"
+- Throws on unknown provider
+- Per-call model name override is honored
+- Use a real ServiceCollection in tests, register substitute IReviewLlm implementations, build the provider, exercise the factory
+
+Deliverable: a single seam where the worker says "give me an LLM for this config" and gets the right one.
+```
+
+---
+
+## Phase 4: GitHub integration
+
+### Step 10: GitHub App JWT signer
+
+```text
+In ReviewBot.GitHub/Auth/, create `GitHubAppJwtSigner`.
+
+Inputs (record GitHubAppOptions): long AppId, string PrivateKeyPem (RSA PEM, PKCS1 or PKCS8).
+
+Public method:
+  string CreateAppJwt(DateTimeOffset now)
+
+Behavior:
+- Builds a JWT with claims: iat = now - 60s (clock skew), exp = now + 9 minutes (GitHub max is 10), iss = AppId
+- Signs with RS256 using the loaded RSA key
+- Use System.IdentityModel.Tokens.Jwt OR Microsoft.IdentityModel.Tokens with RsaSecurityKey; whichever stays compatible with .NET 9
+- Cache the parsed RSA key so each call does not re-parse PEM
+
+Tests in ReviewBot.GitHub.Tests/Auth/GitHubAppJwtSignerTests.cs:
+- Generate an RSA keypair in the test (RSA.Create()), export to PEM, feed to the signer
+- Sign a JWT, then verify it using the corresponding public key
+- Assert claims iat, exp, iss are set correctly relative to a fixed `now`
+- Assert exp - iat is at most 10 minutes
+
+Deliverable: deterministic JWT minting verified end-to-end with a real keypair, no external dependency.
+```
+
+### Step 11: Installation token client and cache
+
+```text
+In ReviewBot.GitHub/Auth/, create `InstallationTokenClient`.
+
+Dependencies: IHttpClientFactory (or HttpClient directly via named client), GitHubAppJwtSigner, ILogger<InstallationTokenClient>.
+
+Public method:
+  Task<InstallationToken> GetTokenAsync(long installationId, CancellationToken ct);
+
+  public sealed record InstallationToken(string Token, DateTimeOffset ExpiresAt);
+
+Behavior:
+- POST to https://api.github.com/app/installations/{installationId}/access_tokens
+- Authorization: Bearer {appJwt}, Accept: application/vnd.github+json, User-Agent: ReviewBot
+- Parse `{ "token": "...", "expires_at": "ISO8601" }`
+- Throws GitHubAuthException on non-2xx with status and response body
+
+Wrap this in `CachingInstallationTokenProvider : IInstallationTokenProvider`:
+- IMemoryCache keyed by installationId
+- TTL = (token.ExpiresAt - now) - 1 minute safety margin
+- Concurrent requests for the same installation deduplicate via per-key SemaphoreSlim so we do not stampede the API
+- Public API: same signature as the client
+
+Tests in ReviewBot.GitHub.Tests/Auth/:
+- InstallationTokenClient: use a mock HttpMessageHandler, assert the request URL, headers (Bearer present, User-Agent present), and parse the response
+- CachingInstallationTokenProvider: substitute IInstallationTokenProvider for the inner, assert second call returns cached value without calling inner; assert expired tokens trigger refresh; assert concurrent calls for the same installation hit the inner exactly once
+- Use a fake `TimeProvider` (System.TimeProvider in .NET 9) so cache expiry is deterministic
+
+Deliverable: production-ready token acquisition that does not melt under load and respects token TTL.
+```
+
+### Step 12: GitHub PR fetcher
+
+```text
+In ReviewBot.GitHub/Pulls/, create `PullRequestFetcher`.
+
+Dependencies: an Octokit `IGitHubClient` factory that takes an installation token and returns a configured client. Define `IGitHubClientFactory` with `IGitHubClient CreateForInstallation(string token)`; implement using new `GitHubClient(new ProductHeaderValue("ReviewBot")) { Credentials = new Credentials(token) }`.
+
+PullRequestFetcher public method:
+  Task<PullRequestSnapshot> FetchAsync(string owner, string repo, int prNumber, string installationToken, CancellationToken ct);
+
+  public sealed record PullRequestSnapshot(
+      string Title,
+      string Body,
+      string BaseSha,
+      string HeadSha,
+      IReadOnlyList<FileChange> Files);
+
+Behavior:
+- Get the PR (title, body, baseSha, headSha)
+- Get the changed files (paginated; iterate all pages, cap at config.MaxFiles default 50)
+- For each file, build a FileChange. Use UnifiedDiffParser to compute CommentableLines from the file's Patch (null patch means binary or too large; treat as empty set).
+- Map Octokit file status strings ("added"/"modified"/"removed"/"renamed"/"copied") to FileChangeStatus.
+- Skip files with no patch and no commentable lines from the resulting list (cannot comment on them).
+
+Tests in ReviewBot.GitHub.Tests/Pulls/PullRequestFetcherTests.cs:
+- Substitute IGitHubClient (NSubstitute) and stub `PullRequest.Get`, `PullRequest.Files.GetAll`
+- Build fixture Octokit objects (or use the Octokit constructor where available; if internals are sealed, wrap behind a thin adapter interface and test the adapter against that)
+- Happy path with two changed files: snapshot has correct title, shas, file count
+- Files with null patch are omitted
+- Pagination handled if more than one page is returned
+
+Deliverable: one call gets everything the LLM needs to review a PR.
+```
+
+### Step 13: Review poster
+
+```text
+In ReviewBot.GitHub/Pulls/, create `ReviewPoster`.
+
+Dependencies: IGitHubClientFactory, ILogger<ReviewPoster>.
+
+Public method:
+  Task PostAsync(string owner, string repo, int prNumber, string commitSha, ReviewResult result, IReadOnlyList<FileChange> files, string installationToken, CancellationToken ct);
+
+Behavior:
+- Build a lookup `Dictionary<string, IReadOnlySet<int>>` of path -> commentable lines from the input files list
+- Filter result.Comments: drop any comment whose path is not in the lookup, or whose line is not in the set. Log dropped ones at Information level with reason.
+- If there are zero valid inline comments AND the summary is empty, log a warning and return without posting.
+- Build the review payload:
+    - commit_id = commitSha (HeadSha)
+    - body = result.Summary (prefix each section appropriately; if summary is empty, body = "Automated review by ReviewBot.")
+    - event = "COMMENT"
+    - comments = each valid InlineComment mapped to { path, line, side, body }
+- Post via Octokit's `PullRequestReview.Create` (or the raw HTTP if Octokit's surface is awkward; document the choice)
+- On Octokit ApiValidationException (422), log the response details and rethrow as ReviewPostException with the dropped/accepted counts so debugging is possible.
+
+Tests in ReviewBot.GitHub.Tests/Pulls/ReviewPosterTests.cs:
+- Comments outside commentable lines are dropped
+- Comments referencing unknown paths are dropped
+- Empty summary + empty valid comments: no API call made
+- Happy path: API called with correct payload (assert on the substitute)
+- 422 from API rethrown as ReviewPostException
+
+Deliverable: posting is defensive about line validity (matches the gotcha called out in the architecture), and quiet when there is nothing to say.
+```
+
+### Step 14: Repo config file fetcher and parser
+
+```text
+In ReviewBot.GitHub/Config/, create `RepoConfigFetcher`.
+
+Dependencies: IGitHubClientFactory, ILogger<RepoConfigFetcher>.
+
+Public method:
+  Task<ReviewConfig> FetchAsync(string owner, string repo, string sha, string installationToken, CancellationToken ct);
+
+Behavior:
+- Try to fetch `.github/review-bot.yml` at the given sha via the Contents API. If 404, also try `.github/review-bot.yaml`. If both 404, return ReviewConfig.Default and log Info.
+- Decode the base64 content, parse YAML with YamlDotNet.
+- Map YAML to ReviewConfig. Missing fields fall back to the corresponding ReviewConfig.Default field (use a merge helper).
+- On YAML parse failure, log Warning with the error and return ReviewConfig.Default to avoid blocking reviews.
+
+YAML mapping notes:
+- Use snake_case naming convention via YamlDotNet's UnderscoredNamingConvention
+- Validate provider is one of: "anthropic", "openai"; otherwise fall back to default and log Warning
+- Trim Instructions; treat empty string as null
+
+Tests in ReviewBot.GitHub.Tests/Config/RepoConfigFetcherTests.cs:
+- Missing file returns Default
+- Valid YAML maps correctly (use the sample from the spec)
+- Partial YAML (only overrides model.name) merges with Default for the rest
+- Invalid YAML returns Default and logs Warning
+- Unknown provider falls back to Default
+
+Deliverable: config can live in the repo and is robust to absence and malformation.
+```
+
+---
+
+## Phase 5: HTTP and worker
+
+### Step 15: Webhook signature validator
+
+```text
+In ReviewBot.Api/Webhooks/, create `WebhookSignatureValidator`.
+
+Public method:
+  bool IsValid(string secret, ReadOnlySpan<byte> body, string? signatureHeader);
+
+Behavior:
+- signatureHeader format: "sha256=HEX"
+- Compute HMAC-SHA256 of body with secret as key
+- Compare in constant time (CryptographicOperations.FixedTimeEquals) against the hex from the header
+- Return false on null/empty header, wrong prefix, wrong length, or mismatch
+
+Tests in ReviewBot.Api.Tests/Webhooks/WebhookSignatureValidatorTests.cs:
+- Known body + known secret produces known HMAC (precompute and assert)
+- Wrong secret returns false
+- Missing/null header returns false
+- Wrong prefix ("sha1=...") returns false
+- Tampered body returns false
+
+Deliverable: small, exhaustively tested function. The API endpoint will call it on every webhook request.
+```
+
+### Step 16: Webhook endpoint and event filter
+
+```text
+In ReviewBot.Api, add a minimal-API endpoint `POST /webhook` in Webhooks/WebhookEndpoint.cs.
+
+Behavior:
+- Read the raw body as bytes (do NOT bind to a model first; we need bytes for signature verification)
+- Read headers: X-Hub-Signature-256, X-GitHub-Event, X-GitHub-Delivery
+- If signature invalid: return 401, log Warning with delivery id
+- If event is not "pull_request": return 204 ("not interested")
+- Parse the JSON body as a `PullRequestEvent` record with at least: string action, long installation_id (from installation.id), repository (owner.login, name), pull_request (number, html_url, head.sha, user.login, requested_reviewers[]), sender, action
+- Filter logic:
+    - If action == "review_requested" AND requested_reviewer.login == botSlug (from options), accept
+    - Else if action == "synchronize" AND config-on-push enabled (we cannot know per-repo config yet at this stage; for now accept and let the worker decide whether to actually review), accept
+    - Else return 204
+- For accepted events: create a ReviewJob and enqueue (we will define the queue in Step 17; for this step, depend on `IReviewJobQueue` and inject a stub if needed)
+- Return 202 Accepted
+
+Add a `WebhookOptions` record bound from configuration (Secret, BotSlug).
+
+Tests in ReviewBot.Api.Tests/Webhooks/WebhookEndpointTests.cs using WebApplicationFactory:
+- Bad signature returns 401
+- Wrong event type returns 204
+- review_requested for our bot returns 202 and enqueues a job (assert on captured stub queue)
+- review_requested for someone else returns 204
+- Use a test queue substitute registered in the factory's `ConfigureServices`
+
+Deliverable: a fast, well-tested HTTP boundary that does not block, hands work to a queue, and is paranoid about authenticity.
+```
+
+### Step 17: Job model and channel queue
+
+```text
+In ReviewBot.Core/Jobs/, define:
+
+  public sealed record ReviewJob(
+      string DeliveryId,
+      long InstallationId,
+      string Owner,
+      string Repo,
+      int PrNumber,
+      string HeadSha,
+      string Reason);  // "review_requested" | "synchronize"
+
+  public interface IReviewJobQueue
+  {
+      ValueTask EnqueueAsync(ReviewJob job, CancellationToken ct);
+      IAsyncEnumerable<ReviewJob> DequeueAllAsync(CancellationToken ct);
+  }
+
+In ReviewBot.Core/Jobs/, implement `ChannelReviewJobQueue : IReviewJobQueue` backed by `Channel.CreateBounded<ReviewJob>(new BoundedChannelOptions(capacity: 1000) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true })`.
+
+DI extension: AddChannelReviewJobQueue(IServiceCollection).
+
+Tests in ReviewBot.Core.Tests/Jobs/ChannelReviewJobQueueTests.cs:
+- Enqueued items come out in FIFO order
+- DequeueAllAsync respects cancellation
+- Enqueue blocks (with timeout in test) when capacity reached
+- Multiple readers not supported (document the assumption; the worker is single)
+
+Now go back to the Step 16 endpoint and wire the real ChannelReviewJobQueue for production while keeping the test substitute path. Make sure the endpoint enqueues with the DeliveryId set from X-GitHub-Delivery.
+
+Deliverable: the HTTP boundary truly hands off; nothing blocks the request thread.
+```
+
+### Step 18: Review worker
+
+```text
+In ReviewBot.Api/Workers/ (or in ReviewBot.Core if we want it reusable), create `ReviewWorker : BackgroundService`.
+
+Dependencies:
+- IReviewJobQueue
+- IInstallationTokenProvider
+- PullRequestFetcher
+- RepoConfigFetcher
+- ReviewLlmFactory (IReviewLlmFactory)
+- ReviewPoster
+- ILogger<ReviewWorker>
+
+ExecuteAsync loop:
+- await foreach (var job in queue.DequeueAllAsync(stoppingToken))
+    - Process each job inside a try/catch that logs but does not crash the loop
+    - Use a structured logging scope with DeliveryId, Owner, Repo, PrNumber
+
+Per-job pipeline:
+1. Acquire installation token
+2. Fetch repo config at job.HeadSha
+3. If config.Enabled == false, log and skip
+4. If job.Reason == "synchronize" and config.Review.Trigger.OnPush == false, log and skip
+5. Fetch PR snapshot (title, body, files)
+6. Apply config.Ignore globs to file list (use Microsoft.Extensions.FileSystemGlobbing.Matcher)
+7. Cap at config.Review.MaxFiles; if exceeded, keep the first N by path order and log Warning
+8. Build ReviewRequest
+9. Get IReviewLlm via factory.Create(config.Model)
+10. Call llm.ReviewAsync
+11. If config.Review.InlineComments == false, drop comments before posting
+12. If config.Review.Summary == false, blank the summary
+13. Post via ReviewPoster
+
+Tests in ReviewBot.Api.Tests/Workers/ReviewWorkerTests.cs:
+- Wire the worker with substitutes for every dependency
+- Pump one job through, assert each downstream substitute received the expected inputs
+- Config Enabled=false short-circuits
+- synchronize + OnPush=false short-circuits
+- Ignore globs drop matching files
+- MaxFiles trims the file list
+- Exception in any step is logged and does not stop the worker (subsequent job still processed)
+- Use a small in-process ChannelReviewJobQueue for the test rather than a substitute
+
+Deliverable: end-to-end orchestration with full test coverage of branch logic.
+```
+
+---
+
+## Phase 6: Reliability
+
+### Step 19: EF Core persistence and idempotency store
+
+```text
+GitHub retries failed webhook deliveries, sometimes after we have already processed them. Add idempotency on top of EF Core, behind an interface so we can swap to Postgres later by changing one provider.
+
+In ReviewBot.Core/Idempotency/, define the interface (interface only, no EF Core dependency in Core):
+
+  public interface IDeliveryStore
+  {
+      // Returns true if newly recorded, false if the id already existed.
+      Task<bool> TryRecordAsync(string deliveryId, CancellationToken ct);
+      Task CleanupAsync(DateTimeOffset olderThan, CancellationToken ct);
+  }
+
+In ReviewBot.Persistence/, build the EF Core implementation.
+
+A. Entity in ReviewBot.Persistence/Entities/DeliveryRecord.cs:
+  public sealed class DeliveryRecord
+  {
+      public string DeliveryId { get; set; } = "";
+      public DateTimeOffset ProcessedAt { get; set; }
+  }
+
+B. DbContext in ReviewBot.Persistence/ReviewBotDbContext.cs:
+  public sealed class ReviewBotDbContext(DbContextOptions<ReviewBotDbContext> options) : DbContext(options)
+  {
+      public DbSet<DeliveryRecord> Deliveries => Set<DeliveryRecord>();
+
+      protected override void OnModelCreating(ModelBuilder b)
+      {
+          b.Entity<DeliveryRecord>(e =>
+          {
+              e.HasKey(x => x.DeliveryId);
+              e.Property(x => x.DeliveryId).HasMaxLength(64);
+              e.Property(x => x.ProcessedAt).IsRequired();
+              e.HasIndex(x => x.ProcessedAt);  // used by cleanup
+          });
+      }
+  }
+
+C. Store implementation in ReviewBot.Persistence/EfCoreDeliveryStore.cs:
+  public sealed class EfCoreDeliveryStore(
+      IDbContextFactory<ReviewBotDbContext> factory,
+      TimeProvider clock,
+      ILogger<EfCoreDeliveryStore> logger) : IDeliveryStore
+  {
+      public async Task<bool> TryRecordAsync(string deliveryId, CancellationToken ct)
+      {
+          await using var db = await factory.CreateDbContextAsync(ct);
+          // Atomic upsert-or-ignore. The semantics need to be portable to Postgres later
+          // (Postgres equivalent: ON CONFLICT DO NOTHING). Keep the provider-specific SQL
+          // tightly scoped here; the rest of the code touches only IDeliveryStore.
+          var sql = db.Database.IsSqlite()
+              ? "INSERT OR IGNORE INTO \"Deliveries\" (\"DeliveryId\", \"ProcessedAt\") VALUES ({0}, {1})"
+              : throw new NotSupportedException("Only SQLite is wired in v1. Add the Postgres branch when the provider changes.");
+
+          var rows = await db.Database.ExecuteSqlRawAsync(sql, new object[] { deliveryId, clock.GetUtcNow() }, ct);
+          return rows == 1;
+      }
+
+      public async Task CleanupAsync(DateTimeOffset olderThan, CancellationToken ct)
+      {
+          await using var db = await factory.CreateDbContextAsync(ct);
+          await db.Deliveries.Where(d => d.ProcessedAt < olderThan).ExecuteDeleteAsync(ct);
+      }
+  }
+
+D. DI extension in ReviewBot.Persistence/DependencyInjection.cs:
+  public static class DependencyInjection
+  {
+      public static IServiceCollection AddReviewBotPersistence(
+          this IServiceCollection services,
+          Action<DbContextOptionsBuilder> configure)
+      {
+          services.AddDbContextFactory<ReviewBotDbContext>(configure);
+          services.AddSingleton<IDeliveryStore, EfCoreDeliveryStore>();
+          return services;
+      }
+  }
+
+E. Migrations:
+- From the repo root run:
+    dotnet ef migrations add InitialCreate \
+      --project src/ReviewBot.Persistence \
+      --startup-project src/ReviewBot.Api \
+      --output-dir Migrations
+- The Migrations/ folder gets checked in. The Api project's reference to Microsoft.EntityFrameworkCore.Design (added in Step 1) is what makes the tool work.
+- Step 20 will run pending migrations at startup; do not do it here.
+
+F. Cleanup background service in ReviewBot.Persistence/DeliveryStoreCleanupService.cs:
+  public sealed class DeliveryStoreCleanupService(
+      IDeliveryStore store,
+      TimeProvider clock,
+      ILogger<DeliveryStoreCleanupService> logger) : BackgroundService
+  {
+      protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+      {
+          using var timer = new PeriodicTimer(TimeSpan.FromHours(1), clock);
+          while (await timer.WaitForNextTickAsync(stoppingToken))
+          {
+              try
+              {
+                  await store.CleanupAsync(clock.GetUtcNow().AddDays(-30), stoppingToken);
+              }
+              catch (Exception ex) when (ex is not OperationCanceledException)
+              {
+                  logger.LogError(ex, "Delivery cleanup failed; will retry next interval");
+              }
+          }
+      }
+  }
+Register this as a hosted service in Step 20.
+
+G. In the webhook endpoint (Step 16), call TryRecordAsync BEFORE enqueueing. If it returns false, return 200 with a "duplicate delivery" log entry and skip the enqueue. Inject IDeliveryStore into the endpoint (or the handler class behind it).
+
+Tests in ReviewBot.Persistence.Tests/EfCoreDeliveryStoreTests.cs:
+- Test fixture pattern:
+    var conn = new SqliteConnection("DataSource=:memory:");
+    await conn.OpenAsync();  // keep open for the lifetime of the test so the in-memory db persists
+    var options = new DbContextOptionsBuilder<ReviewBotDbContext>().UseSqlite(conn).Options;
+    // Build an IDbContextFactory wrapper that returns new contexts over the same options.
+    // Run dbContext.Database.EnsureCreatedAsync() once before the test body.
+- First call with a new id returns true; row count in Deliveries is 1
+- Second call with the same id returns false; row count still 1
+- Concurrent calls with the same id (Parallel.ForEachAsync, 50 tasks): exactly one returns true
+- CleanupAsync removes rows older than the cutoff, keeps newer ones
+- Use a FakeTimeProvider (Microsoft.Extensions.TimeProvider.Testing) so ProcessedAt is deterministic
+
+Tests in ReviewBot.Persistence.Tests/DeliveryStoreCleanupServiceTests.cs:
+- Substitute IDeliveryStore, FakeTimeProvider
+- Start the service, advance time by 1 hour, assert CleanupAsync was called with cutoff = now - 30 days
+- Throw from CleanupAsync once, advance another hour, assert it was called again (loop survives exceptions)
+
+Update Step 16 endpoint tests:
+- Substitute IDeliveryStore: when TryRecordAsync returns false, endpoint returns 200 and the job queue substitute is never called.
+
+Deliverable: at-least-once delivery from GitHub becomes effectively-once processing. The only provider-specific code is one branch in TryRecordAsync; Postgres support is a one-line provider swap plus one extra `if` in that method.
+```
+
+### Step 20: Composition root, options validation, health checks, smoke test
+
+```text
+In ReviewBot.Api/Program.cs, wire everything together. Use minimal hosting.
+
+Configuration sources (in priority order):
+- appsettings.json
+- appsettings.{Environment}.json
+- Environment variables (prefix REVIEWBOT__, double underscore for nesting)
+- User secrets in Development
+
+Bind options with validation:
+- GitHubAppOptions: AppId > 0, PrivateKeyPem non-empty, BotSlug non-empty
+- WebhookOptions: Secret non-empty
+- AnthropicLlmOptions: ApiKey may be empty if not used; if used (default provider), must be non-empty (validate lazily in the factory)
+- OpenAiLlmOptions: same lazy validation
+- PersistenceOptions: ConnectionString non-empty (default `Data Source=reviewbot.db`)
+- Use IValidateOptions<T> implementations for fail-fast on startup where the field is required at startup, lazy validation where the field is only required if the provider is used
+
+Register:
+- AddReviewLlmFactory + AddAnthropicReviewLlm + AddOpenAiReviewLlm
+- AddSingleton<TimeProvider>(TimeProvider.System)
+- AddSingleton<GitHubAppJwtSigner>
+- AddHttpClient<InstallationTokenClient>
+- AddSingleton<IInstallationTokenProvider, CachingInstallationTokenProvider>
+- AddSingleton<IGitHubClientFactory, GitHubClientFactory>
+- AddSingleton<PullRequestFetcher, ReviewPoster, RepoConfigFetcher>
+- AddReviewBotPersistence(opts => opts.UseSqlite(persistenceOptions.ConnectionString))
+- AddSingleton<IReviewJobQueue, ChannelReviewJobQueue>
+- AddHostedService<ReviewWorker>
+- AddHostedService<DeliveryStoreCleanupService>
+- AddHealthChecks()
+    .AddCheck("self", () => HealthCheckResult.Healthy())
+    .AddDbContextCheck<ReviewBotDbContext>("db")
+
+Startup migration step (BEFORE app.Run()):
+  await using (var scope = app.Services.CreateAsyncScope())
+  {
+      var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ReviewBotDbContext>>();
+      await using var db = await factory.CreateDbContextAsync();
+      await db.Database.MigrateAsync();
+  }
+This guarantees the schema exists before the first webhook arrives. Do not use EnsureCreated; we want migration history.
+
+Endpoints:
+- POST /webhook (Step 16)
+- GET /healthz returns 200 if all health checks pass, 503 otherwise
+- GET / returns a simple "ReviewBot v{version}" string so platform health probes work without auth concerns
+
+appsettings.json with placeholder values for every option (including PersistenceOptions.ConnectionString).
+appsettings.Development.json with example values pointing at local stubs.
+
+Tests:
+- A startup-smoke test in ReviewBot.Api.Tests that uses WebApplicationFactory to spin up the host with test-only options, substitute LLM (StubReviewLlm), and an in-memory SQLite connection injected so migrations run against it. Assert /healthz returns 200.
+- An end-to-end test that:
+    1. Posts a signed webhook payload for review_requested
+    2. Asserts 202
+    3. Waits (with timeout, using a TaskCompletionSource set by the substitute ReviewPoster) until the worker calls ReviewPoster.PostAsync
+    4. Asserts the posted review contains the stub LLM's summary
+- The WebApplicationFactory override should replace UseSqlite with an open `SqliteConnection("DataSource=:memory:")` that the factory keeps alive for the lifetime of the test so migrations and queries see the same database.
+
+Deliverable: the whole thing boots, migrations apply, the whole pipeline runs in-process under test, and `dotnet run` from ReviewBot.Api is sufficient to start the service locally.
+```
+
+### Step 21: Hardening, big PRs, retries
+
+```text
+This step adds the production knobs that the v1 design called out as gotchas. No new architectural surface, just hardening.
+
+Tasks:
+
+A. Big PR truncation strategy in the worker:
+- Before calling the LLM, total the patch lines across all files
+- If total > config.Review.MaxPatchLines * 5 (heuristic ceiling), prioritize files by smallest-patch-first, accumulate until you hit the budget, drop the rest
+- Add a "files_skipped" note to the summary if any were dropped (modify worker to pass the skipped list to a small helper that appends to the LLM-returned summary)
+
+B. Retries on transient errors:
+- Add Microsoft.Extensions.Http.Resilience to the InstallationTokenClient and any direct HttpClient usage
+- 3 retries with exponential backoff on 5xx and HttpRequestException
+- Octokit calls: wrap in a small helper that retries on RateLimitExceededException with the suggested wait
+- LLM calls: 2 retries on transient HTTP errors (the SDK's own retry policy where configurable, otherwise a custom retry around the await)
+- Tests: assert the retry count using a counting handler
+
+C. Structured logging:
+- LogContext properties on every job: delivery_id, owner, repo, pr_number, installation_id
+- LLM call duration logged at Info
+- LLM tokens (input/output) logged when available
+
+D. Metrics with System.Diagnostics.Metrics:
+- Counter: reviewbot.jobs.processed (status: success|failure|skipped)
+- Histogram: reviewbot.llm.duration_ms (provider: anthropic|openai)
+- Histogram: reviewbot.review.comments_posted
+
+E. Worker concurrency:
+- Add a worker-concurrency option (default 1). If > 1, fan out N concurrent processing tasks reading from the queue. Document the assumption that the installation token provider is concurrency-safe (it is, because of the per-key semaphore).
+
+Tests for each of A-E in their respective test projects; for E, a test that pushes 5 jobs and asserts they are processed in parallel (use a barrier in the substitute LLM to prove overlap).
+
+Deliverable: the bot behaves under real load. Big PRs degrade gracefully, transient failures recover, and operators can see what is happening.
+```
+
+---
+
+## Phase 7: Polish
+
+### Step 22: Documentation, sample config, App registration walkthrough
+
+```text
+Create the following docs at the repo root:
+
+README.md:
+- One-paragraph overview
+- Quick start: prerequisites, env vars to set, `dotnet run`
+- Architecture diagram (ASCII or Mermaid) matching the high-level layout
+- How to assign the bot as a reviewer on a PR
+- How to configure per-repo via .github/review-bot.yml
+- How to swap LLM providers (Anthropic vs OpenAI-compatible) with concrete examples for Ollama, vLLM, OpenAI
+- Troubleshooting: signature failures, App permissions, 422 on review post
+
+docs/github-app-setup.md:
+- Step-by-step screenshots-free walkthrough of registering a GitHub App
+- Required permissions: Pull requests (read & write), Contents (read), Metadata (read)
+- Required event subscriptions: Pull request
+- Webhook URL and secret
+- Where to find App ID and how to generate a private key
+- How to install the App on a repo or org
+
+docs/configuration.md:
+- Every option, its env var name, its default
+- Per-repo YAML reference, full annotated example
+- How to run EF Core migrations locally (`dotnet ef database update --project src/ReviewBot.Persistence --startup-project src/ReviewBot.Api`)
+- How to swap SQLite for Postgres later: add Npgsql.EntityFrameworkCore.PostgreSQL, change `UseSqlite` to `UseNpgsql` in Program.cs, extend the provider branch in EfCoreDeliveryStore.TryRecordAsync with `INSERT ... ON CONFLICT DO NOTHING`, regenerate migrations against Postgres in a new migrations folder
+
+.github/review-bot.example.yml at the repo root for users to copy.
+
+CHANGELOG.md with a "0.1.0 - Initial release" entry summarizing what's in v1.
+
+LICENSE (your choice; default MIT).
+
+Update the CI workflow to also publish a Docker image on tags (multi-stage Dockerfile: build with sdk, run with aspnet runtime; expose port 8080).
+
+Verify the README's quick-start by following it on a clean machine (or a fresh container) and fixing any gaps.
+
+Deliverable: a stranger could install and run this without reading the code.
+```
+
+---
+
+## Build order summary
+
+A linear path through the 22 steps:
+
+1. Solution scaffolding and CI
+2. Core domain records
+3. Unified diff parser
+4. Prompt builder
+5. LLM result parser
+6. IReviewLlm interface and stub
+7. Anthropic implementation
+8. OpenAI-compatible implementation
+9. LLM provider factory
+10. GitHub App JWT signer
+11. Installation token client and cache
+12. GitHub PR fetcher
+13. Review poster
+14. Repo config file fetcher and parser
+15. Webhook signature validator
+16. Webhook endpoint and event filter
+17. Job model and channel queue
+18. Review worker
+19. EF Core persistence and idempotency store
+20. Composition root, options, health checks, smoke test
+21. Hardening, big PRs, retries
+22. Documentation, sample config, App registration walkthrough
+
+After step 20 the service is functionally complete. Steps 21 and 22 make it production-grade.
+
+## Suggested test coverage targets
+
+- Phase 2 (pure functions): aim for 100% branch coverage. These are the building blocks everything else trusts.
+- Phase 3 (LLM): focus on the parser-retry boundary and provider selection. Mock at the lowest level you can.
+- Phase 4 (GitHub): cover the line-filter defense (Step 13) and pagination (Step 12) explicitly. Both are easy to get wrong.
+- Phase 5 (HTTP/worker): the WebApplicationFactory tests are the most valuable; they catch wiring bugs.
+- Phase 6: each hardening change ships with a test for the specific behavior it adds.
+
+## What is intentionally NOT in v1
+
+- No web UI for admin or stats
+- No multi-LLM ensemble or self-critique passes
+- No support for review threads (replies to existing comments)
+- No GitHub Enterprise Server (only github.com); add later by making the API base URL configurable
+- No fine-grained per-file model selection
