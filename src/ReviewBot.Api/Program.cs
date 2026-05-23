@@ -71,6 +71,7 @@ var persistenceOptions = builder.Configuration
     .Get<PersistenceOptions>() ?? new PersistenceOptions();
 builder.Services.AddReviewBotPersistence(options => options.UseSqlite(persistenceOptions.ConnectionString));
 builder.Services.AddChannelReviewJobQueue();
+builder.Services.AddSingleton<ReviewBotMetrics>();
 builder.Services.AddHostedService<ReviewWorker>();
 builder.Services.AddHostedService<DeliveryStoreCleanupService>();
 builder.Services.AddHealthChecks()

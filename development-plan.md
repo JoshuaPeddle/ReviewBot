@@ -1041,12 +1041,12 @@ B. Retries on transient errors: Completed 2026-05-23
 - LLM calls: 2 retries on transient HTTP errors (the SDK's own retry policy where configurable, otherwise a custom retry around the await)
 - Tests: assert the retry count using a counting handler
 
-C. Structured logging:
+C. Structured logging: Completed 2026-05-23 (partial — see notes)
 - LogContext properties on every job: delivery_id, owner, repo, pr_number, installation_id
 - LLM call duration logged at Info
 - LLM tokens (input/output) logged when available
 
-D. Metrics with System.Diagnostics.Metrics:
+D. Metrics with System.Diagnostics.Metrics: Completed 2026-05-23
 - Counter: reviewbot.jobs.processed (status: success|failure|skipped)
 - Histogram: reviewbot.llm.duration_ms (provider: anthropic|openai)
 - Histogram: reviewbot.review.comments_posted
@@ -1077,6 +1077,23 @@ Completion notes for Step 21B:
 - Corrected assumption: the current LLM retry layer is intentionally transport-only. It retries `HttpRequestException` from provider adapters and leaves parser failures on the existing JSON-repair path.
 - Risk register unchanged; no new risks opened by the retry chunk.
 - Stop test passed: `dotnet build ReviewBot.sln -c Release --no-restore` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 Core tests, 22 LLM tests, 28 GitHub tests, 7 Persistence tests, and 27 API tests.
+
+Completion notes for Step 21C (partial — LLM duration logging):
+- The structured logging scope with `DeliveryId`, `Owner`, `Repo`, `PrNumber`, and `InstallationId` was already wired in the worker from Step 18.
+- LLM call duration is now logged at Information level alongside the Step 21D Stopwatch measurement (both added in the same pass).
+- LLM token logging was not added: the current `IReviewLlm.ReviewAsync` returns only `ReviewResult`, and token counts are not part of the contract. Adding them would require breaking the interface to return a richer response type. Deferred; if needed, token logging can be added inside the provider implementations (Anthropic/OpenAI) without changing the Core interface.
+- Corrected assumption: Step 21C's token logging requirement was stated as "when available", which correctly signals it is optional. Tokens are not available through the current seam.
+
+Completion notes for Step 21D (Metrics):
+- Added `ReviewBotMetrics` class to `ReviewBot.Api/Workers/`. It creates a `Meter("ReviewBot")` and three instruments: `reviewbot.jobs.processed` (Counter<long>, status tag), `reviewbot.llm.duration_ms` (Histogram<double>, provider tag), and `reviewbot.review.comments_posted` (Histogram<int>). The class implements `IDisposable` to release the meter.
+- Wired `ReviewBotMetrics` as a singleton in `Program.cs` and injected it into `ReviewWorker`.
+- Changed `ProcessAsync` from `Task` to `Task<JobProcessStatus>` (Success/Skipped enum) so the outer loop can record the correct `status` tag on `reviewbot.jobs.processed`. Exceptions leave the status as "failure" without an additional enum value.
+- The Stopwatch around `llm.ReviewAsync` records both the Information log (satisfying 21C) and the `reviewbot.llm.duration_ms` histogram. Provider tag comes from `config.Model.Provider`, which is already in scope at that point.
+- `reviewbot.review.comments_posted` is recorded after `ApplyOutputConfig` so the count reflects comments that will actually appear in the posted review.
+- Added four worker tests using `MeterListener` covering: success status, skipped status (config disabled), failure status (exception), and LLM duration/comments-posted histograms with correct provider tag and count.
+- Corrected assumption: `MeterListener` is process-global; the listener must be started before creating `ReviewBotMetrics` (before `WorkerFixture`) to ensure `InstrumentPublished` fires for the new meter's instruments. Tests that assert metrics create the listener first, then the fixture.
+- Risk register unchanged; no new risks opened by the metrics chunk.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release --no-restore` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 Core tests, 22 LLM tests, 28 GitHub tests, 7 Persistence tests, and 31 API tests.
 
 ---
 

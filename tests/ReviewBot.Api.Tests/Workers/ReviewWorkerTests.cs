@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
@@ -362,6 +363,209 @@ public class ReviewWorkerTests
         fetchCalls.Should().Be(2);
     }
 
+    [Fact]
+    public async Task MetricsRecordSuccessStatusAfterSuccessfulJob()
+    {
+        var measurements = new List<(string status, long value)>();
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == ReviewBotMetrics.MeterName &&
+                instrument.Name == "reviewbot.jobs.processed")
+            {
+                l.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+        {
+            var status = tags.ToArray().FirstOrDefault(t => t.Key == "status").Value?.ToString() ?? "";
+            measurements.Add((status, value));
+        });
+        listener.Start();
+
+        await using var fixture = new WorkerFixture();
+        var snapshot = CreateSnapshot(CreateFile("src/A.cs"));
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(snapshot);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("Good.", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        // Give the metric recording (which happens after PostAsync returns) a moment to land
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        measurements.Should().ContainSingle()
+            .Which.Should().Be(("success", 1L));
+    }
+
+    [Fact]
+    public async Task MetricsRecordSkippedStatusWhenConfigDisabled()
+    {
+        var measurements = new List<(string status, long value)>();
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == ReviewBotMetrics.MeterName &&
+                instrument.Name == "reviewbot.jobs.processed")
+            {
+                l.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+        {
+            var status = tags.ToArray().FirstOrDefault(t => t.Key == "status").Value?.ToString() ?? "";
+            measurements.Add((status, value));
+        });
+        listener.Start();
+
+        await using var fixture = new WorkerFixture();
+        var configFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                configFetched.SetResult();
+                return ReviewConfig.Default with { Enabled = false };
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await configFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        measurements.Should().ContainSingle()
+            .Which.Should().Be(("skipped", 1L));
+    }
+
+    [Fact]
+    public async Task MetricsRecordFailureStatusWhenJobThrows()
+    {
+        var measurements = new List<(string status, long value)>();
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == ReviewBotMetrics.MeterName &&
+                instrument.Name == "reviewbot.jobs.processed")
+            {
+                l.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+        {
+            var status = tags.ToArray().FirstOrDefault(t => t.Key == "status").Value?.ToString() ?? "";
+            measurements.Add((status, value));
+        });
+        listener.Start();
+
+        await using var fixture = new WorkerFixture();
+        var secondJobPosted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var configCallCount = 0;
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                configCallCount++;
+                return configCallCount == 1
+                    ? Task.FromException<ReviewConfig>(new InvalidOperationException("config fetch failed"))
+                    : Task.FromResult(ReviewConfig.Default);
+            });
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(CreateSnapshot(CreateFile("src/A.cs")));
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("Ok.", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                secondJobPosted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob("delivery-fail"), CancellationToken.None);
+        await fixture.Queue.EnqueueAsync(CreateJob("delivery-ok"), CancellationToken.None);
+        await secondJobPosted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        measurements.Should().HaveCount(2);
+        measurements.Should().ContainSingle(m => m.status == "failure" && m.value == 1L);
+        measurements.Should().ContainSingle(m => m.status == "success" && m.value == 1L);
+    }
+
+    [Fact]
+    public async Task MetricsRecordLlmDurationAndCommentsPostedAfterReview()
+    {
+        var durationMeasurements = new List<(string provider, double value)>();
+        var commentsMeasurements = new List<int>();
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == ReviewBotMetrics.MeterName)
+                l.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<double>((instrument, value, tags, _) =>
+        {
+            if (instrument.Name == "reviewbot.llm.duration_ms")
+            {
+                var provider = tags.ToArray().FirstOrDefault(t => t.Key == "provider").Value?.ToString() ?? "";
+                durationMeasurements.Add((provider, value));
+            }
+        });
+        listener.SetMeasurementEventCallback<int>((instrument, value, tags, _) =>
+        {
+            if (instrument.Name == "reviewbot.review.comments_posted")
+                commentsMeasurements.Add(value);
+        });
+        listener.Start();
+
+        await using var fixture = new WorkerFixture();
+        var snapshot = CreateSnapshot(CreateFile("src/A.cs"));
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(snapshot);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Looks good.",
+                [new InlineComment("src/A.cs", 1, "RIGHT", "Nice.", Severity.Info)]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        durationMeasurements.Should().ContainSingle()
+            .Which.provider.Should().Be("anthropic");
+        durationMeasurements[0].value.Should().BeGreaterThanOrEqualTo(0);
+
+        commentsMeasurements.Should().ContainSingle()
+            .Which.Should().Be(1);
+    }
+
     private static ReviewJob CreateJob(string deliveryId = "delivery-123", string reason = "review_requested")
     {
         return new ReviewJob(
@@ -427,6 +631,7 @@ public class ReviewWorkerTests
             LlmFactory = Substitute.For<IReviewLlmFactory>();
             Llm = Substitute.For<IReviewLlm>();
             ReviewPoster = Substitute.For<IReviewPoster>();
+            Metrics = new ReviewBotMetrics();
 
             TokenProvider.GetTokenAsync(98765, Arg.Any<CancellationToken>())
                 .Returns(new InstallationToken("install-token", DateTimeOffset.UtcNow.AddHours(1)));
@@ -439,6 +644,7 @@ public class ReviewWorkerTests
                 RepoConfigFetcher,
                 LlmFactory,
                 ReviewPoster,
+                Metrics,
                 NullLogger<ReviewWorker>.Instance);
         }
 
@@ -456,6 +662,8 @@ public class ReviewWorkerTests
 
         public IReviewPoster ReviewPoster { get; }
 
+        public ReviewBotMetrics Metrics { get; }
+
         public async Task StartAsync()
         {
             await worker.StartAsync(CancellationToken.None);
@@ -465,6 +673,7 @@ public class ReviewWorkerTests
         {
             await worker.StopAsync(CancellationToken.None);
             worker.Dispose();
+            Metrics.Dispose();
         }
     }
 }

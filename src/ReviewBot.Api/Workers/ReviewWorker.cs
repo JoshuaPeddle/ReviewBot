@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.FileSystemGlobbing;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
@@ -18,6 +19,7 @@ public sealed class ReviewWorker : BackgroundService
     private readonly IRepoConfigFetcher repoConfigFetcher;
     private readonly IReviewLlmFactory llmFactory;
     private readonly IReviewPoster reviewPoster;
+    private readonly ReviewBotMetrics metrics;
     private readonly ILogger<ReviewWorker> logger;
 
     public ReviewWorker(
@@ -27,6 +29,7 @@ public sealed class ReviewWorker : BackgroundService
         IRepoConfigFetcher repoConfigFetcher,
         IReviewLlmFactory llmFactory,
         IReviewPoster reviewPoster,
+        ReviewBotMetrics metrics,
         ILogger<ReviewWorker> logger)
     {
         this.queue = queue ?? throw new ArgumentNullException(nameof(queue));
@@ -35,6 +38,7 @@ public sealed class ReviewWorker : BackgroundService
         this.repoConfigFetcher = repoConfigFetcher ?? throw new ArgumentNullException(nameof(repoConfigFetcher));
         this.llmFactory = llmFactory ?? throw new ArgumentNullException(nameof(llmFactory));
         this.reviewPoster = reviewPoster ?? throw new ArgumentNullException(nameof(reviewPoster));
+        this.metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -53,9 +57,11 @@ public sealed class ReviewWorker : BackgroundService
                     ["InstallationId"] = job.InstallationId,
                 });
 
+                var metricStatus = "failure";
                 try
                 {
-                    await ProcessAsync(job, stoppingToken).ConfigureAwait(false);
+                    var status = await ProcessAsync(job, stoppingToken).ConfigureAwait(false);
+                    metricStatus = status == JobProcessStatus.Skipped ? "skipped" : "success";
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
@@ -71,6 +77,8 @@ public sealed class ReviewWorker : BackgroundService
                         job.Repo,
                         job.PrNumber);
                 }
+
+                metrics.RecordJobProcessed(metricStatus);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -79,7 +87,7 @@ public sealed class ReviewWorker : BackgroundService
         }
     }
 
-    private async Task ProcessAsync(ReviewJob job, CancellationToken ct)
+    private async Task<JobProcessStatus> ProcessAsync(ReviewJob job, CancellationToken ct)
     {
         logger.LogInformation(
             "Processing review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} because of {Reason}",
@@ -102,7 +110,7 @@ public sealed class ReviewWorker : BackgroundService
                 job.Owner,
                 job.Repo,
                 job.PrNumber);
-            return;
+            return JobProcessStatus.Skipped;
         }
 
         if (string.Equals(job.Reason, SynchronizeReason, StringComparison.Ordinal) &&
@@ -114,7 +122,7 @@ public sealed class ReviewWorker : BackgroundService
                 job.Owner,
                 job.Repo,
                 job.PrNumber);
-            return;
+            return JobProcessStatus.Skipped;
         }
 
         var snapshot = await pullRequestFetcher
@@ -132,15 +140,29 @@ public sealed class ReviewWorker : BackgroundService
             snapshot.HeadSha,
             files,
             config);
+
         var llm = llmFactory.Create(config.Model);
+        var sw = Stopwatch.StartNew();
         var result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+        sw.Stop();
+        logger.LogInformation(
+            "LLM review completed in {LlmDurationMs}ms for {DeliveryId}",
+            sw.Elapsed.TotalMilliseconds,
+            job.DeliveryId);
+        metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
+
         result = AppendFilesSkippedNote(result, patchBudgetResult.SkippedPaths);
         result = ApplyOutputConfig(result, config);
+        metrics.RecordCommentsPosted(result.Comments.Count);
 
         await reviewPoster
             .PostAsync(job.Owner, job.Repo, job.PrNumber, snapshot.HeadSha, result, files, installationToken.Token, ct)
             .ConfigureAwait(false);
+
+        return JobProcessStatus.Success;
     }
+
+    private enum JobProcessStatus { Success, Skipped }
 
     private static IReadOnlyList<FileChange> ApplyIgnoreGlobs(
         IReadOnlyList<FileChange> files,
