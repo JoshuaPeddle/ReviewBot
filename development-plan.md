@@ -797,7 +797,7 @@ Completion notes:
 
 ## Phase 6: Reliability
 
-### Step 19: EF Core persistence and idempotency store
+### Step 19: EF Core persistence and idempotency store - Completed 2026-05-23
 
 ```text
 GitHub retries failed webhook deliveries, sometimes after we have already processed them. Add idempotency on top of EF Core, behind an interface so we can swap to Postgres later by changing one provider.
@@ -935,6 +935,18 @@ Update Step 16 endpoint tests:
 
 Deliverable: at-least-once delivery from GitHub becomes effectively-once processing. The only provider-specific code is one branch in TryRecordAsync; Postgres support is a one-line provider swap plus one extra `if` in that method.
 ```
+
+Completion notes:
+- Added `ReviewBot.Core/Idempotency/IDeliveryStore` as the Core-only idempotency contract, keeping EF Core out of Core.
+- Added `ReviewBot.Persistence` EF Core implementation: `DeliveryRecord`, `ReviewBotDbContext`, `EfCoreDeliveryStore`, `AddReviewBotPersistence`, `DeliveryStoreCleanupService`, and an initial SQLite migration for the `Deliveries` table and `ProcessedAt` cleanup index.
+- Added webhook idempotency to `/webhook`: accepted pull-request events call `TryRecordAsync` before enqueueing, duplicate deliveries return `200 OK`, and the queue is not called again.
+- Added persistence tests covering first insert, duplicate insert, 50-way concurrent duplicate insert, cleanup cutoff behavior, checked-in migration application, and cleanup-service hourly retry resilience. Added API endpoint coverage for duplicate deliveries.
+- Fixed the Persistence project area before adding code: removed duplicate `TargetFramework`, `Nullable`, and `ImplicitUsings` properties from the Persistence src/test projects so they inherit root build settings consistently.
+- Corrected assumption: Step 19's migration command depends on Step 20's composition-root DbContext registration. The migration is checked in and verified by a migration-application test here; startup migration/host registration remains part of Step 20.
+- Corrected assumption: SQLite with EF Core 10 cannot translate the planned `DateTimeOffset` cleanup predicate through `ExecuteDeleteAsync`. Cleanup now uses provider-specific raw SQLite `DELETE` SQL, kept inside `EfCoreDeliveryStore` next to the `INSERT OR IGNORE` provider branch.
+- Corrected assumption: `Microsoft.Extensions.TimeProvider.Testing` was not available at `10.0.8`; the Persistence test project pins the resolved `10.1.0` package for `FakeTimeProvider`.
+- Risk register unchanged; no new risks opened by the idempotency-store chunk.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 green Core tests, 20 green LLM tests, 26 green GitHub tests, 22 green API tests, and 7 green Persistence tests.
 
 ### Step 20: Composition root, options validation, health checks, smoke test
 
@@ -1142,6 +1154,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 16; the webhook endpoint now verifies raw-body signatures before parsing, filters events before queueing, and is covered by `WebApplicationFactory` tests around authenticity and queue handoff.
 - No new risks opened by Step 17; job handoff is isolated to `ReviewBot.Core.Jobs`, the bounded-channel backpressure and single-reader behavior are covered by focused tests, and production DI is ready for the Step 16 endpoint.
 - No new risks opened by Step 18; worker orchestration is isolated to `ReviewBot.Api.Workers`, uses interface seams for all GitHub/LLM collaborators, honors repo config before review execution, and has focused tests for branch logic and loop resilience.
+- No new risks opened by Step 19; idempotency persistence is isolated behind `IDeliveryStore`, SQLite-specific insert/delete SQL is confined to `EfCoreDeliveryStore`, migrations are checked in and verified by test, and startup registration/migration remains the planned Step 20 composition task.
 
 ## What is intentionally NOT in v1
 

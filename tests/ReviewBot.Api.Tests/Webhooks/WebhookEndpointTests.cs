@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using ReviewBot.Api.Webhooks;
+using ReviewBot.Core.Idempotency;
 using ReviewBot.Core.Jobs;
 
 namespace ReviewBot.Api.Tests.Webhooks;
@@ -51,7 +52,8 @@ public class WebhookEndpointTests
     public async Task ReviewRequestedForConfiguredBotReturnsAcceptedAndEnqueuesJob()
     {
         using var queue = new CapturingReviewJobQueue();
-        await using var factory = CreateFactory(queue);
+        var store = new CapturingDeliveryStore();
+        await using var factory = CreateFactory(queue, store);
         using var client = factory.CreateClient();
         var payload = CreatePullRequestPayload("review_requested", BotSlug);
         using var request = CreateWebhookRequest(payload);
@@ -67,6 +69,7 @@ public class WebhookEndpointTests
             PrNumber: 42,
             HeadSha: "head-sha-abc",
             Reason: "review_requested"));
+        store.RecordedDeliveryIds.Should().Equal("delivery-123");
     }
 
     [Fact]
@@ -99,7 +102,26 @@ public class WebhookEndpointTests
         queue.Jobs.Should().ContainSingle().Which.Reason.Should().Be("synchronize");
     }
 
-    private static WebApplicationFactory<Program> CreateFactory(CapturingReviewJobQueue queue)
+    [Fact]
+    public async Task DuplicateAcceptedDeliveryReturnsOkWithoutEnqueueingJob()
+    {
+        using var queue = new CapturingReviewJobQueue();
+        var store = new CapturingDeliveryStore(recordAsNew: false);
+        await using var factory = CreateFactory(queue, store);
+        using var client = factory.CreateClient();
+        var payload = CreatePullRequestPayload("review_requested", BotSlug);
+        using var request = CreateWebhookRequest(payload);
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        queue.Jobs.Should().BeEmpty();
+        store.RecordedDeliveryIds.Should().Equal("delivery-123");
+    }
+
+    private static WebApplicationFactory<Program> CreateFactory(
+        CapturingReviewJobQueue queue,
+        IDeliveryStore? deliveryStore = null)
     {
         return new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
@@ -108,7 +130,9 @@ public class WebhookEndpointTests
                 {
                     services.RemoveAll<IReviewJobQueue>();
                     services.RemoveAll<ChannelReviewJobQueue>();
+                    services.RemoveAll<IDeliveryStore>();
                     services.AddSingleton<IReviewJobQueue>(queue);
+                    services.AddSingleton(deliveryStore ?? new CapturingDeliveryStore());
                     services.Configure<WebhookOptions>(options =>
                     {
                         options.Secret = Secret;
@@ -201,6 +225,24 @@ public class WebhookEndpointTests
         public void Dispose()
         {
             jobs.Clear();
+        }
+    }
+
+    private sealed class CapturingDeliveryStore(bool recordAsNew = true) : IDeliveryStore
+    {
+        private readonly List<string> recordedDeliveryIds = [];
+
+        public IReadOnlyList<string> RecordedDeliveryIds => recordedDeliveryIds;
+
+        public Task<bool> TryRecordAsync(string deliveryId, CancellationToken ct)
+        {
+            recordedDeliveryIds.Add(deliveryId);
+            return Task.FromResult(recordAsNew);
+        }
+
+        public Task CleanupAsync(DateTimeOffset olderThan, CancellationToken ct)
+        {
+            throw new NotSupportedException();
         }
     }
 }

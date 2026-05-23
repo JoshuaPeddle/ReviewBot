@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using ReviewBot.Core.Idempotency;
 using ReviewBot.Core.Jobs;
 
 namespace ReviewBot.Api.Webhooks;
@@ -21,6 +22,7 @@ public static class WebhookEndpoint
         HttpRequest request,
         IOptions<WebhookOptions> options,
         IReviewJobQueue queue,
+        IDeliveryStore deliveryStore,
         ILogger<WebhookEndpointMarker> logger,
         CancellationToken ct)
     {
@@ -62,6 +64,12 @@ public static class WebhookEndpoint
         if (!ShouldEnqueue(payload, options.Value.BotSlug))
         {
             return Results.NoContent();
+        }
+
+        if (!await deliveryStore.TryRecordAsync(deliveryId, ct).ConfigureAwait(false))
+        {
+            logger.LogInformation("Skipped duplicate webhook delivery {DeliveryId}", deliveryId);
+            return Results.Ok();
         }
 
         var job = new ReviewJob(
