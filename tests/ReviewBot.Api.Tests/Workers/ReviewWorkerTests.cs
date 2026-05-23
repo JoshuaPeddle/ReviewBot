@@ -7,6 +7,7 @@ using ReviewBot.Api.Workers;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Prompting;
 using ReviewBot.Core.Storage;
 using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
@@ -872,6 +873,196 @@ public class ReviewWorkerTests
 
         postedResult!.Comments.Should().ContainSingle()
             .Which.Confidence.Should().Be(Confidence.High);
+    }
+
+    [Fact]
+    public async Task SelfCritiqueDisabledDoesNotCallRawCompletion()
+    {
+        await using var fixture = new WorkerFixture();
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review complete.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "Maybe issue.", Severity.Warning, Confidence.Medium)]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await fixture.Llm.DidNotReceiveWithAnyArgs()
+            .CompleteRawAsync(default!, default);
+    }
+
+    [Fact]
+    public async Task SelfCritiqueSkipsRawCompletionWhenAllSurvivingCommentsAreHighConfidence()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = true }
+        };
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review complete.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "Certain issue.", Severity.Error, Confidence.High)]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await fixture.Llm.DidNotReceiveWithAnyArgs()
+            .CompleteRawAsync(default!, default);
+    }
+
+    [Fact]
+    public async Task SelfCritiqueRetainsSelectedLowerConfidenceCommentsAndAllHighConfidenceComments()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = true }
+        };
+        ReviewResult? postedResult = null;
+        PromptPayload? critiquePrompt = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Mixed confidence.",
+                [
+                    new InlineComment("src/App.cs", 1, "RIGHT", "High stays.", Severity.Error, Confidence.High),
+                    new InlineComment("src/App.cs", 2, "RIGHT", "Medium kept.", Severity.Warning, Confidence.Medium),
+                    new InlineComment("src/App.cs", 3, "RIGHT", "Low dropped.", Severity.Info, Confidence.Low),
+                    new InlineComment("src/App.cs", 4, "RIGHT", "Medium kept too.", Severity.Warning, Confidence.Medium)
+                ]));
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                critiquePrompt = call.Arg<PromptPayload>();
+                return """{"retained_indices":[0,2],"rationale":"drop low-confidence duplicate"}""";
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Select(c => c.Body)
+            .Should().Equal("High stays.", "Medium kept.", "Medium kept too.");
+        critiquePrompt.Should().NotBeNull();
+        critiquePrompt!.UserPrompt.Should().Contain("0. src/App.cs:2");
+        critiquePrompt.UserPrompt.Should().Contain("1. src/App.cs:3");
+        critiquePrompt.UserPrompt.Should().Contain("2. src/App.cs:4");
+        critiquePrompt.UserPrompt.Should().NotContain("High stays.");
+    }
+
+    [Fact]
+    public async Task SelfCritiqueFailurePostsAllCandidateComments()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = true }
+        };
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Mixed confidence.",
+                [
+                    new InlineComment("src/App.cs", 1, "RIGHT", "High stays.", Severity.Error, Confidence.High),
+                    new InlineComment("src/App.cs", 2, "RIGHT", "Medium survives failure.", Severity.Warning, Confidence.Medium)
+                ]));
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("critique unavailable"));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Select(c => c.Body)
+            .Should().Equal("High stays.", "Medium survives failure.");
+    }
+
+    [Fact]
+    public async Task SelfCritiqueSkipsRawCompletionWhenInitialCommentListIsEmpty()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = true }
+        };
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("No comments.", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await fixture.Llm.DidNotReceiveWithAnyArgs()
+            .CompleteRawAsync(default!, default);
     }
 
     [Fact]

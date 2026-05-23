@@ -2,7 +2,7 @@
 
 ## Current state (v2, 2026-05-23)
 
-Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, and Phase 14 Step 41. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 now has the self-critique prompt/result/parser core in place. Build green, 280 tests passing, 1 skipped Ollama E2E test. Docker image published on tags.
+Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, and Phase 14 Steps 41–42. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Build green, 290 tests passing, 1 skipped Ollama E2E test. Docker image published on tags.
 
 Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 build runners (`DotNetBuildRunner`, `PythonBuildRunner`) are registered in `Program.cs`. `CompositeGroundingProvider` starts the workspace clone concurrently with Tier 1 `ExtractMetadataAsync`; on metadata failure the pre-started workspace is disposed; on clone failure `Build` is null and the review proceeds. `ReviewWorker` has a fast-exit when `files.Count == 0` after filtering (no grounding, no LLM call, no review post). Skip-reason counter (`reviewbot.jobs.skipped`) and grounding duration histogram (`reviewbot.grounding.duration_ms`) are live in `ReviewBotMetrics`.
 
@@ -403,7 +403,7 @@ public sealed record SelfCritiqueResult(IReadOnlyList<int> RetainedIndices, stri
 
 **Stop test:** `dotnet test tests/ReviewBot.Core.Tests/ReviewBot.Core.Tests.csproj` passes: 55 passing, 0 failed.
 
-### Step 42: Worker integration
+### Step 42: Worker integration ✓ Complete
 
 **`ReviewBot.Core/Domain/ReviewConfig.cs`:** Add `bool SelfCritique = false` to `ReviewOutputConfig`.
 
@@ -462,6 +462,23 @@ if (config.Review.SelfCritique && critiqueCandidates.Length > 0)
 - `SelfCritique = true`, empty initial comment list: `CompleteRawAsync` not called.
 
 **E2E scenario** (extends Phase 13 harness): stub LLM primary call with a mixed-confidence response containing one high-confidence and two medium-confidence comments; stub second LLM call (critique) with `{"retained_indices": [0], "rationale": "comment 1 targets unchanged code"}` for the medium-confidence subset; assert the high-confidence comment plus the retained medium-confidence comment are posted.
+
+**Implemented in Step 42:**
+- Added `ReviewOutputConfig.SelfCritique` (default `false`) and mapped `review.self_critique` from `.github/review-bot.yml`.
+- Added `IReviewLlm.CompleteRawAsync(PromptPayload, CancellationToken)` for non-review response schemas. `AnthropicReviewLlm` and `OpenAiReviewLlm` reuse their existing send/retry plumbing for raw completions; `StubReviewLlm` supports deterministic raw responses in tests.
+- Split worker output shaping into candidate-comment filtering (`inline_comments` + `min_confidence`), optional self-critique for surviving lower-confidence comments, and final summary/comment shaping.
+- Worker self-critique keeps high-confidence comments automatically, sends only low/medium candidates to `SelfCritiquePromptBuilder`, parses retained indices with `SelfCritiqueParser.Parse(raw, critiqueCandidates.Length)`, and falls back to the full candidate set on parser failure or LLM exception.
+- Added `phase` to the `reviewbot.llm.duration_ms` histogram; primary calls record `phase=review`, and second-pass calls record `phase=self_critique`.
+- Documented `review.self_critique` and `review.min_confidence` in `docs/configuration.md`.
+- Added focused unit tests for raw-completion adapters, repo-config mapping, worker self-critique gates/fallbacks/retention behavior, and `StubReviewLlm`.
+- Added an E2E scenario using WireMock to return different OpenAI-compatible responses for the primary review and self-critique pass; it asserts one high-confidence comment plus the retained medium-confidence comment are posted.
+
+**Corrected implementation assumptions discovered during Step 42:**
+- The OpenAI-compatible and self-critique calls share the same `/v1/chat/completions` endpoint in E2E, so the WireMock stub must dispatch by request body content rather than by path.
+- The existing LLM duration histogram can expose second-pass cost with a low-cardinality `phase` tag instead of a separate metric instrument.
+- `docs/configuration.md` listed the wrong environment variable for OpenAI `MaxTokens`; corrected it while documenting the new review options.
+
+**Stop test:** `dotnet test --no-restore` passes: 290 passing, 0 failed, 1 skipped Ollama E2E test. First full-suite attempt reproduced the known `DeliveryStoreCleanupServiceTests.ContinuesLoopWhenCleanupFails` flake; the persistence project passed on immediate rerun, and the second full-suite run passed.
 
 ---
 
@@ -799,9 +816,9 @@ builder.Services
 - **Open**: Octokit 14 model classes (`CompareResult`, `GitHubCommitFile`, etc.) have non-virtual properties. NSubstitute cannot mock them. Tests must construct these types directly via their public constructors. Future tests touching new Octokit model types should verify property virtuality before attempting `Substitute.For<T>()`. The `client.Repository.Commit.Compare` API uses singular `Commit`, not `Commits`.
 - **Closed (Phase 13 Step 39)**: E2E WireMock required a configurable GitHub API base URL. Added `GitHubApp.ApiBaseUrl` and used an explicit Octokit `Connection` so configured API URLs are not rewritten to GitHub Enterprise `/api/v3` paths.
 - **Closed (Phase 13 Step 40)**: The baseline E2E plan assumed `pull_request.opened` was reviewable and that inline comments produced separate GitHub review API calls. The implemented tests now match production behavior: `review_requested` triggers first-review coverage, and assertions inspect the single review payload's `comments` array.
-- **Closed (Phase 14 Step 41)**: Self-critique retained-index validation needs the proposed comment count. `SelfCritiqueParser.Parse` now takes `proposedCommentCount`, rejects out-of-range and duplicate indices, and Step 42's integration plan passes `critiqueCandidates.Length`.
+- **Closed (Phase 14 Step 41)**: Self-critique retained-index validation needs the proposed comment count. `SelfCritiqueParser.Parse` now takes `proposedCommentCount`, rejects out-of-range and duplicate indices, and Step 42 worker integration passes `critiqueCandidates.Length`.
 - **Open (future Anthropic E2E)**: The current Anthropic SDK adapter has no configurable base URL. HTTP-mocked E2E scenarios should select the OpenAI-compatible provider through `.github/review-bot.yml`, as Step 40 does, or add Anthropic base URL injection before testing Anthropic over WireMock.
-- **Open (Phase 14 Step 42)**: `IReviewLlm.CompleteRawAsync` is a new interface method. Both `AnthropicReviewLlm` and `OpenAiReviewLlm` must implement it. `StubReviewLlm` in tests needs a stub implementation.
+- **Closed (Phase 14 Step 42)**: `IReviewLlm.CompleteRawAsync` is implemented by Anthropic, OpenAI-compatible, and stub LLMs; worker self-critique uses it only behind `review.self_critique`.
 - **Open (Phase 15)**: Agentic context gives the model influence over which repository files are fetched. Path validation, ignore-glob enforcement, file-size caps, binary rejection, and secret-looking path denial must ship with the feature.
 - **Open (Phase 16)**: Local build/test execution requires SDKs on the worker and executes project code. Keep local-test E2E scenarios behind `[Trait("Category", "RequiresSdk")]` and a CI flag; default Tier 3 E2E should use mocked GitHub Checks/statuses.
 

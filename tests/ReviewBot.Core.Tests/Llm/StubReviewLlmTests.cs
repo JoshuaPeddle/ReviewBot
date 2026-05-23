@@ -1,6 +1,7 @@
 using FluentAssertions;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Prompting;
 
 namespace ReviewBot.Core.Tests.Llm;
 
@@ -47,6 +48,19 @@ public class StubReviewLlmTests
         result.Should().BeEquivalentTo(new ReviewResult(
             Summary: "Reviewed Dynamic review.",
             Comments: []));
+    }
+
+    [Fact]
+    public async Task CompleteRawAsyncReturnsConfiguredRawResponse()
+    {
+        var prompt = new PromptPayload("system", "user");
+        var llm = new StubReviewLlm(
+            _ => new ReviewResult("unused", []),
+            received => $"raw:{received.UserPrompt}");
+
+        var response = await llm.CompleteRawAsync(prompt, CancellationToken.None);
+
+        response.Should().Be("raw:user");
     }
 
     private static ReviewRequest CreateRequest(string prTitle = "Test PR")

@@ -1,0 +1,29 @@
+{
+  "summary": "Found three comments with mixed confidence.",
+  "comments": [
+    {
+      "path": "src/Services/UserService.cs",
+      "line": 12,
+      "side": "RIGHT",
+      "severity": "warning",
+      "confidence": "high",
+      "body": "Console output in service code can leak noisy operational data."
+    },
+    {
+      "path": "src/Services/UserService.cs",
+      "line": 11,
+      "side": "RIGHT",
+      "severity": "warning",
+      "confidence": "medium",
+      "body": "Returning an empty string may be surprising, depending on caller expectations."
+    },
+    {
+      "path": "src/Services/UserService.cs",
+      "line": 13,
+      "side": "RIGHT",
+      "severity": "info",
+      "confidence": "medium",
+      "body": "This looks stylistically unusual but may be fine."
+    }
+  ]
+}

@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Prompting;
 using ReviewBot.Llm.OpenAi;
 
 namespace ReviewBot.Llm.Tests.OpenAi;
@@ -187,6 +188,21 @@ public sealed class OpenAiReviewLlmTests
         request.MaxTokens.Should().Be(1234);
         request.Temperature.Should().Be(0.4f);
         request.UseJsonMode.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task CompleteRawAsyncSendsPromptAndReturnsUnparsedResponse()
+    {
+        var client = new FakeOpenAiChatClient("""{"retained_indices":[0],"rationale":"ok"}""");
+        var llm = CreateLlm(client);
+        var prompt = new PromptPayload("critique system", "critique user");
+
+        var response = await llm.CompleteRawAsync(prompt, CancellationToken.None);
+
+        response.Should().Be("""{"retained_indices":[0],"rationale":"ok"}""");
+        var request = client.Requests.Should().ContainSingle().Subject;
+        request.SystemPrompt.Should().Be("critique system");
+        request.UserMessages.Should().Equal("critique user");
     }
 
     [Fact]

@@ -267,6 +267,24 @@ public class RepoConfigFetcherTests
     }
 
     [Fact]
+    public async Task FetchAsyncMapsSelfCritique()
+    {
+        const string yaml = """
+            review:
+              self_critique: true
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Review.SelfCritique.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task FetchAsyncLogsWarningAndDefaultsLowOnUnknownMinConfidence()
     {
         const string yaml = """

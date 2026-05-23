@@ -57,7 +57,7 @@ Used when a repo's `.github/review-bot.yml` sets `model.provider: openai`. Suppo
 | `ApiKey` | `REVIEWBOT__OpenAi__ApiKey` | `string` | `""` | API key (`sk-...` for OpenAI; required but may be ignored by local providers) |
 | `ModelName` | `REVIEWBOT__OpenAi__ModelName` | `string` | `gpt-5.1` | Model to use |
 | `BaseUrl` | `REVIEWBOT__OpenAi__BaseUrl` | `Uri?` | `null` | Override base URL; `null` uses `api.openai.com`. Set to `http://localhost:11434/v1` for Ollama. |
-| `MaxTokens` | `REVIEWBOT__Anthropic__MaxTokens` | `int` | `4096` | Maximum tokens in the LLM response |
+| `MaxTokens` | `REVIEWBOT__OpenAi__MaxTokens` | `int` | `4096` | Maximum tokens in the LLM response |
 | `Temperature` | `REVIEWBOT__OpenAi__Temperature` | `float` | `0.2` | Sampling temperature |
 | `UseJsonMode` | `REVIEWBOT__OpenAi__UseJsonMode` | `bool` | `true` | Enables OpenAI JSON mode (`response_format: json_object`). Disable for providers that do not support it. |
 
@@ -113,6 +113,15 @@ review:
   # When the total across all files exceeds max_patch_lines * 5, the smallest-diff
   # files are prioritised and the rest are dropped; a note is added to the summary.
   max_patch_lines: 1500
+
+  # Minimum confidence for inline comments to be posted: low, medium, or high.
+  # Default: low (no confidence-based filtering).
+  min_confidence: low
+
+  # Run a second LLM pass over surviving low/medium-confidence comments to remove
+  # likely false positives. High-confidence comments are retained without critique.
+  # Default: false
+  self_critique: false
 
   trigger:
     # Review when the bot is explicitly added as a reviewer.

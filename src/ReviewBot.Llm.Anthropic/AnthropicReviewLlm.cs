@@ -69,6 +69,13 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         throw new LlmResponseException(retryResponse, retryParse.Error);
     }
 
+    public Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(prompt);
+
+        return SendAsync(prompt, [prompt.UserPrompt], ct);
+    }
+
     public IReviewLlm WithModelName(string modelName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modelName);

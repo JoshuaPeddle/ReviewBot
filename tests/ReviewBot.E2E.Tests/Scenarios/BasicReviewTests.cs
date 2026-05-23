@@ -44,6 +44,43 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
     }
 
     [Fact]
+    public async Task ReviewRequestedWithSelfCritiquePostsHighConfidenceAndRetainedMediumComment()
+    {
+        await harness.ResetAsync();
+        ConfigureSuccessfulSelfCritiqueReview(
+            repoConfig: FixtureLoader.ReadText("repo-config-self-critique.yml"),
+            prFiles: FixtureLoader.ReadText("pr-files-dotnet.json"),
+            primaryReviewJson: FixtureLoader.ReadText("llm-response-self-critique-primary.json"),
+            critiqueJson: """{"retained_indices":[0],"rationale":"second medium comment is style-only"}""");
+        using var client = harness.CreateClient();
+        var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
+
+        using var response = await sender.SendPullRequestAsync(
+            FixtureLoader.ReadText("webhook-pr-review-requested.json"),
+            deliveryId: "delivery-e2e-self-critique");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        await WorkerSyncHelper.WaitForRequestAsync(
+            harness.GitHubMock,
+            IsReviewPostPath);
+
+        WorkerSyncHelper.CountMatchingRequests(harness.LlmMock, "POST", IsOpenAiChatPath).Should().Be(2);
+        var critiqueRequestWasSent = harness.LlmMock.LogEntries
+            .Where(entry => entry.RequestMessage is { Path: "/v1/chat/completions" })
+            .Select(entry => entry.RequestMessage!.Body)
+            .Any(body => body != null && body.Contains("retained_indices", StringComparison.Ordinal));
+        critiqueRequestWasSent.Should().BeTrue();
+
+        using var reviewPayload = GetSingleRequestJson(harness.GitHubMock, "POST", IsReviewPostPath);
+        var comments = reviewPayload.RootElement.GetProperty("comments").EnumerateArray().ToArray();
+        comments.Should().HaveCount(2);
+        comments.Select(comment => comment.GetProperty("body").GetString())
+            .Should().Equal(
+                "Console output in service code can leak noisy operational data.",
+                "Returning an empty string may be surprising, depending on caller expectations.");
+    }
+
+    [Fact]
     public async Task ReviewRequestedIsIdempotentForDuplicateDelivery()
     {
         await harness.ResetAsync();
@@ -119,6 +156,22 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         StubPullRequestFiles(prFiles);
         StubDotNetGrounding(headSha);
         StubOpenAiReview(llmReviewJson);
+        StubReviewPost();
+    }
+
+    private void ConfigureSuccessfulSelfCritiqueReview(
+        string repoConfig,
+        string prFiles,
+        string primaryReviewJson,
+        string critiqueJson,
+        string headSha = HeadSha)
+    {
+        StubInstallationToken();
+        StubRepoConfig(repoConfig, headSha);
+        StubPullRequest(headSha);
+        StubPullRequestFiles(prFiles);
+        StubDotNetGrounding(headSha);
+        StubOpenAiReviewWithSelfCritique(primaryReviewJson, critiqueJson);
         StubReviewPost();
     }
 
@@ -260,6 +313,25 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
                 .WithStatusCode(200)
                 .WithHeader("Content-Type", "application/json")
                 .WithBody(OpenAiChatResponse(reviewJson)));
+    }
+
+    private void StubOpenAiReviewWithSelfCritique(string primaryReviewJson, string critiqueJson)
+    {
+        harness.LlmMock
+            .Given(Request.Create()
+                .WithPath("/v1/chat/completions")
+                .UsingPost())
+            .RespondWith(Response.Create()
+                .WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody(request =>
+                {
+                    var body = request.Body ?? string.Empty;
+                    var response = body.Contains("retained_indices", StringComparison.Ordinal)
+                        ? critiqueJson
+                        : primaryReviewJson;
+                    return OpenAiChatResponse(response);
+                }));
     }
 
     private void StubReviewPost()

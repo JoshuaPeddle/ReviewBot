@@ -45,8 +45,11 @@ public sealed class ReviewBotMetrics : IDisposable
     public void RecordSkip(string reason) =>
         jobsSkipped.Add(1, new KeyValuePair<string, object?>("reason", reason));
 
-    public void RecordLlmDuration(double durationMs, string provider) =>
-        llmDurationMs.Record(durationMs, new KeyValuePair<string, object?>("provider", provider));
+    public void RecordLlmDuration(double durationMs, string provider, string phase = "review") =>
+        llmDurationMs.Record(
+            durationMs,
+            new KeyValuePair<string, object?>("provider", provider),
+            new KeyValuePair<string, object?>("phase", phase));
 
     public void RecordCommentsPosted(int count) =>
         reviewCommentsPosted.Record(count);

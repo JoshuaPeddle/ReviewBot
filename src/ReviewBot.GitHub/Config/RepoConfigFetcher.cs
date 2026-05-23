@@ -167,7 +167,8 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
                 sha,
                 path),
             trigger,
-            ParseMinConfidence(fileConfig.Review?.MinConfidence, owner, repo, sha, path));
+            ParseMinConfidence(fileConfig.Review?.MinConfidence, owner, repo, sha, path),
+            fileConfig.Review?.SelfCritique ?? defaults.Review.SelfCritique);
 
         var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
 
@@ -361,6 +362,8 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public TriggerConfigFile? Trigger { get; set; }
 
         public string? MinConfidence { get; set; }
+
+        public bool? SelfCritique { get; set; }
     }
 
     private sealed class TriggerConfigFile

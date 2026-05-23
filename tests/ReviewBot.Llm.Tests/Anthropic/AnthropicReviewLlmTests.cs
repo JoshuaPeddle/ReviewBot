@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Prompting;
 using ReviewBot.Llm.Anthropic;
 
 namespace ReviewBot.Llm.Tests.Anthropic;
@@ -160,6 +161,21 @@ public sealed class AnthropicReviewLlmTests
 
         client.Requests.Should().ContainSingle()
             .Which.ModelName.Should().Be("claude-override");
+    }
+
+    [Fact]
+    public async Task CompleteRawAsyncSendsPromptAndReturnsUnparsedResponse()
+    {
+        var client = new FakeAnthropicClient("""{"retained_indices":[0],"rationale":"ok"}""");
+        var llm = CreateLlm(client);
+        var prompt = new PromptPayload("critique system", "critique user");
+
+        var response = await llm.CompleteRawAsync(prompt, CancellationToken.None);
+
+        response.Should().Be("""{"retained_indices":[0],"rationale":"ok"}""");
+        var request = client.Requests.Should().ContainSingle().Subject;
+        request.SystemPrompt.Should().Be("critique system");
+        request.UserMessages.Should().Equal("critique user");
     }
 
     private static AnthropicReviewLlm CreateLlm(FakeAnthropicClient client) =>

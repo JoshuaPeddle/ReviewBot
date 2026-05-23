@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Prompting;
 using ReviewBot.Core.Storage;
 using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
@@ -291,7 +292,10 @@ public sealed class ReviewWorker : BackgroundService
         metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
 
         result = AppendFilesSkippedNote(result, patchBudgetResult.SkippedPaths);
-        result = ApplyOutputConfig(result, config);
+        var candidateComments = FilterCandidateComments(result, config);
+        candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
+            .ConfigureAwait(false);
+        result = ApplyOutputConfig(result, candidateComments, config);
         metrics.RecordCommentsPosted(result.Comments.Count);
 
         await reviewPoster
@@ -452,25 +456,89 @@ public sealed class ReviewWorker : BackgroundService
         return new ReviewResult(summary, result.Comments);
     }
 
-    private static ReviewResult ApplyOutputConfig(ReviewResult result, ReviewConfig config)
+    private async Task<IReadOnlyList<InlineComment>> ApplySelfCritiqueAsync(
+        IReviewLlm llm,
+        IReadOnlyList<FileChange> files,
+        IReadOnlyList<InlineComment> candidateComments,
+        ReviewConfig config,
+        CancellationToken ct)
     {
-        var summary = config.Review.Summary ? result.Summary : string.Empty;
+        if (!config.Review.SelfCritique || candidateComments.Count == 0)
+        {
+            return candidateComments;
+        }
 
-        IReadOnlyList<InlineComment> comments;
+        var highConfidence = candidateComments
+            .Where(c => c.Confidence == Confidence.High)
+            .ToArray();
+        var critiqueCandidates = candidateComments
+            .Where(c => c.Confidence != Confidence.High)
+            .ToArray();
+
+        if (critiqueCandidates.Length == 0)
+        {
+            return candidateComments;
+        }
+
+        var critiquePayload = SelfCritiquePromptBuilder.Build(files, critiqueCandidates);
+        try
+        {
+            var critiqueSw = Stopwatch.StartNew();
+            var rawCritique = await llm.CompleteRawAsync(critiquePayload, ct).ConfigureAwait(false);
+            critiqueSw.Stop();
+            metrics.RecordLlmDuration(
+                critiqueSw.Elapsed.TotalMilliseconds,
+                config.Model.Provider,
+                "self_critique");
+
+            var critique = SelfCritiqueParser.Parse(rawCritique, critiqueCandidates.Length);
+            if (critique is null)
+            {
+                logger.LogWarning("Self-critique response was invalid; using full initial comment set");
+                return candidateComments;
+            }
+
+            var retained = critique.RetainedIndices
+                .Select(i => critiqueCandidates[i])
+                .ToArray();
+            logger.LogDebug(
+                "Self-critique retained {Retained}/{Total} lower-confidence comments. Rationale: {Rationale}",
+                retained.Length,
+                critiqueCandidates.Length,
+                critique.Rationale);
+
+            return highConfidence.Concat(retained).ToArray();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Self-critique failed; using full initial comment set");
+            return candidateComments;
+        }
+    }
+
+    private static IReadOnlyList<InlineComment> FilterCandidateComments(ReviewResult result, ReviewConfig config)
+    {
         if (!config.Review.InlineComments)
         {
-            comments = Array.Empty<InlineComment>();
+            return Array.Empty<InlineComment>();
         }
-        else if (config.Review.MinConfidence == Confidence.Low)
+
+        if (config.Review.MinConfidence == Confidence.Low)
         {
-            comments = result.Comments;
+            return result.Comments;
         }
-        else
-        {
-            comments = result.Comments
-                .Where(c => c.Confidence >= config.Review.MinConfidence)
-                .ToArray();
-        }
+
+        return result.Comments
+            .Where(c => c.Confidence >= config.Review.MinConfidence)
+            .ToArray();
+    }
+
+    private static ReviewResult ApplyOutputConfig(
+        ReviewResult result,
+        IReadOnlyList<InlineComment> comments,
+        ReviewConfig config)
+    {
+        var summary = config.Review.Summary ? result.Summary : string.Empty;
 
         return summary == result.Summary && ReferenceEquals(comments, result.Comments)
             ? result
