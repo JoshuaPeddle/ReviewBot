@@ -621,7 +621,7 @@ Completion notes:
 
 ## Phase 5: HTTP and worker
 
-### Step 15: Webhook signature validator
+### Step 15: Webhook signature validator - Completed 2026-05-23
 
 ```text
 In ReviewBot.Api/Webhooks/, create `WebhookSignatureValidator`.
@@ -644,6 +644,14 @@ Tests in ReviewBot.Api.Tests/Webhooks/WebhookSignatureValidatorTests.cs:
 
 Deliverable: small, exhaustively tested function. The API endpoint will call it on every webhook request.
 ```
+
+Completion notes:
+- Added `ReviewBot.Api/Webhooks/WebhookSignatureValidator` as a pure static validator for GitHub's `X-Hub-Signature-256` value. It requires the `sha256=` prefix, validates the exact SHA-256 hex length, decodes hex without throwing on malformed input, computes the HMAC-SHA256 over the raw body with the configured secret, and compares with `CryptographicOperations.FixedTimeEquals`.
+- Added `ReviewBot.Api.Tests/Webhooks/WebhookSignatureValidatorTests` covering the planned known-HMAC success case, wrong secret, missing headers, wrong prefix, tampered body, wrong signature length, and non-hex signatures. API tests now contain 9 green tests.
+- Fixed the API project area before adding code: removed duplicate `TargetFramework`, `Nullable`, and `ImplicitUsings` properties from `ReviewBot.Api.csproj` and `ReviewBot.Api.Tests.csproj` because those are already inherited from root `Directory.Build.props`.
+- Corrected assumption: this target framework/project surface did not expose `Convert.TryFromHexString`, so the validator uses a small local hex decoder to keep invalid signatures on the normal `false` path.
+- Risk register unchanged; no new risks opened by the signature-validator chunk.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests, 20 green LLM tests, 25 green GitHub tests, and 9 green API tests. The Persistence test assembly still contains no tests and VSTest reports that as informational while returning success.
 
 ### Step 16: Webhook endpoint and event filter
 
@@ -1102,6 +1110,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 12; PR fetching is isolated to `ReviewBot.GitHub.Pulls`, uses the planned Octokit dependency, and has focused tests for pagination and the default max-file cap.
 - Closed 2026-05-23: Step 13's line-filter defense is implemented in `ReviewPoster` and covered by focused tests. Octokit's typed review model does not currently fit ReviewBot's `line`/`side` payload, so the raw authenticated Octokit connection is used in one isolated method.
 - No new risks opened by Step 14; repo config fetching/parsing is isolated to `ReviewBot.GitHub.Config`, malformed or absent config falls back to defaults, and provider validation is covered by focused tests.
+- No new risks opened by Step 15; webhook signature validation is isolated to `ReviewBot.Api.Webhooks` and covered by focused HMAC, malformed-header, and tamper tests.
 
 ## What is intentionally NOT in v1
 
