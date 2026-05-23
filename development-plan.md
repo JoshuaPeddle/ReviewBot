@@ -2,7 +2,7 @@
 
 ## Current state (v2, 2026-05-23)
 
-Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, Phase 14 Steps 41–42, Phase 15 Steps 43–44, and Phase 16 Step 45. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Phase 15 agentic context is wired end-to-end behind `review.agentic_context`: the primary LLM can request bounded repository files, the worker validates and filters paths, GitHub Contents fetches text files with a byte cap, and one final LLM pass produces the posted result. Phase 16 checks grounding now reads completed GitHub Checks and commit statuses behind `grounding.tests`, carries them through grounding, and exposes them in the review prompt without cloning or executing code. `dotnet test --no-restore` passes: 322 passing, 0 failed, 1 skipped Ollama E2E test. Docker image published on tags.
+Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, Phase 14 Steps 41–42, Phase 15 Steps 43–44, and Phase 16 Steps 45–46. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Phase 15 agentic context is wired end-to-end behind `review.agentic_context`: the primary LLM can request bounded repository files, the worker validates and filters paths, GitHub Contents fetches text files with a byte cap, and one final LLM pass produces the posted result. Phase 16 checks grounding now reads completed GitHub Checks and commit statuses behind `grounding.tests`, carries them through grounding, and exposes them in the review prompt without cloning or executing code. `DotNetTestRunner` is implemented and registered; running `dotnet test --no-build --no-restore -c Release`, parsing the VSTest aggregate summary line, and returning timed-out or cancelled results safely. `dotnet test --no-restore` passes: 328 passing, 0 failed, 1 skipped Ollama E2E test. Docker image published on tags.
 
 Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 build runners (`DotNetBuildRunner`, `PythonBuildRunner`) are registered in `Program.cs`. `CompositeGroundingProvider` starts the workspace clone concurrently with Tier 1 `ExtractMetadataAsync`; on metadata failure the pre-started workspace is disposed; on clone failure `Build` is null and the review proceeds. `ReviewWorker` has a fast-exit when `files.Count == 0` after filtering (no grounding, no LLM call, no review post). Skip-reason counter (`reviewbot.jobs.skipped`) and grounding duration histogram (`reviewbot.grounding.duration_ms`) are live in `ReviewBotMetrics`.
 
@@ -762,7 +762,7 @@ bool LocalTests,
 
 **Stop test:** `dotnet test --no-restore` passes: 322 passing, 0 failed, 1 skipped Ollama E2E test. Targeted suites also passed during implementation: Core (65), GitHub (54), Grounding (96), and API (58).
 
-### Step 46: .NET test runner
+### Step 46: .NET test runner ✓ Complete
 
 **`ReviewBot.Grounding/Languages/DotNet/DotNetTestRunner.cs`:** Implements `ITestRunner`. `LanguageId = "dotnet"`.
 
@@ -800,9 +800,20 @@ If checks/tests are available but language metadata is null, `PromptBuilder` sho
 - External cancellation: rethrows `OperationCanceledException`.
 
 **Tests** in `ReviewBot.Core.Tests/Prompting/PromptBuilderTests.cs`:
-- Grounding with passing tests: prompt contains "Tests: PASSED".
-- Grounding with failing tests: prompt contains "Tests: FAILED".
-- Grounding with null tests: tests line absent from prompt.
+- Grounding with passing tests: prompt contains "Tests: PASSED". ✓ (pre-existing)
+- Grounding with failing tests: prompt contains "Tests: FAILED". ✓ (added in Step 46)
+- Grounding with null tests: tests line absent from prompt. ✓ (added in Step 46)
+
+**Implemented in Step 46:**
+- Added `DotNetTestRunner` in `src/ReviewBot.Grounding/Languages/DotNet/DotNetTestRunner.cs`. Runs `dotnet test --no-build --no-restore -c Release`; parses the VSTest aggregate summary line with a compiled regex (uses the last match for multi-project solutions); returns `TestResult(0, 0, 0, "dotnet test timed out")` on internal timeout; rethrows external `OperationCanceledException`; truncates output to 4096 chars. Output truncation and regex capture groups order (Groups[1]=Failed, Groups[2]=Passed, Groups[3]=Skipped) match the `(?:Passed|Failed)! - Failed:(\d+), Passed:(\d+), Skipped:(\d+)` pattern.
+- Added `DotNetTestRunnerTests` with 4 integration tests: passing tests (pre-built xunit project), failing test (assertion fails), 1-second timeout (no exception), external cancellation (propagates). Tests pre-build the fixture project so the runner can use `--no-build --no-restore`.
+- Added `GroundingWithFailingLocalTestsIncludesFailedLine` and `GroundingWithNullTestsOmitsTestsLine` to `PromptBuilderTests`.
+
+**Corrected implementation assumptions discovered during Step 46:**
+- The `PromptBuilder` `Tests: PASSED`/`FAILED` and `null tests → absent` prompt tests were partially already covered by `GroundingWithPassingLocalTestsIncludesTestsLine` and `GroundingWithGitHubChecksIncludesVerificationWithoutLanguage`. Step 46 added the missing `Tests: FAILED` (local) and null-Tests-with-language cases.
+- Pre-building the fixture project in `CreateAndBuildTestProjectAsync` is necessary because the runner uses `--no-build`; adding packages to the test project's csproj with explicit versions (not central management) avoids conflicts with the host repo's `Directory.Packages.props`.
+
+**Stop test:** `dotnet test --no-restore` passes: 328 passing, 0 failed, 1 skipped Ollama E2E test. Targeted suite: Grounding.Tests 100 passing (up from 96).
 
 ### Step 47: Python test runner
 

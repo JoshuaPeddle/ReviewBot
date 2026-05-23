@@ -437,6 +437,41 @@ public interface IReviewStore
         payload.SystemPrompt.Should().Contain("Tests output:");
     }
 
+    [Fact]
+    public void GroundingWithFailingLocalTestsIncludesFailedLine()
+    {
+        var request = CreateRequest() with
+        {
+            Grounding = new GroundingContext(
+                Language: new LanguageMetadata("dotnet", "10.0", null, []),
+                Build: new BuildResult(true, 0, 0, "ok"),
+                Tests: new TestResult(Passed: 38, Failed: 4, Skipped: 0, Output: "test output"))
+        };
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.SystemPrompt.Should().Contain("- Tests: FAILED (38 passed, 4 failed, 0 skipped)");
+        payload.SystemPrompt.Should().Contain("existing behavior may have regressed");
+    }
+
+    [Fact]
+    public void GroundingWithNullTestsOmitsTestsLine()
+    {
+        var request = CreateRequest() with
+        {
+            Grounding = new GroundingContext(
+                Language: new LanguageMetadata("dotnet", "10.0", null, []),
+                Build: new BuildResult(true, 0, 0, "ok"),
+                Tests: null)
+        };
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.SystemPrompt.Should().Contain("## Project context");
+        payload.SystemPrompt.Should().NotContain("Tests:");
+        payload.SystemPrompt.Should().NotContain("Checks:");
+    }
+
     private static ReviewRequest CreateRequest(
         string title = "Add review bot",
         string body = "Please review the changes.",

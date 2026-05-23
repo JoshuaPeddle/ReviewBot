@@ -15,6 +15,7 @@ COPY ["src/ReviewBot.GitHub/ReviewBot.GitHub.csproj", "src/ReviewBot.GitHub/"]
 COPY ["src/ReviewBot.Llm.Anthropic/ReviewBot.Llm.Anthropic.csproj", "src/ReviewBot.Llm.Anthropic/"]
 COPY ["src/ReviewBot.Llm.OpenAi/ReviewBot.Llm.OpenAi.csproj", "src/ReviewBot.Llm.OpenAi/"]
 COPY ["src/ReviewBot.Persistence/ReviewBot.Persistence.csproj", "src/ReviewBot.Persistence/"]
+COPY ["src/ReviewBot.Grounding/ReviewBot.Grounding.csproj", "src/ReviewBot.Grounding/"]
 RUN dotnet restore "src/ReviewBot.Api/ReviewBot.Api.csproj"
 COPY . .
 WORKDIR "/src/src/ReviewBot.Api"
