@@ -6,7 +6,8 @@ namespace ReviewBot.Llm.OpenAi;
 
 internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
 {
-    private readonly ChatClient client;
+    private readonly ApiKeyCredential credential;
+    private readonly OpenAIClientOptions? clientOptions;
 
     public OpenAiSdkChatClient(OpenAiLlmOptions options)
     {
@@ -17,16 +18,18 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
             throw new ArgumentException("OpenAI API key must be configured.", nameof(options));
         }
 
-        client = new ChatClient(
-            model: options.ModelName,
-            credential: new ApiKeyCredential(options.ApiKey),
-            options: CreateClientOptions(options.BaseUrl));
+        credential = new ApiKeyCredential(options.ApiKey);
+        clientOptions = CreateClientOptions(options.BaseUrl);
     }
 
     public async Task<string> CompleteChatAsync(OpenAiChatRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        var client = new ChatClient(
+            model: request.ModelName,
+            credential: credential,
+            options: clientOptions);
         var messages = request.UserMessages
             .Select<string, ChatMessage>(userMessage => new UserChatMessage(userMessage))
             .Prepend(new SystemChatMessage(request.SystemPrompt))

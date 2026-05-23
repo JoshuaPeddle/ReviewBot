@@ -373,7 +373,7 @@ Completion notes:
 - Risk register updated with the JSON-mode compatibility risk for OpenAI-compatible local/proxy providers and the existing `UseJsonMode` mitigation.
 - Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests and 12 green LLM tests. The Api/GitHub/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
-### Step 9: LLM provider factory
+### Step 9: LLM provider factory - Completed 2026-05-23
 
 ```text
 In ReviewBot.Core/Llm/, create `ReviewLlmFactory`:
@@ -405,6 +405,15 @@ Tests in ReviewBot.Llm.Tests/ReviewLlmFactoryTests.cs:
 
 Deliverable: a single seam where the worker says "give me an LLM for this config" and gets the right one.
 ```
+
+Completion notes:
+- Added `IReviewLlmFactory`/`ReviewLlmFactory` and `AddReviewLlmFactory` in Core. The factory selects lightweight `ReviewLlmProviderRegistration` entries by `ModelConfig.Provider` case-insensitively, resolves only the selected provider from DI, applies the per-call `ModelConfig.Name` override, and reports supported provider names when config references an unknown provider.
+- Added `IConfigurableReviewLlm` so Core can own provider selection without referencing the Anthropic or OpenAI implementation projects. Both provider implementations now expose their provider name and a `WithModelName` override method.
+- Fixed the provider area before building the factory: `OpenAiSdkChatClient` previously bound the model name into the SDK `ChatClient` at construction time, which made per-call model selection impossible. The OpenAI request shape now carries `ModelName`, and the SDK adapter constructs the `ChatClient` for the requested model.
+- Added `ReviewBot.Llm.Tests/ReviewLlmFactoryTests` covering Anthropic selection, OpenAI selection, unknown-provider errors, DI registration, lazy selected-provider resolution, and substitute-based model override behavior. Expanded provider tests to assert overridden model names reach the outbound Anthropic/OpenAI request records.
+- Corrected assumption: putting the factory in Core cannot mean Core directly knows about `AnthropicReviewLlm` or `OpenAiReviewLlm`, because provider projects depend on Core. The provider-agnostic `IConfigurableReviewLlm` registration keeps the dependency direction intact while preserving test substitutes.
+- Risk register unchanged; no new risks opened by the provider-factory chunk.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests and 20 green LLM tests. The Api/GitHub/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
 ---
 
@@ -1043,6 +1052,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 6; the LLM contract and stub are isolated to Core and covered by focused behavior tests.
 - Open: `Anthropic.SDK` 5.10.0 is an unofficial Anthropic client. Step 7 mitigates this by confining SDK usage to `AnthropicSdkClient`; revisit the adapter if an official Anthropic .NET SDK becomes available or if the package changes the Messages API surface.
 - Open: OpenAI-compatible providers such as Ollama, vLLM, and LM Studio may not all support OpenAI JSON mode exactly like api.openai.com. Step 8 mitigates this with the bindable `OpenAiLlmOptions.UseJsonMode` switch and keeps SDK-specific request construction isolated in `OpenAiSdkChatClient`.
+- No new risks opened by Step 9; provider selection is isolated behind Core-owned abstractions, unused providers are not resolved during selection, and per-call model override behavior is covered by factory and provider tests.
 
 ## What is intentionally NOT in v1
 

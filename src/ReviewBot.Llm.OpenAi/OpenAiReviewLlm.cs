@@ -5,9 +5,10 @@ using ReviewBot.Core.Prompting;
 
 namespace ReviewBot.Llm.OpenAi;
 
-public sealed class OpenAiReviewLlm : IReviewLlm
+public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
 {
     private const string RetryInstruction = "Your previous response was not valid JSON. Respond again with ONLY the JSON object.";
+    public string ProviderName => "openai";
 
     private readonly OpenAiLlmOptions options;
     private readonly ILogger<OpenAiReviewLlm> logger;
@@ -56,11 +57,22 @@ public sealed class OpenAiReviewLlm : IReviewLlm
         throw new LlmResponseException(retryResponse, retryParse.Error);
     }
 
+    public IReviewLlm WithModelName(string modelName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelName);
+
+        return new OpenAiReviewLlm(
+            options with { ModelName = modelName },
+            logger,
+            client);
+    }
+
     private Task<string> SendAsync(PromptPayload prompt, IReadOnlyList<string> userMessages, CancellationToken ct) =>
         client.CompleteChatAsync(
             new OpenAiChatRequest(
                 SystemPrompt: prompt.SystemPrompt,
                 UserMessages: userMessages,
+                ModelName: options.ModelName,
                 MaxTokens: options.MaxTokens,
                 Temperature: options.Temperature,
                 UseJsonMode: options.UseJsonMode),

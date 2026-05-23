@@ -17,6 +17,10 @@ public static class DependencyInjection
 
         services.AddSingleton(options);
         services.AddSingleton<AnthropicReviewLlm>();
+        services.AddSingleton(new ReviewLlmProviderRegistration(
+            "anthropic",
+            provider => provider.GetRequiredService<AnthropicReviewLlm>()));
+        services.AddSingleton<IConfigurableReviewLlm>(provider => provider.GetRequiredService<AnthropicReviewLlm>());
         services.AddSingleton<IReviewLlm>(provider => provider.GetRequiredService<AnthropicReviewLlm>());
 
         return services;

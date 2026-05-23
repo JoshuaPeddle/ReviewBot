@@ -5,9 +5,10 @@ using ReviewBot.Core.Prompting;
 
 namespace ReviewBot.Llm.Anthropic;
 
-public sealed class AnthropicReviewLlm : IReviewLlm
+public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
 {
     private const string RetryInstruction = "Your previous response was not valid JSON. Respond again with ONLY the JSON object.";
+    public string ProviderName => "anthropic";
 
     private readonly AnthropicLlmOptions options;
     private readonly ILogger<AnthropicReviewLlm> logger;
@@ -57,6 +58,16 @@ public sealed class AnthropicReviewLlm : IReviewLlm
         }
 
         throw new LlmResponseException(retryResponse, retryParse.Error);
+    }
+
+    public IReviewLlm WithModelName(string modelName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelName);
+
+        return new AnthropicReviewLlm(
+            options with { ModelName = modelName },
+            logger,
+            client);
     }
 
     private Task<string> SendAsync(PromptPayload prompt, IReadOnlyList<string> userMessages, CancellationToken ct) =>

@@ -41,6 +41,7 @@ public sealed class OpenAiReviewLlmTests
                 Severity: Severity.Warning));
         client.Requests.Should().ContainSingle()
             .Which.UserMessages.Should().ContainSingle();
+        client.Requests[0].ModelName.Should().Be("gpt-test");
     }
 
     [Fact]
@@ -115,6 +116,7 @@ public sealed class OpenAiReviewLlmTests
         using var provider = services.BuildServiceProvider();
 
         provider.GetRequiredService<IReviewLlm>().Should().BeOfType<OpenAiReviewLlm>();
+        provider.GetRequiredService<IConfigurableReviewLlm>().Should().BeOfType<OpenAiReviewLlm>();
         var options = provider.GetRequiredService<OpenAiLlmOptions>();
         options.ModelName.Should().Be("gpt-test");
         options.BaseUrl.Should().Be(new Uri("http://localhost:11434/v1"));
@@ -155,9 +157,28 @@ public sealed class OpenAiReviewLlmTests
         await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
 
         var request = client.Requests.Should().ContainSingle().Subject;
+        request.ModelName.Should().Be("gpt-test");
         request.MaxTokens.Should().Be(1234);
         request.Temperature.Should().Be(0.4f);
         request.UseJsonMode.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task WithModelNameUsesOverrideForRequests()
+    {
+        var client = new FakeOpenAiChatClient(
+            """
+            {
+              "summary": "Done.",
+              "comments": []
+            }
+            """);
+        var llm = CreateLlm(client).WithModelName("gpt-override");
+
+        await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        client.Requests.Should().ContainSingle()
+            .Which.ModelName.Should().Be("gpt-override");
     }
 
     private static OpenAiReviewLlm CreateLlm(FakeOpenAiChatClient client) =>

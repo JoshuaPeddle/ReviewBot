@@ -17,6 +17,10 @@ public static class DependencyInjection
 
         services.AddSingleton(options);
         services.AddSingleton<OpenAiReviewLlm>();
+        services.AddSingleton(new ReviewLlmProviderRegistration(
+            "openai",
+            provider => provider.GetRequiredService<OpenAiReviewLlm>()));
+        services.AddSingleton<IConfigurableReviewLlm>(provider => provider.GetRequiredService<OpenAiReviewLlm>());
         services.AddSingleton<IReviewLlm>(provider => provider.GetRequiredService<OpenAiReviewLlm>());
 
         return services;

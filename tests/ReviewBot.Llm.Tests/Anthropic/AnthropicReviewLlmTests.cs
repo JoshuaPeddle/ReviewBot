@@ -41,6 +41,7 @@ public sealed class AnthropicReviewLlmTests
                 Severity: Severity.Warning));
         client.Requests.Should().ContainSingle()
             .Which.UserMessages.Should().ContainSingle();
+        client.Requests[0].ModelName.Should().Be("claude-test");
     }
 
     [Fact]
@@ -113,7 +114,26 @@ public sealed class AnthropicReviewLlmTests
         using var provider = services.BuildServiceProvider();
 
         provider.GetRequiredService<IReviewLlm>().Should().BeOfType<AnthropicReviewLlm>();
+        provider.GetRequiredService<IConfigurableReviewLlm>().Should().BeOfType<AnthropicReviewLlm>();
         provider.GetRequiredService<AnthropicLlmOptions>().ModelName.Should().Be("claude-test");
+    }
+
+    [Fact]
+    public async Task WithModelNameUsesOverrideForRequests()
+    {
+        var client = new FakeAnthropicClient(
+            """
+            {
+              "summary": "Done.",
+              "comments": []
+            }
+            """);
+        var llm = CreateLlm(client).WithModelName("claude-override");
+
+        await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        client.Requests.Should().ContainSingle()
+            .Which.ModelName.Should().Be("claude-override");
     }
 
     private static AnthropicReviewLlm CreateLlm(FakeAnthropicClient client) =>
