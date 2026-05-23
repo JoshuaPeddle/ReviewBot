@@ -1099,7 +1099,7 @@ Completion notes for Step 21D (Metrics):
 
 ## Phase 7: Polish
 
-### Step 22: Documentation, sample config, App registration walkthrough
+### Step 22: Documentation, sample config, App registration walkthrough - Completed 2026-05-23
 
 ```text
 Create the following docs at the repo root:
@@ -1139,6 +1139,17 @@ Verify the README's quick-start by following it on a clean machine (or a fresh c
 
 Deliverable: a stranger could install and run this without reading the code.
 ```
+
+Completion notes:
+- Added `README.md` at the repo root with an overview, ASCII architecture diagram, quick-start env-var instructions, per-repo YAML example, LLM-provider swap examples (Anthropic, OpenAI, Ollama, vLLM), Docker run snippet, and a troubleshooting section covering the most common failure modes (signature mismatch, wrong bot slug, 422 line validation, unknown provider, high memory).
+- Added `docs/github-app-setup.md` with a numbered walkthrough: creating the App, setting repository permissions (Contents read, Pull requests read/write, Metadata read), subscribing to the Pull request event, noting the App ID, generating and exporting the private key PEM, installing on a repo or org, confirming the bot slug, and verifying webhook delivery in the GitHub App Advanced tab.
+- Added `docs/configuration.md` with a full option table for every section (GitHubApp, Webhook, Anthropic, OpenAi, Persistence, Worker), a complete annotated per-repo YAML reference, EF Core migration commands, and a step-by-step guide for swapping SQLite for PostgreSQL.
+- Added `.github/review-bot.example.yml` as a fully annotated copy-paste template for per-repo configuration.
+- Added `CHANGELOG.md` with a `0.1.0` entry summarising all v1 features.
+- Added `LICENSE` (MIT).
+- Updated `.github/workflows/ci.yml` to add a `docker` job that runs after the `build` job, triggers only on tags (`refs/tags/*`), and publishes a multi-arch image to GHCR using `docker/build-push-action` with semver tags and a SHA tag.
+- Corrected assumption: the Dockerfile already existed at `src/ReviewBot.Api/Dockerfile` from Step 1; Step 22 only needed the CI publish job, not a new Dockerfile.
+- Stop test: build is green (`dotnet build ReviewBot.sln -c Release` — zero warnings), all 124 tests pass. The CI Docker job is logic-only and requires a pushed tag and GITHUB_TOKEN to exercise in full.
 
 ---
 
