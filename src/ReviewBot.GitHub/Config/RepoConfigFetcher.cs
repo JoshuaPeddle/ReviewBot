@@ -206,10 +206,13 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
             return defaults;
         }
 
+        var localTests = file.LocalTests ?? defaults.LocalTests;
+
         return new GroundingConfig(
             file.Enabled ?? defaults.Enabled,
             file.Build ?? defaults.Build,
-            file.Tests ?? defaults.Tests,
+            localTests || (file.Tests ?? defaults.Tests),
+            localTests,
             file.BuildTimeoutSeconds ?? defaults.BuildTimeoutSeconds,
             file.TestTimeoutSeconds ?? defaults.TestTimeoutSeconds,
             file.BuildCommand ?? defaults.BuildCommand,
@@ -411,6 +414,8 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public bool? Build { get; set; }
 
         public bool? Tests { get; set; }
+
+        public bool? LocalTests { get; set; }
 
         public int? BuildTimeoutSeconds { get; set; }
 

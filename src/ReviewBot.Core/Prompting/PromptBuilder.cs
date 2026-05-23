@@ -62,10 +62,10 @@ public static class PromptBuilder
             prompt.Append('\n');
         }
 
-        if (grounding?.Language is { } language)
+        if (grounding is { Language: not null } or { Tests: not null })
         {
             prompt.Append('\n');
-            prompt.Append(BuildGroundingSection(language, grounding.Build));
+            prompt.Append(BuildGroundingSection(grounding.Language, grounding.Build, grounding.Tests));
         }
 
         prompt.Append("""
@@ -127,45 +127,86 @@ Omit a comment entirely rather than pick a guessed line, and keep total comments
         return prompt.ToString();
     }
 
-    private static string BuildGroundingSection(LanguageMetadata language, BuildResult? build)
+    private static string BuildGroundingSection(LanguageMetadata? language, BuildResult? build, TestResult? tests)
     {
         var sb = new StringBuilder();
-        sb.Append("## Project context (verified from repository)\n");
+        sb.Append(language is null
+            ? "## Project verification\n"
+            : "## Project context (verified from repository)\n");
 
-        var displayName = language.LanguageId switch
+        if (language is not null)
         {
-            "dotnet" => $"C# (.NET {language.LanguageVersion})",
-            "python" => $"Python {language.LanguageVersion}",
-            _ => $"{language.LanguageId} {language.LanguageVersion}"
-        };
-        sb.Append($"- Language: {displayName}\n");
-
-        if (language.ToolchainVersion is not null)
-        {
-            var toolchainLabel = language.LanguageId switch
+            var displayName = language.LanguageId switch
             {
-                "dotnet" => $".NET SDK {language.ToolchainVersion}",
-                _ => language.ToolchainVersion
+                "dotnet" => $"C# (.NET {language.LanguageVersion})",
+                "python" => $"Python {language.LanguageVersion}",
+                _ => $"{language.LanguageId} {language.LanguageVersion}"
             };
-            sb.Append($"- Toolchain: {toolchainLabel}\n");
+            sb.Append($"- Language: {displayName}\n");
+
+            if (language.ToolchainVersion is not null)
+            {
+                var toolchainLabel = language.LanguageId switch
+                {
+                    "dotnet" => $".NET SDK {language.ToolchainVersion}",
+                    _ => language.ToolchainVersion
+                };
+                sb.Append($"- Toolchain: {toolchainLabel}\n");
+            }
+
+            foreach (var fact in language.Facts)
+                sb.Append($"- {fact}\n");
+
+            if (build is not null)
+            {
+                var buildLine = build.Success
+                    ? $"Build: SUCCESS ({build.Warnings} warnings, {build.Errors} errors) — all syntax in changed files is confirmed valid"
+                    : $"Build: FAILED ({build.Errors} errors) — see build output below";
+                sb.Append($"- {buildLine}\n");
+            }
+            else
+            {
+                sb.Append("- Build: not verified (syntax claims cannot be confirmed)\n");
+            }
         }
 
-        foreach (var fact in language.Facts)
-            sb.Append($"- {fact}\n");
-
-        if (build is not null)
-        {
-            var buildLine = build.Success
-                ? $"Build: SUCCESS ({build.Warnings} warnings, {build.Errors} errors) — all syntax in changed files is confirmed valid"
-                : $"Build: FAILED ({build.Errors} errors) — see build output below";
-            sb.Append($"- {buildLine}\n");
-        }
-        else
-        {
-            sb.Append("- Build: not verified (syntax claims cannot be confirmed)\n");
-        }
+        if (tests is not null)
+            AppendTestResult(sb, tests);
 
         return sb.ToString();
+    }
+
+    private static void AppendTestResult(StringBuilder sb, TestResult tests)
+    {
+        var label = string.Equals(tests.Source, "github_checks", StringComparison.Ordinal)
+            ? "Checks"
+            : "Tests";
+        var status = tests.Failed == 0 ? "PASSED" : "FAILED";
+        var detail = tests.Failed == 0
+            ? "existing behavior confirmed"
+            : "existing behavior may have regressed";
+
+        sb.Append("- ");
+        sb.Append(label);
+        sb.Append(": ");
+        sb.Append(status);
+        sb.Append(" (");
+        sb.Append(tests.Passed);
+        sb.Append(" passed, ");
+        sb.Append(tests.Failed);
+        sb.Append(" failed, ");
+        sb.Append(tests.Skipped);
+        sb.Append(" skipped) — ");
+        sb.Append(detail);
+        sb.Append('\n');
+
+        if (!string.IsNullOrWhiteSpace(tests.Output))
+        {
+            sb.Append(label);
+            sb.Append(" output:\n```text\n");
+            sb.Append(tests.Output);
+            sb.Append("\n```\n");
+        }
     }
 
     private static string BuildUserPrompt(ReviewRequest request)

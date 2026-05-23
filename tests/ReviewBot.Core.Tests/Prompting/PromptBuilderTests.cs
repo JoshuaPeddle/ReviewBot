@@ -401,6 +401,42 @@ public interface IReviewStore
             "- Build: FAILED (3 errors) — see build output below");
     }
 
+    [Fact]
+    public void GroundingWithGitHubChecksIncludesVerificationWithoutLanguage()
+    {
+        var request = CreateRequest() with
+        {
+            Grounding = new GroundingContext(
+                Language: null,
+                Build: null,
+                Tests: new TestResult(1, 1, 0, "- check tests: failure", "github_checks"))
+        };
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.SystemPrompt.Should().Contain("## Project verification");
+        payload.SystemPrompt.Should().Contain("- Checks: FAILED (1 passed, 1 failed, 0 skipped)");
+        payload.SystemPrompt.Should().Contain("Checks output:");
+        payload.SystemPrompt.Should().Contain("- check tests: failure");
+    }
+
+    [Fact]
+    public void GroundingWithPassingLocalTestsIncludesTestsLine()
+    {
+        var request = CreateRequest() with
+        {
+            Grounding = new GroundingContext(
+                Language: new LanguageMetadata("dotnet", "10.0", null, []),
+                Build: new BuildResult(true, 0, 0, "ok"),
+                Tests: new TestResult(42, 0, 3, "local tests ok"))
+        };
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.SystemPrompt.Should().Contain("- Tests: PASSED (42 passed, 0 failed, 3 skipped)");
+        payload.SystemPrompt.Should().Contain("Tests output:");
+    }
+
     private static ReviewRequest CreateRequest(
         string title = "Add review bot",
         string body = "Please review the changes.",

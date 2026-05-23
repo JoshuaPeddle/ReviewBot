@@ -10,7 +10,7 @@ public class PythonBuildRunnerTests : IDisposable
     private readonly List<string> _dirsToCleanup = [];
 
     private static readonly GroundingConfig DefaultConfig = new(
-        Enabled: true, Build: true, Tests: false,
+        Enabled: true, Build: true, Tests: false, LocalTests: false,
         BuildTimeoutSeconds: 120, TestTimeoutSeconds: 300,
         BuildCommand: null, TestCommand: null);
 

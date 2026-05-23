@@ -13,4 +13,4 @@ public sealed record LanguageMetadata(
 
 public sealed record BuildResult(bool Success, int Warnings, int Errors, string Output);
 
-public sealed record TestResult(int Passed, int Failed, int Skipped, string Output);
+public sealed record TestResult(int Passed, int Failed, int Skipped, string Output, string Source = "local");

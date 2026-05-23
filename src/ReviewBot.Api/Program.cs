@@ -9,6 +9,7 @@ using ReviewBot.Api.Webhooks;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
 using ReviewBot.GitHub.Auth;
+using ReviewBot.GitHub.Checks;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding;
@@ -67,6 +68,7 @@ builder.Services.AddSingleton<IInstallationTokenProvider>(provider =>
         provider.GetRequiredService<TimeProvider>(),
         provider.GetRequiredService<ILogger<CachingInstallationTokenProvider>>()));
 builder.Services.AddSingleton<IGitHubClientFactory, OctokitGitHubClientFactory>();
+builder.Services.AddSingleton<ICheckRunFetcher, CheckRunFetcher>();
 builder.Services.AddSingleton<PullRequestFetcher>();
 builder.Services.AddSingleton<IPullRequestFetcher>(provider => provider.GetRequiredService<PullRequestFetcher>());
 builder.Services.AddSingleton<ReviewPoster>();

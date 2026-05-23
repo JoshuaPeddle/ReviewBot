@@ -257,7 +257,9 @@ public sealed class ReviewWorker : BackgroundService
         var groundingSw = Stopwatch.StartNew();
         var grounding = await groundingProvider.GetContextAsync(groundingRequest, ct).ConfigureAwait(false);
         groundingSw.Stop();
-        var groundingResult = grounding.Build is not null
+        var groundingResult = grounding.Tests is not null
+            ? (grounding.Tests.Failed == 0 ? "checks_success" : "checks_failed")
+            : grounding.Build is not null
             ? (grounding.Build.Success ? "build_success" : "build_failed")
             : grounding.Language is not null ? "tier1" : "none";
         metrics.RecordGroundingDuration(groundingSw.Elapsed.TotalMilliseconds, groundingResult);

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ReviewBot.Core.Domain;
+using ReviewBot.GitHub.Checks;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding.Build;
 using ReviewBot.Grounding.Detection;
@@ -14,6 +15,8 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
 
     private readonly IReadOnlyList<ILanguageDetector> detectors;
     private readonly IReadOnlyList<IBuildRunner> buildRunners;
+    private readonly IReadOnlyList<ITestRunner> testRunners;
+    private readonly ICheckRunFetcher? checkRunFetcher;
     private readonly IWorkspaceFactory? workspaceFactory;
     private readonly Func<GroundingRequest, IRepoContentReader> readerFactory;
     private readonly ILogger<CompositeGroundingProvider> logger;
@@ -21,13 +24,17 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
     public CompositeGroundingProvider(
         IEnumerable<ILanguageDetector> detectors,
         IEnumerable<IBuildRunner> buildRunners,
+        IEnumerable<ITestRunner> testRunners,
         IWorkspaceFactory workspaceFactory,
         IGitHubClientFactory clientFactory,
+        ICheckRunFetcher? checkRunFetcher = null,
         ILogger<CompositeGroundingProvider>? logger = null)
         : this(
             detectors.ToArray(),
             buildRunners.ToArray(),
+            testRunners.ToArray(),
             workspaceFactory,
+            checkRunFetcher,
             r => new GitHubRepoContentReader(clientFactory, r.Owner, r.Repo, r.InstallationToken),
             logger)
     {
@@ -37,7 +44,7 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         IReadOnlyList<ILanguageDetector> detectors,
         IRepoContentReader reader,
         ILogger<CompositeGroundingProvider>? logger = null)
-        : this(detectors, [], null, _ => reader, logger)
+        : this(detectors, [], [], null, null, _ => reader, logger)
     {
     }
 
@@ -47,20 +54,36 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         IWorkspaceFactory workspaceFactory,
         IRepoContentReader reader,
         ILogger<CompositeGroundingProvider>? logger = null)
-        : this(detectors, buildRunners, workspaceFactory, _ => reader, logger)
+        : this(detectors, buildRunners, [], workspaceFactory, null, _ => reader, logger)
+    {
+    }
+
+    internal CompositeGroundingProvider(
+        IReadOnlyList<ILanguageDetector> detectors,
+        IReadOnlyList<IBuildRunner> buildRunners,
+        IReadOnlyList<ITestRunner> testRunners,
+        IWorkspaceFactory? workspaceFactory,
+        ICheckRunFetcher? checkRunFetcher,
+        IRepoContentReader reader,
+        ILogger<CompositeGroundingProvider>? logger = null)
+        : this(detectors, buildRunners, testRunners, workspaceFactory, checkRunFetcher, _ => reader, logger)
     {
     }
 
     private CompositeGroundingProvider(
         IReadOnlyList<ILanguageDetector> detectors,
         IReadOnlyList<IBuildRunner> buildRunners,
+        IReadOnlyList<ITestRunner> testRunners,
         IWorkspaceFactory? workspaceFactory,
+        ICheckRunFetcher? checkRunFetcher,
         Func<GroundingRequest, IRepoContentReader> readerFactory,
         ILogger<CompositeGroundingProvider>? logger)
     {
         this.detectors = detectors;
         this.buildRunners = buildRunners;
+        this.testRunners = testRunners;
         this.workspaceFactory = workspaceFactory;
+        this.checkRunFetcher = checkRunFetcher;
         this.readerFactory = readerFactory;
         this.logger = logger ?? NullLogger<CompositeGroundingProvider>.Instance;
     }
@@ -72,11 +95,12 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
 
         try
         {
+            var checkResult = await TryGetHeadCheckSummaryAsync(request, ct).ConfigureAwait(false);
             var reader = readerFactory(request);
             var rootFiles = await reader.ListRootFilesAsync(request.HeadSha, ct).ConfigureAwait(false);
             var detector = detectors.FirstOrDefault(d => d.CanDetect(rootFiles));
             if (detector is null)
-                return Empty;
+                return checkResult is null ? Empty : new GroundingContext(null, null, checkResult);
 
             // Start the workspace clone concurrently with Tier 1 metadata extraction.
             // The clone URL is known as soon as the detector matches; we don't need metadata first.
@@ -98,10 +122,21 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
             }
 
             BuildResult? buildResult = null;
+            TestResult? testResult = checkResult;
             if (language is not null && cloneTask is not null)
-                buildResult = await RunBuildOnCloneAsync(cloneTask, language.LanguageId, request, ct).ConfigureAwait(false);
+            {
+                var localResult = await RunBuildAndMaybeTestsOnCloneAsync(
+                        cloneTask,
+                        language.LanguageId,
+                        request,
+                        checkResult,
+                        ct)
+                    .ConfigureAwait(false);
+                buildResult = localResult.Build;
+                testResult = localResult.Tests;
+            }
 
-            return new GroundingContext(language, buildResult, null);
+            return new GroundingContext(language, buildResult, testResult);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -112,6 +147,38 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
                 request.Repo,
                 request.HeadSha);
             return Empty;
+        }
+    }
+
+    private async Task<TestResult?> TryGetHeadCheckSummaryAsync(GroundingRequest request, CancellationToken ct)
+    {
+        if (!request.Config.Tests || checkRunFetcher is null)
+            return null;
+
+        try
+        {
+            return await checkRunFetcher
+                .GetHeadCheckSummaryAsync(
+                    request.Owner,
+                    request.Repo,
+                    request.HeadSha,
+                    request.InstallationToken,
+                    ct)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "GitHub Checks grounding failed for {Owner}/{Repo} at {Sha}; proceeding without checks",
+                request.Owner,
+                request.Repo,
+                request.HeadSha);
+            return null;
         }
     }
 
@@ -149,19 +216,32 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
             await workspace.DisposeAsync().ConfigureAwait(false);
     }
 
-    private async Task<BuildResult?> RunBuildOnCloneAsync(
-        Task<IWorkspace?> cloneTask, string languageId, GroundingRequest request, CancellationToken ct)
+    private async Task<(BuildResult? Build, TestResult? Tests)> RunBuildAndMaybeTestsOnCloneAsync(
+        Task<IWorkspace?> cloneTask,
+        string languageId,
+        GroundingRequest request,
+        TestResult? checkResult,
+        CancellationToken ct)
     {
-        var runner = buildRunners.FirstOrDefault(r => r.LanguageId == languageId);
+        var buildRunner = buildRunners.FirstOrDefault(r => r.LanguageId == languageId);
 
         IWorkspace? workspace = null;
         try
         {
             workspace = await cloneTask.ConfigureAwait(false);
-            if (workspace is null || runner is null)
-                return null;
+            if (workspace is null || buildRunner is null)
+                return (null, checkResult);
 
-            return await runner.RunAsync(workspace.LocalPath, request.Config, ct).ConfigureAwait(false);
+            var buildResult = await buildRunner.RunAsync(workspace.LocalPath, request.Config, ct).ConfigureAwait(false);
+            var testResult = checkResult;
+            if (request.Config.LocalTests && buildResult.Success)
+            {
+                var localTests = await RunLocalTestsAsync(workspace.LocalPath, languageId, request.Config, checkResult, ct)
+                    .ConfigureAwait(false);
+                testResult = localTests ?? checkResult;
+            }
+
+            return (buildResult, testResult);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -171,12 +251,50 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         {
             logger.LogWarning(ex, "Build grounding failed for {Owner}/{Repo}; proceeding without build result",
                 request.Owner, request.Repo);
-            return new BuildResult(false, 0, 0, ex.Message);
+            return (new BuildResult(false, 0, 0, ex.Message), checkResult);
         }
         finally
         {
             if (workspace is not null)
                 await workspace.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    private async Task<TestResult?> RunLocalTestsAsync(
+        string workspacePath,
+        string languageId,
+        GroundingConfig config,
+        TestResult? checkResult,
+        CancellationToken ct)
+    {
+        var runner = testRunners.FirstOrDefault(r => r.LanguageId == languageId);
+        if (runner is null)
+            return null;
+
+        try
+        {
+            var testResult = await runner.RunAsync(workspacePath, config, ct).ConfigureAwait(false);
+            return AppendCheckOutput(testResult, checkResult);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Test grounding failed; proceeding with failed local test result");
+            return AppendCheckOutput(new TestResult(0, 0, 0, ex.Message), checkResult);
+        }
+    }
+
+    private static TestResult AppendCheckOutput(TestResult localResult, TestResult? checkResult)
+    {
+        if (checkResult is null || string.IsNullOrWhiteSpace(checkResult.Output))
+            return localResult;
+
+        var output = string.IsNullOrWhiteSpace(localResult.Output)
+            ? $"GitHub Checks:\n{checkResult.Output}"
+            : $"{localResult.Output}\n\nGitHub Checks:\n{checkResult.Output}";
+        return localResult with { Output = output };
     }
 }

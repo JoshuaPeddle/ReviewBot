@@ -187,18 +187,29 @@ grounding:
   # Default: 120
   build_timeout_seconds: 120
 
-  # Tier 3 (not yet implemented — reserved for future use).
+  # Tier 3: read completed GitHub Checks and commit statuses for the PR head SHA.
+  # Does not clone the repo or execute project code. If completed checks/statuses
+  # exist, their aggregate result is included in the review prompt.
   # Default: false
   tests: false
+
+  # Tier 3 local execution (not yet implemented for any language runner).
+  # When enabled, ReviewBot will run local tests after a successful local build.
+  # This executes project code and should use the same security posture as build.
+  # Setting local_tests: true implies tests: true.
+  # Default: false
+  local_tests: false
+
+  # Applies only to future local test runners, not GitHub Checks/status fetching.
   # test_command: "dotnet test --no-build"
   # test_timeout_seconds: 300
 ```
 
 ---
 
-## Tier 2 build grounding — security and deployment
+## Tier 2 build and local-test grounding — security and deployment
 
-Setting `grounding.build: true` causes ReviewBot to clone the PR branch into a temporary directory on the worker host and run a build or type-check command against it. This is intentionally opt-in because **it executes arbitrary project code** on the host running ReviewBot.
+Setting `grounding.build: true` causes ReviewBot to clone the PR branch into a temporary directory on the worker host and run a build or type-check command against it. Future local test runners behind `grounding.local_tests: true` will execute test commands after a successful local build. These options are intentionally opt-in because **they execute arbitrary project code** on the host running ReviewBot.
 
 **Threat model:** a malicious contributor could craft a PR that runs code at build time — via MSBuild targets, Python `setup.py` hooks, or similar mechanisms — if `build: true` is enabled for that repository.
 

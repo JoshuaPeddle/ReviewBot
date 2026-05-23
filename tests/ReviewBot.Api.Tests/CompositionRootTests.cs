@@ -14,6 +14,7 @@ using NSubstitute;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Llm;
 using ReviewBot.GitHub.Auth;
+using ReviewBot.GitHub.Checks;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding.Build;
@@ -36,6 +37,16 @@ public class CompositionRootTests
 
         runners.Select(r => r.LanguageId).Should().Contain("dotnet");
         runners.Select(r => r.LanguageId).Should().Contain("python");
+    }
+
+    [Fact]
+    public async Task CheckRunFetcherIsRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<ICheckRunFetcher>()
+            .Should().BeOfType<CheckRunFetcher>();
     }
 
     [Fact]

@@ -2,7 +2,7 @@
 
 ## Current state (v2, 2026-05-23)
 
-Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, Phase 14 Steps 41–42, and Phase 15 Steps 43–44. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Phase 15 agentic context is wired end-to-end behind `review.agentic_context`: the primary LLM can request bounded repository files, the worker validates and filters paths, GitHub Contents fetches text files with a byte cap, and one final LLM pass produces the posted result. `dotnet test --no-restore` passes: 306 passing, 0 failed, 1 skipped Ollama E2E test. Docker image published on tags.
+Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, Phase 14 Steps 41–42, Phase 15 Steps 43–44, and Phase 16 Step 45. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Phase 15 agentic context is wired end-to-end behind `review.agentic_context`: the primary LLM can request bounded repository files, the worker validates and filters paths, GitHub Contents fetches text files with a byte cap, and one final LLM pass produces the posted result. Phase 16 checks grounding now reads completed GitHub Checks and commit statuses behind `grounding.tests`, carries them through grounding, and exposes them in the review prompt without cloning or executing code. `dotnet test --no-restore` passes: 322 passing, 0 failed, 1 skipped Ollama E2E test. Docker image published on tags.
 
 Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 build runners (`DotNetBuildRunner`, `PythonBuildRunner`) are registered in `Program.cs`. `CompositeGroundingProvider` starts the workspace clone concurrently with Tier 1 `ExtractMetadataAsync`; on metadata failure the pre-started workspace is disposed; on clone failure `Build` is null and the review proceeds. `ReviewWorker` has a fast-exit when `files.Count == 0` after filtering (no grounding, no LLM call, no review post). Skip-reason counter (`reviewbot.jobs.skipped`) and grounding duration histogram (`reviewbot.grounding.duration_ms`) are live in `ReviewBotMetrics`.
 
@@ -742,6 +742,26 @@ bool LocalTests,
 - Tests disabled: check fetcher and local test runner not called.
 - Test runner throws: `Tests.Passed = 0, Failed = 0`; review proceeds.
 
+**Implemented in Step 45:**
+- Added `TestResult.Source` (default `"local"`) so GitHub Checks/status summaries can be distinguished from future local test-runner output.
+- Added `ReviewBot.GitHub/Checks/ICheckRunFetcher` and `CheckRunFetcher`. It reads completed check runs via `client.Check.Run.GetAllForReference(...)` and commit statuses via `client.Repository.Status.GetCombined(...)`, returns `null` when nothing completed, maps successful checks/statuses to passed, failure/error/timed-out/cancelled/action-required conclusions to failed, neutral/skipped/stale checks to skipped, and records low-cardinality output with check/status names.
+- Added `GroundingConfig.LocalTests` and YAML mapping for `grounding.local_tests`; config parsing makes `local_tests: true` imply `tests: true`.
+- Added `ITestRunner` and `AddTestRunner<T>()` registration support. No language-specific local test runners are registered yet; Steps 46 and 47 remain responsible for .NET and Python implementations.
+- Extended `CompositeGroundingProvider` to fetch GitHub Checks/statuses when `grounding.tests` is enabled, preserve check results even when no language detector matches, skip local test runners unless `grounding.local_tests` is enabled, run matching local test runners only after a successful local build, convert local test-runner exceptions into a non-blocking `TestResult`, and append check output when both checks and local tests exist.
+- Registered `ICheckRunFetcher` in `Program.cs`.
+- Pulled the minimal prompt plumbing forward so Step 45 is end-to-end: `PromptBuilder` now emits a `## Project verification` section for checks-only grounding and includes source-aware `Checks:` / `Tests:` lines when `GroundingContext.Tests` is populated.
+- Grounding duration metrics now label check-backed results as `checks_success` or `checks_failed`.
+- Documented `grounding.tests` as GitHub Checks/status fetching and `grounding.local_tests` as a future local-execution flag.
+- Added focused tests for check/status fetching, config parsing, grounding-provider checks/local-test behavior, prompt exposure, and API composition compile coverage.
+
+**Corrected implementation assumptions discovered during Step 45:**
+- `TestResult` already existed in the core domain, so Step 45 did not need to add the type, only a source discriminator.
+- Fetching checks without prompt plumbing would have done work that the LLM could not see. The source-aware prompt section was moved forward from Step 46; Step 46 should now focus on the .NET runner and any refinements rather than first exposure of test/check results.
+- Commit statuses are separate from Checks in Octokit (`client.Repository.Status.GetCombined(...)`), so the check fetcher reads both APIs and merges their completed results.
+- `grounding.local_tests` must be parsed independently from `grounding.tests`, but it implies `Tests = true` so GitHub Checks remain available alongside future local runs.
+
+**Stop test:** `dotnet test --no-restore` passes: 322 passing, 0 failed, 1 skipped Ollama E2E test. Targeted suites also passed during implementation: Core (65), GitHub (54), Grounding (96), and API (58).
+
 ### Step 46: .NET test runner
 
 **`ReviewBot.Grounding/Languages/DotNet/DotNetTestRunner.cs`:** Implements `ITestRunner`. `LanguageId = "dotnet"`.
@@ -851,6 +871,8 @@ builder.Services
 - **Closed (Phase 14 Step 42)**: `IReviewLlm.CompleteRawAsync` is implemented by Anthropic, OpenAI-compatible, and stub LLMs; worker self-critique uses it only behind `review.self_critique`.
 - **Closed (Phase 15 Step 44)**: Agentic context gives the model influence over which repository files are fetched. Step 44 shipped worker-side path validation, ignore-glob enforcement, duplicate/cap handling, secret-looking path denial, and fetcher-side file-size, binary, malformed base64, invalid UTF-8, and 404 rejection before fetched content is sent to the LLM.
 - **Open (Phase 16)**: Local build/test execution requires SDKs on the worker and executes project code. Keep local-test E2E scenarios behind `[Trait("Category", "RequiresSdk")]` and a CI flag; default Tier 3 E2E should use mocked GitHub Checks/statuses.
+- **Closed (Phase 16 Step 45)**: GitHub Checks/status grounding must not execute repository code. Step 45 reads only GitHub API check/status results behind `grounding.tests`; local execution is separated behind `grounding.local_tests` and has no registered language runners yet.
+- **Open (Phase 16 Step 45)**: Branch-protection "required" check context discovery is not implemented. The check fetcher currently treats any completed failing check/status as failed and any completed successful check/status as passed.
 
 ## What is intentionally excluded
 

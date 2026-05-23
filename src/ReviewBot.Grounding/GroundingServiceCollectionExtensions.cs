@@ -32,4 +32,10 @@ public sealed class GroundingBuilder
         services.AddSingleton<IBuildRunner, T>();
         return this;
     }
+
+    public GroundingBuilder AddTestRunner<T>() where T : class, ITestRunner
+    {
+        services.AddSingleton<ITestRunner, T>();
+        return this;
+    }
 }

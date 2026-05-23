@@ -13,6 +13,7 @@ public class GroundingConfigTests
         d.Enabled.Should().BeTrue();
         d.Build.Should().BeFalse();
         d.Tests.Should().BeFalse();
+        d.LocalTests.Should().BeFalse();
         d.BuildTimeoutSeconds.Should().Be(120);
         d.TestTimeoutSeconds.Should().Be(300);
         d.BuildCommand.Should().BeNull();
