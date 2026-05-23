@@ -123,6 +123,18 @@ review:
   # Default: false
   self_critique: false
 
+  # Allow the first LLM pass to request a small number of additional repo files.
+  # The worker validates paths, applies ignore globs, rejects secret-looking files,
+  # fetches text files only, then runs one final LLM pass with the added context.
+  # Default: false
+  agentic_context: false
+
+  # Maximum number of validated context files to fetch for the second pass.
+  max_context_requests: 5
+
+  # Maximum decoded size, in bytes, for each fetched context file.
+  max_context_file_bytes: 50000
+
   trigger:
     # Review when the bot is explicitly added as a reviewer.
     on_review_request: true

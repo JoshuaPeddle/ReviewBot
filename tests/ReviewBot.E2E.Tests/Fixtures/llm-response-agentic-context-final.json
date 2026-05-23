@@ -1,0 +1,13 @@
+{
+  "summary": "The fetched interface confirms one contract issue.",
+  "comments": [
+    {
+      "path": "src/Services/UserService.cs",
+      "line": 11,
+      "side": "RIGHT",
+      "severity": "error",
+      "confidence": "high",
+      "body": "The service now returns an empty display name even though IUserRepository documents missing users as an error case."
+    }
+  ]
+}

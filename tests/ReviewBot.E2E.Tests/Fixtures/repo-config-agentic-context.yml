@@ -1,0 +1,12 @@
+model:
+  provider: openai
+  name: e2e-openai-model
+review:
+  agentic_context: true
+  max_context_requests: 2
+  max_context_file_bytes: 50000
+  trigger:
+    on_push: true
+grounding:
+  enabled: true
+  build: false

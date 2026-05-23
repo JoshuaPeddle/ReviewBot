@@ -168,7 +168,24 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
                 path),
             trigger,
             ParseMinConfidence(fileConfig.Review?.MinConfidence, owner, repo, sha, path),
-            fileConfig.Review?.SelfCritique ?? defaults.Review.SelfCritique);
+            fileConfig.Review?.SelfCritique ?? defaults.Review.SelfCritique,
+            fileConfig.Review?.AgenticContext ?? defaults.Review.AgenticContext,
+            MergePositiveInt(
+                fileConfig.Review?.MaxContextRequests,
+                defaults.Review.MaxContextRequests,
+                "review.max_context_requests",
+                owner,
+                repo,
+                sha,
+                path),
+            MergePositiveInt(
+                fileConfig.Review?.MaxContextFileBytes,
+                defaults.Review.MaxContextFileBytes,
+                "review.max_context_file_bytes",
+                owner,
+                repo,
+                sha,
+                path));
 
         var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
 
@@ -364,6 +381,12 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public string? MinConfidence { get; set; }
 
         public bool? SelfCritique { get; set; }
+
+        public bool? AgenticContext { get; set; }
+
+        public int? MaxContextRequests { get; set; }
+
+        public int? MaxContextFileBytes { get; set; }
     }
 
     private sealed class TriggerConfigFile

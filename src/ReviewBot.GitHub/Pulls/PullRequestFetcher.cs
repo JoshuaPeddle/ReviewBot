@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.Extensions.Logging;
 using Octokit;
 using ReviewBot.Core.Diff;
@@ -8,6 +9,8 @@ namespace ReviewBot.GitHub.Pulls;
 public sealed class PullRequestFetcher : IPullRequestFetcher
 {
     private const int PageSize = 30;
+    private const int MaxParallelContentFetches = 3;
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     private readonly IGitHubClientFactory clientFactory;
     private readonly int maxFiles;
@@ -178,6 +181,59 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
         return new ChangedFilesResult(paths, paths.Length < GitHubCompareFilesCap);
     }
 
+    public async Task<IReadOnlyList<(string Path, string Content)>> GetFileContentsAsync(
+        string owner,
+        string repo,
+        IReadOnlyList<ContextRequest> requests,
+        string sha,
+        int maxBytes,
+        string installationToken,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(owner))
+            throw new ArgumentException("Repository owner must be provided.", nameof(owner));
+        if (string.IsNullOrWhiteSpace(repo))
+            throw new ArgumentException("Repository name must be provided.", nameof(repo));
+        ArgumentNullException.ThrowIfNull(requests);
+        if (string.IsNullOrWhiteSpace(sha))
+            throw new ArgumentException("Content ref SHA must be provided.", nameof(sha));
+        if (maxBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxBytes), maxBytes, "Max bytes must be positive.");
+        if (string.IsNullOrWhiteSpace(installationToken))
+            throw new ArgumentException("GitHub installation token must be provided.", nameof(installationToken));
+
+        ct.ThrowIfCancellationRequested();
+        if (requests.Count == 0)
+        {
+            return Array.Empty<(string Path, string Content)>();
+        }
+
+        var client = clientFactory.CreateForInstallation(installationToken);
+        using var semaphore = new SemaphoreSlim(MaxParallelContentFetches, MaxParallelContentFetches);
+
+        var tasks = requests.Select(async (request, index) =>
+        {
+            await semaphore.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                var content = await TryFetchTextFileAsync(client, owner, repo, request.Path, sha, maxBytes, ct)
+                    .ConfigureAwait(false);
+                return new FetchedContent(index, request.Path, content);
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        }).ToArray();
+
+        var fetched = await Task.WhenAll(tasks).ConfigureAwait(false);
+        return fetched
+            .Where(item => item.Content is not null)
+            .OrderBy(item => item.Index)
+            .Select(item => (item.Path, item.Content!))
+            .ToArray();
+    }
+
     private async Task<IReadOnlyList<FileChange>> FetchFilesCappedAsync(
         IGitHubClient client,
         string owner,
@@ -326,6 +382,57 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
         return files.Count > maxFiles ? files.Take(maxFiles).ToArray() : files;
     }
 
+    private async Task<string?> TryFetchTextFileAsync(
+        IGitHubClient client,
+        string owner,
+        string repo,
+        string path,
+        string sha,
+        int maxBytes,
+        CancellationToken ct)
+    {
+        try
+        {
+            var contents = await OctokitRateLimitRetry
+                .ExecuteAsync(
+                    () => client.Repository.Content.GetAllContentsByRef(owner, repo, path, sha),
+                    logger,
+                    clock,
+                    ct)
+                .ConfigureAwait(false);
+            var file = contents.Count == 1 ? contents[0] : null;
+            if (file is null || file.Type != ContentType.File || file.EncodedContent is null)
+            {
+                return null;
+            }
+
+            if (file.Size > maxBytes)
+            {
+                return null;
+            }
+
+            var bytes = Convert.FromBase64String(file.EncodedContent);
+            if (bytes.Length > maxBytes || bytes.Contains((byte)0))
+            {
+                return null;
+            }
+
+            return StrictUtf8.GetString(bytes);
+        }
+        catch (NotFoundException)
+        {
+            return null;
+        }
+        catch (DecoderFallbackException)
+        {
+            return null;
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
     private static void ValidateInputs(string owner, string repo, int prNumber, string installationToken)
     {
         if (string.IsNullOrWhiteSpace(owner))
@@ -364,4 +471,6 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
             "copied" => FileChangeStatus.Copied,
             _ => throw new InvalidOperationException($"Unsupported GitHub file status '{status}'."),
         };
+
+    private sealed record FetchedContent(int Index, string Path, string? Content);
 }

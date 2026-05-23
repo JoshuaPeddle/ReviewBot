@@ -81,6 +81,42 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
     }
 
     [Fact]
+    public async Task ReviewRequestedWithAgenticContextFetchesRequestedFileAndPostsSecondPassComments()
+    {
+        await harness.ResetAsync();
+        ConfigureSuccessfulAgenticContextReview(
+            repoConfig: FixtureLoader.ReadText("repo-config-agentic-context.yml"),
+            prFiles: FixtureLoader.ReadText("pr-files-dotnet.json"),
+            primaryReviewJson: FixtureLoader.ReadText("llm-response-agentic-context-primary.json"),
+            finalReviewJson: FixtureLoader.ReadText("llm-response-agentic-context-final.json"));
+        using var client = harness.CreateClient();
+        var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
+
+        using var response = await sender.SendPullRequestAsync(
+            FixtureLoader.ReadText("webhook-pr-review-requested.json"),
+            deliveryId: "delivery-e2e-agentic-context");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        await WorkerSyncHelper.WaitForRequestAsync(
+            harness.GitHubMock,
+            IsReviewPostPath);
+
+        WorkerSyncHelper.CountMatchingRequests(harness.LlmMock, "POST", IsOpenAiChatPath).Should().Be(2);
+        var secondPassRequest = harness.LlmMock.LogEntries
+            .Where(entry => entry.RequestMessage is { Path: "/v1/chat/completions" })
+            .Select(entry => entry.RequestMessage!.Body)
+            .Single(body => body != null && body.Contains("Additional context", StringComparison.Ordinal));
+        secondPassRequest.Should().Contain("interface IUserRepository");
+        secondPassRequest.Should().Contain("Returns null when the user is missing.");
+
+        using var reviewPayload = GetSingleRequestJson(harness.GitHubMock, "POST", IsReviewPostPath);
+        var comments = reviewPayload.RootElement.GetProperty("comments").EnumerateArray().ToArray();
+        comments.Should().ContainSingle()
+            .Which.GetProperty("body").GetString()
+            .Should().Be("The service now returns an empty display name even though IUserRepository documents missing users as an error case.");
+    }
+
+    [Fact]
     public async Task ReviewRequestedIsIdempotentForDuplicateDelivery()
     {
         await harness.ResetAsync();
@@ -172,6 +208,31 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         StubPullRequestFiles(prFiles);
         StubDotNetGrounding(headSha);
         StubOpenAiReviewWithSelfCritique(primaryReviewJson, critiqueJson);
+        StubReviewPost();
+    }
+
+    private void ConfigureSuccessfulAgenticContextReview(
+        string repoConfig,
+        string prFiles,
+        string primaryReviewJson,
+        string finalReviewJson,
+        string headSha = HeadSha)
+    {
+        StubInstallationToken();
+        StubRepoConfig(repoConfig, headSha);
+        StubPullRequest(headSha);
+        StubPullRequestFiles(prFiles);
+        StubDotNetGrounding(headSha);
+        StubContextFile(
+            "src/Contracts/IUserRepository.cs",
+            """
+            public interface IUserRepository
+            {
+                // Returns null when the user is missing.
+                User? FindById(string id);
+            }
+            """);
+        StubOpenAiReviewWithAgenticContext(primaryReviewJson, finalReviewJson);
         StubReviewPost();
     }
 
@@ -303,6 +364,18 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
                 .WithBody("""{"message":"Not Found"}"""));
     }
 
+    private void StubContextFile(string path, string content)
+    {
+        harness.GitHubMock
+            .Given(Request.Create()
+                .WithPath($"/repos/{Owner}/{Repo}/contents/{path}")
+                .UsingGet())
+            .RespondWith(Response.Create()
+                .WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody(RepositoryContentResponse(path, content)));
+    }
+
     private void StubOpenAiReview(string reviewJson)
     {
         harness.LlmMock
@@ -329,6 +402,25 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
                     var body = request.Body ?? string.Empty;
                     var response = body.Contains("retained_indices", StringComparison.Ordinal)
                         ? critiqueJson
+                        : primaryReviewJson;
+                    return OpenAiChatResponse(response);
+                }));
+    }
+
+    private void StubOpenAiReviewWithAgenticContext(string primaryReviewJson, string finalReviewJson)
+    {
+        harness.LlmMock
+            .Given(Request.Create()
+                .WithPath("/v1/chat/completions")
+                .UsingPost())
+            .RespondWith(Response.Create()
+                .WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody(request =>
+                {
+                    var body = request.Body ?? string.Empty;
+                    var response = body.Contains("Additional context", StringComparison.Ordinal)
+                        ? finalReviewJson
                         : primaryReviewJson;
                     return OpenAiChatResponse(response);
                 }));

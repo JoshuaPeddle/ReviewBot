@@ -70,7 +70,8 @@ public sealed record ReviewOutputConfig(
     Confidence MinConfidence = Confidence.Low,
     bool SelfCritique = false,
     bool AgenticContext = false,
-    int MaxContextRequests = 5);
+    int MaxContextRequests = 5,
+    int MaxContextFileBytes = 50_000);
 
 public sealed record TriggerConfig(
     bool OnReviewRequest,

@@ -1,0 +1,10 @@
+{
+  "summary": "Need one related interface to finish the review.",
+  "comments": [],
+  "context_requests": [
+    {
+      "path": "src/Contracts/IUserRepository.cs",
+      "reason": "Check whether the service honors the repository contract."
+    }
+  ]
+}

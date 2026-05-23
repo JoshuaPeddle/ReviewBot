@@ -291,6 +291,16 @@ public sealed class ReviewWorker : BackgroundService
             job.DeliveryId);
         metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
 
+        result = await ApplyAgenticContextAsync(
+                llm,
+                request,
+                result,
+                config,
+                job,
+                metadata.HeadSha,
+                installationToken.Token,
+                ct)
+            .ConfigureAwait(false);
         result = AppendFilesSkippedNote(result, patchBudgetResult.SkippedPaths);
         var candidateComments = FilterCandidateComments(result, config);
         candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
@@ -456,6 +466,89 @@ public sealed class ReviewWorker : BackgroundService
         return new ReviewResult(summary, result.Comments, result.ContextRequests);
     }
 
+    private async Task<ReviewResult> ApplyAgenticContextAsync(
+        IReviewLlm llm,
+        ReviewRequest request,
+        ReviewResult initialResult,
+        ReviewConfig config,
+        ReviewJob job,
+        string headSha,
+        string installationToken,
+        CancellationToken ct)
+    {
+        if (!config.Review.AgenticContext || initialResult.ContextRequests.Count == 0)
+        {
+            return initialResult;
+        }
+
+        var validation = FilterContextRequests(initialResult.ContextRequests, config);
+        LogContextRequestDrops(validation.DropCounts, initialResult.ContextRequests.Count, validation.Requests.Count, job);
+
+        if (validation.Requests.Count == 0)
+        {
+            return initialResult;
+        }
+
+        IReadOnlyList<(string Path, string Content)> fetchedFiles;
+        try
+        {
+            fetchedFiles = await pullRequestFetcher
+                .GetFileContentsAsync(
+                    job.Owner,
+                    job.Repo,
+                    validation.Requests,
+                    headSha,
+                    config.Review.MaxContextFileBytes,
+                    installationToken,
+                    ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Agentic context file fetch failed; using initial comments");
+            return initialResult;
+        }
+
+        if (fetchedFiles.Count == 0)
+        {
+            logger.LogDebug(
+                "Agentic context requested {RequestCount} files for {Owner}/{Repo}#{PrNumber}, but no text files were fetched",
+                validation.Requests.Count,
+                job.Owner,
+                job.Repo,
+                job.PrNumber);
+            return initialResult;
+        }
+
+        try
+        {
+            var enrichedPayload = PromptBuilder.BuildContextEnrichedRequest(request, initialResult, fetchedFiles);
+            var contextSw = Stopwatch.StartNew();
+            var enrichedRaw = await llm.CompleteRawAsync(enrichedPayload, ct).ConfigureAwait(false);
+            contextSw.Stop();
+            metrics.RecordLlmDuration(
+                contextSw.Elapsed.TotalMilliseconds,
+                config.Model.Provider,
+                "agentic_context");
+
+            var enrichedParsed = LlmResultParser.Parse(enrichedRaw, logger);
+            if (enrichedParsed.Success)
+            {
+                return enrichedParsed.Value!;
+            }
+
+            logger.LogWarning(
+                "Agentic context second-pass response was invalid: {Error}; using initial comments",
+                enrichedParsed.Error);
+            return initialResult;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Agentic context second pass failed; using initial comments");
+            return initialResult;
+        }
+    }
+
     private async Task<IReadOnlyList<InlineComment>> ApplySelfCritiqueAsync(
         IReviewLlm llm,
         IReadOnlyList<FileChange> files,
@@ -545,6 +638,139 @@ public sealed class ReviewWorker : BackgroundService
             : new ReviewResult(summary, comments, result.ContextRequests);
     }
 
+    private static ContextRequestValidationResult FilterContextRequests(
+        IReadOnlyList<ContextRequest> requests,
+        ReviewConfig config)
+    {
+        if (config.Review.MaxContextRequests <= 0)
+        {
+            return new ContextRequestValidationResult(
+                Array.Empty<ContextRequest>(),
+                new Dictionary<string, int>(StringComparer.Ordinal)
+                {
+                    ["cap"] = requests.Count
+                });
+        }
+
+        var matcher = BuildIgnoreMatcher(config.Ignore);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var accepted = new List<ContextRequest>();
+        var drops = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        foreach (var request in requests)
+        {
+            if (!IsSafeContextPath(request.Path))
+            {
+                IncrementDrop(drops, "invalid_path");
+                continue;
+            }
+
+            if (!seen.Add(request.Path))
+            {
+                IncrementDrop(drops, "duplicate");
+                continue;
+            }
+
+            if (matcher is not null && matcher.Match(request.Path).HasMatches)
+            {
+                IncrementDrop(drops, "ignored");
+                continue;
+            }
+
+            if (LooksSecretLike(request.Path))
+            {
+                IncrementDrop(drops, "secret_path");
+                continue;
+            }
+
+            if (accepted.Count >= config.Review.MaxContextRequests)
+            {
+                IncrementDrop(drops, "cap");
+                continue;
+            }
+
+            accepted.Add(request);
+        }
+
+        return new ContextRequestValidationResult(accepted.ToArray(), drops);
+    }
+
+    private static Matcher? BuildIgnoreMatcher(IReadOnlyList<string> ignoreGlobs)
+    {
+        if (ignoreGlobs.Count == 0)
+        {
+            return null;
+        }
+
+        var matcher = new Matcher(StringComparison.OrdinalIgnoreCase);
+        var hasPattern = false;
+        foreach (var pattern in ignoreGlobs.Where(pattern => !string.IsNullOrWhiteSpace(pattern)))
+        {
+            matcher.AddInclude(pattern);
+            hasPattern = true;
+        }
+
+        return hasPattern ? matcher : null;
+    }
+
+    private static bool IsSafeContextPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) ||
+            path.StartsWith("/", StringComparison.Ordinal) ||
+            path.Contains('\\'))
+        {
+            return false;
+        }
+
+        var segments = path.Split('/');
+        return segments.All(segment =>
+            !string.IsNullOrWhiteSpace(segment) &&
+            !string.Equals(segment, ".", StringComparison.Ordinal) &&
+            !string.Equals(segment, "..", StringComparison.Ordinal));
+    }
+
+    private static bool LooksSecretLike(string path)
+    {
+        var fileName = Path.GetFileName(path).ToLowerInvariant();
+        var normalizedPath = path.ToLowerInvariant();
+
+        return fileName is "id_rsa" or "id_dsa" or "id_ecdsa" or "id_ed25519" ||
+            fileName.EndsWith(".pem", StringComparison.Ordinal) ||
+            fileName.EndsWith(".key", StringComparison.Ordinal) ||
+            fileName.EndsWith(".p12", StringComparison.Ordinal) ||
+            fileName.EndsWith(".pfx", StringComparison.Ordinal) ||
+            fileName.StartsWith(".env", StringComparison.Ordinal) ||
+            normalizedPath.Contains("/.env", StringComparison.Ordinal);
+    }
+
+    private static void IncrementDrop(IDictionary<string, int> drops, string reason)
+    {
+        drops.TryGetValue(reason, out var count);
+        drops[reason] = count + 1;
+    }
+
+    private void LogContextRequestDrops(
+        IReadOnlyDictionary<string, int> drops,
+        int requestedCount,
+        int acceptedCount,
+        ReviewJob job)
+    {
+        if (drops.Count == 0)
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "Dropped {DroppedCount}/{RequestedCount} agentic context requests for {Owner}/{Repo}#{PrNumber}; accepted {AcceptedCount}. Reasons: {Reasons}",
+            drops.Values.Sum(),
+            requestedCount,
+            job.Owner,
+            job.Repo,
+            job.PrNumber,
+            acceptedCount,
+            string.Join(", ", drops.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => $"{pair.Key}={pair.Value}")));
+    }
+
     private sealed record PatchBudgetResult(
         IReadOnlyList<FileChange> Files,
         IReadOnlyList<string> SkippedPaths);
@@ -552,4 +778,8 @@ public sealed class ReviewWorker : BackgroundService
     private sealed record FilePatchLineCount(
         FileChange File,
         long LineCount);
+
+    private sealed record ContextRequestValidationResult(
+        IReadOnlyList<ContextRequest> Requests,
+        IReadOnlyDictionary<string, int> DropCounts);
 }

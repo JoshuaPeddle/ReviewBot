@@ -44,6 +44,9 @@ public class RepoConfigFetcherTests
               summary: true
               max_files: 12
               max_patch_lines: 345
+              agentic_context: true
+              max_context_requests: 3
+              max_context_file_bytes: 12345
               trigger:
                 on_review_request: false
                 on_push: true
@@ -70,7 +73,13 @@ public class RepoConfigFetcherTests
             Summary: true,
             MaxFiles: 12,
             MaxPatchLines: 345,
-            Trigger: new TriggerConfig(OnReviewRequest: false, OnPush: true)));
+            Trigger: new TriggerConfig(OnReviewRequest: false, OnPush: true),
+            AgenticContext: true,
+            MaxContextRequests: 3,
+            MaxContextFileBytes: 12345));
+        config.Review.AgenticContext.Should().BeTrue();
+        config.Review.MaxContextRequests.Should().Be(3);
+        config.Review.MaxContextFileBytes.Should().Be(12345);
         config.Ignore.Should().Equal("docs/**", "generated/**");
         config.Focus.Should().Equal("performance", "maintainability");
         config.Instructions.Should().Be("Keep comments short.");
@@ -285,6 +294,28 @@ public class RepoConfigFetcherTests
     }
 
     [Fact]
+    public async Task FetchAsyncMapsAgenticContextLimits()
+    {
+        const string yaml = """
+            review:
+              agentic_context: true
+              max_context_requests: 4
+              max_context_file_bytes: 64000
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Review.AgenticContext.Should().BeTrue();
+        config.Review.MaxContextRequests.Should().Be(4);
+        config.Review.MaxContextFileBytes.Should().Be(64_000);
+    }
+
+    [Fact]
     public async Task FetchAsyncLogsWarningAndDefaultsLowOnUnknownMinConfidence()
     {
         const string yaml = """
@@ -313,6 +344,8 @@ public class RepoConfigFetcherTests
             review:
               max_files: 0
               max_patch_lines: -1
+              max_context_requests: 0
+              max_context_file_bytes: -10
             """;
         var contents = Substitute.For<IRepositoryContentsClient>();
         contents
@@ -325,10 +358,16 @@ public class RepoConfigFetcherTests
 
         config.Review.MaxFiles.Should().Be(ReviewConfig.Default.Review.MaxFiles);
         config.Review.MaxPatchLines.Should().Be(ReviewConfig.Default.Review.MaxPatchLines);
+        config.Review.MaxContextRequests.Should().Be(ReviewConfig.Default.Review.MaxContextRequests);
+        config.Review.MaxContextFileBytes.Should().Be(ReviewConfig.Default.Review.MaxContextFileBytes);
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_files=0", StringComparison.Ordinal));
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_patch_lines=-1", StringComparison.Ordinal));
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_context_requests=0", StringComparison.Ordinal));
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_context_file_bytes=-10", StringComparison.Ordinal));
     }
 
     private static RepoConfigFetcher CreateFetcher(

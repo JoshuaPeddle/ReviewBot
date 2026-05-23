@@ -1,3 +1,4 @@
+using System.Text;
 using FluentAssertions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -379,6 +380,71 @@ public class PullRequestFetcherTests
         await act.Should().ThrowAsync<NotFoundException>();
     }
 
+    [Fact]
+    public async Task GetFileContentsAsyncFetchesTextFilesWithBoundedBatchAndPreservesRequestOrder()
+    {
+        var (clientFactory, contents) = CreateClientFactoryWithContents();
+        contents.GetAllContentsByRef("octo", "repo", "src/B.cs", "head-sha")
+            .Returns([CreateRepositoryContent("src/B.cs", "public class B {}")]);
+        contents.GetAllContentsByRef("octo", "repo", "src/A.cs", "head-sha")
+            .Returns([CreateRepositoryContent("src/A.cs", "public class A {}")]);
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var result = await fetcher.GetFileContentsAsync(
+            "octo",
+            "repo",
+            [
+                new ContextRequest("src/B.cs", null),
+                new ContextRequest("src/A.cs", null)
+            ],
+            "head-sha",
+            maxBytes: 1000,
+            "ghs_token",
+            CancellationToken.None);
+
+        result.Should().Equal(
+            ("src/B.cs", "public class B {}"),
+            ("src/A.cs", "public class A {}"));
+        await contents.Received(1).GetAllContentsByRef("octo", "repo", "src/B.cs", "head-sha");
+        await contents.Received(1).GetAllContentsByRef("octo", "repo", "src/A.cs", "head-sha");
+    }
+
+    [Fact]
+    public async Task GetFileContentsAsyncSkipsMissingOversizedBinaryAndInvalidContent()
+    {
+        var (clientFactory, contents) = CreateClientFactoryWithContents();
+        contents.GetAllContentsByRef("octo", "repo", "src/Good.cs", "head-sha")
+            .Returns([CreateRepositoryContent("src/Good.cs", "public class Good {}")]);
+        contents.GetAllContentsByRef("octo", "repo", "src/Missing.cs", "head-sha")
+            .Returns(_ => Task.FromException<IReadOnlyList<RepositoryContent>>(
+                new NotFoundException("Not found", System.Net.HttpStatusCode.NotFound)));
+        contents.GetAllContentsByRef("octo", "repo", "src/Large.cs", "head-sha")
+            .Returns([CreateRepositoryContent("src/Large.cs", "too large", size: 2_000)]);
+        contents.GetAllContentsByRef("octo", "repo", "src/Binary.bin", "head-sha")
+            .Returns([CreateRepositoryContent("src/Binary.bin", [0x66, 0x00, 0x6f])]);
+        contents.GetAllContentsByRef("octo", "repo", "src/Invalid.txt", "head-sha")
+            .Returns([CreateRepositoryContentWithEncodedContent("src/Invalid.txt", "not base64")]);
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var result = await fetcher.GetFileContentsAsync(
+            "octo",
+            "repo",
+            [
+                new ContextRequest("src/Missing.cs", null),
+                new ContextRequest("src/Large.cs", null),
+                new ContextRequest("src/Binary.bin", null),
+                new ContextRequest("src/Invalid.txt", null),
+                new ContextRequest("src/Good.cs", null)
+            ],
+            "head-sha",
+            maxBytes: 100,
+            "ghs_token",
+            CancellationToken.None);
+
+        result.Should().ContainSingle()
+            .Which.Should().Be(("src/Good.cs", "public class Good {}"));
+    }
+
     private static IGitHubClientFactory CreateClientFactory(IPullRequestsClient pullRequests)
     {
         var gitHubClient = Substitute.For<IGitHubClient>();
@@ -403,6 +469,21 @@ public class PullRequestFetcherTests
         clientFactory.CreateForInstallation("ghs_token").Returns(gitHubClient);
 
         return (clientFactory, commits);
+    }
+
+    private static (IGitHubClientFactory ClientFactory, IRepositoryContentsClient Contents) CreateClientFactoryWithContents()
+    {
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        var repository = Substitute.For<IRepositoriesClient>();
+        repository.Content.Returns(contents);
+
+        var gitHubClient = Substitute.For<IGitHubClient>();
+        gitHubClient.Repository.Returns(repository);
+
+        var clientFactory = Substitute.For<IGitHubClientFactory>();
+        clientFactory.CreateForInstallation("ghs_token").Returns(gitHubClient);
+
+        return (clientFactory, contents);
     }
 
     private static PullRequest CreatePullRequest() => new(
@@ -526,4 +607,32 @@ public class PullRequestFetcherTests
         totalCommits: files.Length,
         commits: [],
         files: files);
+
+    private static RepositoryContent CreateRepositoryContent(string path, string content, int? size = null) =>
+        CreateRepositoryContent(path, Encoding.UTF8.GetBytes(content), size);
+
+    private static RepositoryContent CreateRepositoryContent(string path, byte[] bytes, int? size = null) =>
+        CreateRepositoryContentWithEncodedContent(path, Convert.ToBase64String(bytes), size ?? bytes.Length);
+
+    private static RepositoryContent CreateRepositoryContentWithEncodedContent(
+        string path,
+        string encodedContent,
+        int size = 0)
+    {
+        var name = Path.GetFileName(path);
+        return new RepositoryContent(
+            name,
+            path,
+            "file-sha",
+            size,
+            ContentType.File,
+            $"https://raw.githubusercontent.com/octo/repo/head-sha/{path}",
+            $"https://api.github.com/repos/octo/repo/contents/{path}",
+            $"https://api.github.com/repos/octo/repo/git/blobs/file-sha",
+            $"https://github.com/octo/repo/blob/head-sha/{path}",
+            "base64",
+            encodedContent,
+            null,
+            null);
+    }
 }

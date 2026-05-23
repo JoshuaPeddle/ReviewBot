@@ -42,4 +42,13 @@ public interface IPullRequestFetcher
         string headSha,
         string installationToken,
         CancellationToken ct);
+
+    Task<IReadOnlyList<(string Path, string Content)>> GetFileContentsAsync(
+        string owner,
+        string repo,
+        IReadOnlyList<ContextRequest> requests,
+        string sha,
+        int maxBytes,
+        string installationToken,
+        CancellationToken ct);
 }

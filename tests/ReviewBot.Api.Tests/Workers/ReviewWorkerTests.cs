@@ -876,6 +876,261 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task AgenticContextDisabledDoesNotFetchRequestedFiles()
+    {
+        await using var fixture = new WorkerFixture();
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Initial.",
+                [],
+                [new ContextRequest("src/IFoo.cs", "interface contract")]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await fixture.PullRequestFetcher.DidNotReceiveWithAnyArgs()
+            .GetFileContentsAsync(default!, default!, default!, default!, default, default!, default);
+        await fixture.Llm.DidNotReceiveWithAnyArgs()
+            .CompleteRawAsync(default!, default);
+    }
+
+    [Fact]
+    public async Task AgenticContextFetchesFilesAndUsesSecondPassResult()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { AgenticContext = true }
+        };
+        IReadOnlyList<ContextRequest>? fetchedRequests = null;
+        PromptPayload? enrichedPrompt = null;
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Initial summary.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "Initial comment.", Severity.Info)],
+                [
+                    new ContextRequest("src/IFoo.cs", "contract"),
+                    new ContextRequest("src/Base.cs", "base class")
+                ]));
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                fetchedRequests = call.ArgAt<IReadOnlyList<ContextRequest>>(2);
+                return new List<(string Path, string Content)>
+                {
+                    ("src/IFoo.cs", "public interface IFoo { void Save(); }"),
+                    ("src/Base.cs", "public abstract class Base { }")
+                };
+            });
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                enrichedPrompt = call.Arg<PromptPayload>();
+                return """
+                {
+                  "summary": "Final summary.",
+                  "comments": [
+                    {
+                      "path": "src/App.cs",
+                      "line": 1,
+                      "side": "RIGHT",
+                      "severity": "error",
+                      "confidence": "high",
+                      "body": "Final context-informed comment."
+                    }
+                  ]
+                }
+                """;
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        fetchedRequests!.Select(request => request.Path).Should().Equal("src/IFoo.cs", "src/Base.cs");
+        enrichedPrompt.Should().NotBeNull();
+        enrichedPrompt!.UserPrompt.Should().Contain("public interface IFoo");
+        enrichedPrompt.UserPrompt.Should().Contain("Initial comment.");
+        postedResult!.Summary.Should().Be("Final summary.");
+        postedResult.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("Final context-informed comment.");
+    }
+
+    [Fact]
+    public async Task AgenticContextFiltersUnsafeIgnoredDuplicateAndOverCapRequestsBeforeFetching()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                AgenticContext = true,
+                MaxContextRequests = 2
+            },
+            Ignore = ["docs/**"]
+        };
+        IReadOnlyList<ContextRequest>? fetchedRequests = null;
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Initial.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "Initial stays.", Severity.Info)],
+                [
+                    new ContextRequest("../bad.cs", null),
+                    new ContextRequest("/absolute.cs", null),
+                    new ContextRequest(@"src\Bad.cs", null),
+                    new ContextRequest("docs/Guide.md", null),
+                    new ContextRequest("src/Good.cs", null),
+                    new ContextRequest("src/Good.cs", null),
+                    new ContextRequest(".env", null),
+                    new ContextRequest("certs/prod.pem", null),
+                    new ContextRequest("src/Second.cs", null),
+                    new ContextRequest("src/Third.cs", null)
+                ]));
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                fetchedRequests = call.ArgAt<IReadOnlyList<ContextRequest>>(2);
+                return Array.Empty<(string Path, string Content)>();
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        fetchedRequests!.Select(request => request.Path).Should().Equal("src/Good.cs", "src/Second.cs");
+        await fixture.Llm.DidNotReceiveWithAnyArgs()
+            .CompleteRawAsync(default!, default);
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("Initial stays.");
+    }
+
+    [Fact]
+    public async Task AgenticContextSkipsSecondPassWhenNoFilesAreFetched()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { AgenticContext = true }
+        };
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Initial.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "Initial survives.", Severity.Info)],
+                [new ContextRequest("src/Missing.cs", null)]));
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(Array.Empty<(string Path, string Content)>());
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await fixture.Llm.DidNotReceiveWithAnyArgs()
+            .CompleteRawAsync(default!, default);
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("Initial survives.");
+    }
+
+    [Fact]
+    public async Task AgenticContextSecondPassFailurePostsInitialComments()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { AgenticContext = true }
+        };
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Initial.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "Initial survives failure.", Severity.Info)],
+                [new ContextRequest("src/IFoo.cs", null)]));
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs([("src/IFoo.cs", "public interface IFoo {}")]);
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("context LLM failed"));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("Initial survives failure.");
+    }
+
+    [Fact]
     public async Task SelfCritiqueDisabledDoesNotCallRawCompletion()
     {
         await using var fixture = new WorkerFixture();
