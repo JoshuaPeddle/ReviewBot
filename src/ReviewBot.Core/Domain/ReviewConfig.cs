@@ -8,7 +8,8 @@ public sealed record ReviewConfig(
     ReviewOutputConfig Review,
     IReadOnlyList<string> Ignore,
     IReadOnlyList<string> Focus,
-    string Instructions)
+    string Instructions,
+    GroundingConfig Grounding)
 {
     public static ReviewConfig Default { get; } = new(
         Enabled: true,
@@ -32,7 +33,27 @@ public sealed record ReviewConfig(
             "concurrency",
             "error_handling"
         ]),
-        Instructions: string.Empty);
+        Instructions: string.Empty,
+        Grounding: GroundingConfig.Default);
+}
+
+public sealed record GroundingConfig(
+    bool Enabled,
+    bool Build,
+    bool Tests,
+    int BuildTimeoutSeconds,
+    int TestTimeoutSeconds,
+    string? BuildCommand,
+    string? TestCommand)
+{
+    public static GroundingConfig Default { get; } = new(
+        Enabled: true,
+        Build: false,
+        Tests: false,
+        BuildTimeoutSeconds: 120,
+        TestTimeoutSeconds: 300,
+        BuildCommand: null,
+        TestCommand: null);
 }
 
 public sealed record ModelConfig(

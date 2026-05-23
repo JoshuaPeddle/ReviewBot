@@ -2,7 +2,9 @@
 
 ## Current state (v1, 2026-05-23)
 
-Phases 1–7 complete (22 steps). The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 124 tests passing, Docker image published on tags.
+Phases 1–7 complete (22 steps), Step 23 complete. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 131 tests passing, Docker image published on tags.
+
+Step 23 added: `ReviewBot.Grounding` class library with grounding abstractions (`GroundingContext`, `LanguageMetadata`, `BuildResult`, `TestResult`, `IGroundingProvider`, `GroundingRequest`, `ILanguageDetector`, `IRepoContentReader`); `GroundingConfig` record added to `ReviewBot.Core.Domain`; `ReviewConfig` extended with `Grounding` property; `RepoConfigFetcher` updated to parse `grounding:` YAML block with partial merge; example config updated; 5 new tests (3 in `ReviewBot.Grounding.Tests`, 2 in `ReviewBot.GitHub.Tests`).
 
 ---
 

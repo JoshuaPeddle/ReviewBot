@@ -159,6 +159,60 @@ public class RepoConfigFetcherTests
     }
 
     [Fact]
+    public async Task FetchAsyncMapsGroundingSection()
+    {
+        const string yaml = """
+            grounding:
+              enabled: false
+              build: true
+              tests: true
+              build_timeout_seconds: 60
+              test_timeout_seconds: 180
+              build_command: "dotnet build -c Release"
+              test_command: "dotnet test"
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Grounding.Enabled.Should().BeFalse();
+        config.Grounding.Build.Should().BeTrue();
+        config.Grounding.Tests.Should().BeTrue();
+        config.Grounding.BuildTimeoutSeconds.Should().Be(60);
+        config.Grounding.TestTimeoutSeconds.Should().Be(180);
+        config.Grounding.BuildCommand.Should().Be("dotnet build -c Release");
+        config.Grounding.TestCommand.Should().Be("dotnet test");
+    }
+
+    [Fact]
+    public async Task FetchAsyncMergesPartialGroundingWithDefaults()
+    {
+        const string yaml = """
+            grounding:
+              build: true
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Grounding.Build.Should().BeTrue();
+        config.Grounding.Enabled.Should().Be(GroundingConfig.Default.Enabled);
+        config.Grounding.Tests.Should().Be(GroundingConfig.Default.Tests);
+        config.Grounding.BuildTimeoutSeconds.Should().Be(GroundingConfig.Default.BuildTimeoutSeconds);
+        config.Grounding.TestTimeoutSeconds.Should().Be(GroundingConfig.Default.TestTimeoutSeconds);
+        config.Grounding.BuildCommand.Should().Be(GroundingConfig.Default.BuildCommand);
+        config.Grounding.TestCommand.Should().Be(GroundingConfig.Default.TestCommand);
+    }
+
+    [Fact]
     public async Task FetchAsyncFallsBackToDefaultsWhenNumericLimitsAreInvalid()
     {
         const string yaml = """

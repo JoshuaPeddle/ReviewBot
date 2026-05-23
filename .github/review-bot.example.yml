@@ -76,3 +76,38 @@ instructions: |
   - SQL injection via raw query strings
   - Missing input validation at API boundaries
   Do not comment on code style or formatting — ESLint + Prettier handle that in CI.
+
+# Language grounding — inject verified project metadata into the review prompt so the
+# model cannot reason from stale training-data assumptions (e.g. treating .NET 10 as
+# "on the roadmap" rather than the current runtime).
+grounding:
+  # Read project config files via the GitHub Contents API and inject facts into the prompt.
+  # Tier 1 only. No cloning required, negligible latency overhead.
+  # Default: true
+  enabled: true
+
+  # Clone the PR branch and run a build/type-check command. Proves syntax validity.
+  # Tier 2. Adds clone + build time to the review latency.
+  # Recommended only when running ReviewBot in a resource-limited container (see docs).
+  # Default: false
+  build: false
+
+  # Build command to run. null = auto-detect from language (dotnet build / mypy / etc.)
+  # Default: null
+  # build_command: "dotnet build --no-restore -c Release"
+
+  # Timeout for the build command in seconds.
+  # Default: 120
+  build_timeout_seconds: 120
+
+  # Run the test suite during grounding. Proves behavioral correctness. Tier 3 (future).
+  # Default: false
+  tests: false
+
+  # Test command to run. null = auto-detect from language.
+  # Default: null
+  # test_command: "dotnet test --no-build"
+
+  # Timeout for the test command in seconds.
+  # Default: 300
+  test_timeout_seconds: 300

@@ -168,13 +168,33 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
                 path),
             trigger);
 
+        var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
+
         return new ReviewConfig(
             fileConfig.Enabled ?? defaults.Enabled,
             model,
             review,
             fileConfig.Ignore ?? defaults.Ignore,
             fileConfig.Focus ?? defaults.Focus,
-            MergeString(fileConfig.Instructions?.Trim(), defaults.Instructions));
+            MergeString(fileConfig.Instructions?.Trim(), defaults.Instructions),
+            grounding);
+    }
+
+    private GroundingConfig MergeGrounding(GroundingConfigFile? file, GroundingConfig defaults)
+    {
+        if (file is null)
+        {
+            return defaults;
+        }
+
+        return new GroundingConfig(
+            file.Enabled ?? defaults.Enabled,
+            file.Build ?? defaults.Build,
+            file.Tests ?? defaults.Tests,
+            file.BuildTimeoutSeconds ?? defaults.BuildTimeoutSeconds,
+            file.TestTimeoutSeconds ?? defaults.TestTimeoutSeconds,
+            file.BuildCommand ?? defaults.BuildCommand,
+            file.TestCommand ?? defaults.TestCommand);
     }
 
     private string MergeProvider(string? provider, string owner, string repo, string sha, string path)
@@ -278,6 +298,8 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public List<string>? Focus { get; set; }
 
         public string? Instructions { get; set; }
+
+        public GroundingConfigFile? Grounding { get; set; }
     }
 
     private sealed class ModelConfigFile
@@ -319,5 +341,26 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public bool? OnReviewRequest { get; set; }
 
         public bool? OnPush { get; set; }
+    }
+
+    private sealed class GroundingConfigFile
+    {
+        public GroundingConfigFile()
+        {
+        }
+
+        public bool? Enabled { get; set; }
+
+        public bool? Build { get; set; }
+
+        public bool? Tests { get; set; }
+
+        public int? BuildTimeoutSeconds { get; set; }
+
+        public int? TestTimeoutSeconds { get; set; }
+
+        public string? BuildCommand { get; set; }
+
+        public string? TestCommand { get; set; }
     }
 }
