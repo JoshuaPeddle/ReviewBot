@@ -494,7 +494,7 @@ Completion notes:
 - Risk register unchanged; no new risks opened by the token-client/cache chunk.
 - Stop test passed: `dotnet test tests/ReviewBot.GitHub.Tests/ReviewBot.GitHub.Tests.csproj -c Release` completed successfully with 8 green GitHub tests.
 
-### Step 12: GitHub PR fetcher
+### Step 12: GitHub PR fetcher - Completed 2026-05-23
 
 ```text
 In ReviewBot.GitHub/Pulls/, create `PullRequestFetcher`.
@@ -527,6 +527,15 @@ Tests in ReviewBot.GitHub.Tests/Pulls/PullRequestFetcherTests.cs:
 
 Deliverable: one call gets everything the LLM needs to review a PR.
 ```
+
+Completion notes:
+- Added `ReviewBot.GitHub/Pulls/PullRequestFetcher`, `PullRequestSnapshot`, `IGitHubClientFactory`, and `OctokitGitHubClientFactory`. The fetcher creates an installation-authenticated Octokit client, fetches PR title/body/base/head metadata, pages through changed files up to the default `ReviewConfig.Default.Review.MaxFiles` cap, maps GitHub file statuses to `FileChangeStatus`, computes RIGHT-side commentable lines with `UnifiedDiffParser`, and omits files whose patch is unavailable.
+- Added the planned `Octokit` package reference to `ReviewBot.GitHub`. This was a missing dependency for Phase 4 and was fixed before writing the fetcher code.
+- Added `ReviewBot.GitHub.Tests/Pulls/PullRequestFetcherTests` covering metadata/file mapping, null-patch omission, multi-page file fetching, the default 50-file cap, and installation-token client creation.
+- Corrected assumption: Octokit 14 exposes changed-file fetching as `PullRequest.Files(...)`, not `PullRequest.Files.GetAll`.
+- Corrected assumption: Octokit response model properties are readable but not publicly settable in test code, so tests construct `PullRequest`, `GitReference`, and `PullRequestFile` instances through Octokit's public constructors rather than object initializers.
+- Risk register updated to record that Step 12's pagination risk is covered by focused tests; no new open risks were introduced.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests, 20 green LLM tests, and 13 green GitHub tests. The Api/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
 ### Step 13: Review poster
 
@@ -1073,6 +1082,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 9; provider selection is isolated behind Core-owned abstractions, unused providers are not resolved during selection, and per-call model override behavior is covered by factory and provider tests.
 - No new risks opened by Step 10; GitHub App JWT signing is dependency-free, isolated to `ReviewBot.GitHub.Auth`, and verified with generated RSA keypairs.
 - No new risks opened by Step 11; installation token acquisition is isolated to `ReviewBot.GitHub.Auth`, failures have a specific exception surface, and cache stampede behavior is covered by concurrent tests.
+- No new risks opened by Step 12; PR fetching is isolated to `ReviewBot.GitHub.Pulls`, uses the planned Octokit dependency, and has focused tests for pagination and the default max-file cap.
 
 ## What is intentionally NOT in v1
 
