@@ -12,28 +12,28 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
 
     private readonly AnthropicLlmOptions options;
     private readonly ILogger<AnthropicReviewLlm> logger;
-    private readonly IAnthropicClient client;
+    private readonly IAnthropicClient? configuredClient;
+    private IAnthropicClient? sdkClient;
 
     public AnthropicReviewLlm(
         AnthropicLlmOptions options,
         ILogger<AnthropicReviewLlm> logger,
         HttpClient? httpClient = null)
-        : this(options, logger, new AnthropicSdkClient(options, httpClient))
+        : this(options, logger, httpClient is null ? null : new AnthropicSdkClient(options, httpClient))
     {
     }
 
     internal AnthropicReviewLlm(
         AnthropicLlmOptions options,
         ILogger<AnthropicReviewLlm> logger,
-        IAnthropicClient client)
+        IAnthropicClient? client)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
-        ArgumentNullException.ThrowIfNull(client);
 
         this.options = options;
         this.logger = logger;
-        this.client = client;
+        configuredClient = client;
     }
 
     public async Task<ReviewResult> ReviewAsync(ReviewRequest request, CancellationToken ct)
@@ -67,11 +67,11 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         return new AnthropicReviewLlm(
             options with { ModelName = modelName },
             logger,
-            client);
+            configuredClient ?? sdkClient);
     }
 
     private Task<string> SendAsync(PromptPayload prompt, IReadOnlyList<string> userMessages, CancellationToken ct) =>
-        client.CreateMessageAsync(
+        GetClient().CreateMessageAsync(
             new AnthropicMessageRequest(
                 SystemPrompt: prompt.SystemPrompt,
                 UserMessages: userMessages,
@@ -79,4 +79,7 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
                 MaxTokens: options.MaxTokens,
                 Temperature: options.Temperature),
             ct);
+
+    private IAnthropicClient GetClient() =>
+        configuredClient ?? (sdkClient ??= new AnthropicSdkClient(options));
 }

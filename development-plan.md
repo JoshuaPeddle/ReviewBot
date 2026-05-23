@@ -948,7 +948,7 @@ Completion notes:
 - Risk register unchanged; no new risks opened by the idempotency-store chunk.
 - Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 green Core tests, 20 green LLM tests, 26 green GitHub tests, 22 green API tests, and 7 green Persistence tests.
 
-### Step 20: Composition root, options validation, health checks, smoke test
+### Step 20: Composition root, options validation, health checks, smoke test - Completed 2026-05-23
 
 ```text
 In ReviewBot.Api/Program.cs, wire everything together. Use minimal hosting.
@@ -1011,6 +1011,16 @@ Tests:
 
 Deliverable: the whole thing boots, migrations apply, the whole pipeline runs in-process under test, and `dotnet run` from ReviewBot.Api is sufficient to start the service locally.
 ```
+
+Completion notes:
+- Wired the API composition root end to end: typed option binding and startup validation, GitHub App signer/token provider/cache, Octokit collaborators, LLM provider factory and both provider registrations, SQLite persistence, real channel queue, review worker, delivery cleanup service, startup EF Core migration, `/webhook`, `/healthz`, and a simple root version endpoint.
+- Added `PersistenceOptions`, option validators for GitHub App, webhook, and persistence settings, complete appsettings placeholders/examples, and the EF Core health-check package.
+- Added API composition smoke tests covering `/healthz` after migrations and a signed webhook flowing through idempotency, the real queue, the hosted worker, a stub LLM, and a substitute poster.
+- Fixed the LLM provider area before composition: Anthropic/OpenAI SDK clients now initialize lazily so the host can start with placeholder or unused provider API keys, while missing credentials still fail when that provider is actually used.
+- Fixed the webhook test queue to tolerate the now-real hosted worker reading from `IReviewJobQueue` during endpoint tests.
+- Corrected assumption: `BotSlug` remains a webhook-bound setting because event filtering uses it at the HTTP boundary; `GitHubAppOptions` only carries the app id and private key needed for app JWT signing.
+- Risk register updated to close the Step 19 deferred startup registration/migration risk; no new risks opened by the composition chunk.
+- Stop test passed: `dotnet test ReviewBot.sln -c Release` completed successfully with 35 green Core tests, 20 green LLM tests, 26 green GitHub tests, 7 green Persistence tests, and 24 green API tests.
 
 ### Step 21: Hardening, big PRs, retries
 
@@ -1154,7 +1164,8 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 16; the webhook endpoint now verifies raw-body signatures before parsing, filters events before queueing, and is covered by `WebApplicationFactory` tests around authenticity and queue handoff.
 - No new risks opened by Step 17; job handoff is isolated to `ReviewBot.Core.Jobs`, the bounded-channel backpressure and single-reader behavior are covered by focused tests, and production DI is ready for the Step 16 endpoint.
 - No new risks opened by Step 18; worker orchestration is isolated to `ReviewBot.Api.Workers`, uses interface seams for all GitHub/LLM collaborators, honors repo config before review execution, and has focused tests for branch logic and loop resilience.
-- No new risks opened by Step 19; idempotency persistence is isolated behind `IDeliveryStore`, SQLite-specific insert/delete SQL is confined to `EfCoreDeliveryStore`, migrations are checked in and verified by test, and startup registration/migration remains the planned Step 20 composition task.
+- Closed 2026-05-23: Step 19's deferred startup registration and migration task is complete. Step 20 registers persistence in the composition root, runs pending EF Core migrations before serving requests, and verifies boot plus `/healthz` through an in-memory SQLite smoke test.
+- No new risks opened by Step 20; composition is covered by host-level health and signed-webhook pipeline tests, and unused LLM providers can remain uncredentialed until selected by repo config.
 
 ## What is intentionally NOT in v1
 

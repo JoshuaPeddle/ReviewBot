@@ -2,6 +2,8 @@ namespace ReviewBot.Llm.OpenAi;
 
 public sealed record OpenAiLlmOptions
 {
+    public const string SectionName = "OpenAi";
+
     public string ApiKey { get; set; } = string.Empty;
 
     public string ModelName { get; set; } = "gpt-5.1";

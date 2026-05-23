@@ -1,10 +1,12 @@
 using System.Net;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using FluentAssertions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using ReviewBot.Api.Webhooks;
@@ -126,6 +128,18 @@ public class WebhookEndpointTests
         return new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
+                builder.ConfigureAppConfiguration((_, configuration) =>
+                {
+                    configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["Webhook:Secret"] = Secret,
+                        ["Webhook:BotSlug"] = BotSlug,
+                        ["GitHubApp:AppId"] = "12345",
+                        ["GitHubApp:PrivateKeyPem"] = "test-private-key-placeholder",
+                        ["Persistence:ConnectionString"] = "Data Source=:memory:",
+                    });
+                });
+
                 builder.ConfigureTestServices(services =>
                 {
                     services.RemoveAll<IReviewJobQueue>();
@@ -217,9 +231,17 @@ public class WebhookEndpointTests
             return ValueTask.CompletedTask;
         }
 
-        public IAsyncEnumerable<ReviewJob> DequeueAllAsync(CancellationToken ct)
+        public async IAsyncEnumerable<ReviewJob> DequeueAllAsync([EnumeratorCancellation] CancellationToken ct)
         {
-            throw new NotSupportedException();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+            }
+
+            yield break;
         }
 
         public void Dispose()

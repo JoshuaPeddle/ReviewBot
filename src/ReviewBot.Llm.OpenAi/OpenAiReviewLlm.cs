@@ -12,25 +12,25 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
 
     private readonly OpenAiLlmOptions options;
     private readonly ILogger<OpenAiReviewLlm> logger;
-    private readonly IOpenAiChatClient client;
+    private readonly IOpenAiChatClient? configuredClient;
+    private IOpenAiChatClient? sdkClient;
 
     public OpenAiReviewLlm(OpenAiLlmOptions options, ILogger<OpenAiReviewLlm> logger)
-        : this(options, logger, new OpenAiSdkChatClient(options))
+        : this(options, logger, null)
     {
     }
 
     internal OpenAiReviewLlm(
         OpenAiLlmOptions options,
         ILogger<OpenAiReviewLlm> logger,
-        IOpenAiChatClient client)
+        IOpenAiChatClient? client)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
-        ArgumentNullException.ThrowIfNull(client);
 
         this.options = options;
         this.logger = logger;
-        this.client = client;
+        configuredClient = client;
     }
 
     public async Task<ReviewResult> ReviewAsync(ReviewRequest request, CancellationToken ct)
@@ -64,11 +64,11 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
         return new OpenAiReviewLlm(
             options with { ModelName = modelName },
             logger,
-            client);
+            configuredClient ?? sdkClient);
     }
 
     private Task<string> SendAsync(PromptPayload prompt, IReadOnlyList<string> userMessages, CancellationToken ct) =>
-        client.CompleteChatAsync(
+        GetClient().CompleteChatAsync(
             new OpenAiChatRequest(
                 SystemPrompt: prompt.SystemPrompt,
                 UserMessages: userMessages,
@@ -77,4 +77,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
                 Temperature: options.Temperature,
                 UseJsonMode: options.UseJsonMode),
             ct);
+
+    private IOpenAiChatClient GetClient() =>
+        configuredClient ?? (sdkClient ??= new OpenAiSdkChatClient(options));
 }
