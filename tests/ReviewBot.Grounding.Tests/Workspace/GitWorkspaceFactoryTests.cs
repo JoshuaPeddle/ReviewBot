@@ -53,9 +53,11 @@ public class GitWorkspaceFactoryTests : IDisposable
 
         await act.Should().ThrowAsync<InvalidOperationException>();
 
-        // No orphaned reviewbot temp dirs should remain
-        var orphaned = Directory.GetDirectories(Path.GetTempPath(), "reviewbot-*")
-            .Where(d => Directory.GetCreationTime(d) > DateTime.UtcNow.AddSeconds(-5))
+        // No orphaned reviewbot temp dirs should remain.
+        // The factory names dirs "reviewbot-{32-hex-char-guid}" — match that exact pattern
+        // to avoid picking up unrelated temp dirs from other tests (e.g. reviewbot-build-test-*).
+        var orphaned = Directory.GetDirectories(Path.GetTempPath(), "reviewbot-????????????????????????????????")
+            .Where(d => Directory.GetCreationTimeUtc(d) > DateTime.UtcNow.AddSeconds(-5))
             .ToList();
         orphaned.Should().BeEmpty("temp workspace must be removed after clone failure");
     }
