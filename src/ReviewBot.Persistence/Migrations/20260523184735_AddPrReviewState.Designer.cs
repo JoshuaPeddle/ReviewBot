@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using ReviewBot.Persistence;
 
@@ -10,9 +11,11 @@ using ReviewBot.Persistence;
 namespace ReviewBot.Persistence.Migrations
 {
     [DbContext(typeof(ReviewBotDbContext))]
-    partial class ReviewBotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260523184735_AddPrReviewState")]
+    partial class AddPrReviewState
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.8");

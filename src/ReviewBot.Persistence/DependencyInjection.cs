@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using ReviewBot.Core.Idempotency;
+using ReviewBot.Core.Storage;
 
 namespace ReviewBot.Persistence;
 
@@ -17,6 +18,7 @@ public static class DependencyInjection
         services.TryAddSingleton(TimeProvider.System);
         services.AddDbContextFactory<ReviewBotDbContext>(configure);
         services.AddSingleton<IDeliveryStore, EfCoreDeliveryStore>();
+        services.AddSingleton<IPrReviewStateStore, EfCorePrReviewStateStore>();
 
         return services;
     }
