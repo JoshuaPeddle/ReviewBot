@@ -1,0 +1,14 @@
+[
+  {
+    "sha": "file-sha-1",
+    "filename": "src/Services/UserService.cs",
+    "status": "modified",
+    "additions": 3,
+    "deletions": 1,
+    "changes": 4,
+    "blob_url": "https://github.com/owner/repo/blob/abc123/src/Services/UserService.cs",
+    "raw_url": "https://raw.githubusercontent.com/owner/repo/abc123/src/Services/UserService.cs",
+    "contents_url": "https://api.github.com/repos/owner/repo/contents/src/Services/UserService.cs",
+    "patch": "@@ -8,6 +8,8 @@ public string GetDisplayName(int userId)\n     {\n         var user = _repository.FindById(userId);\n+        if (user is null) return string.Empty;\n+        Console.WriteLine(user.Id);\n         return user.FirstName + \" \" + user.LastName;\n     }"
+  }
+]

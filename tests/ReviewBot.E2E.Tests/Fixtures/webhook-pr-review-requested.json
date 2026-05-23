@@ -1,0 +1,33 @@
+{
+  "action": "review_requested",
+  "installation": {
+    "id": 98765
+  },
+  "repository": {
+    "name": "repo",
+    "owner": {
+      "login": "owner"
+    }
+  },
+  "pull_request": {
+    "number": 1,
+    "html_url": "https://github.com/owner/repo/pull/1",
+    "head": {
+      "sha": "abc123"
+    },
+    "user": {
+      "login": "developer"
+    },
+    "requested_reviewers": [
+      {
+        "login": "reviewbot[bot]"
+      }
+    ]
+  },
+  "requested_reviewer": {
+    "login": "reviewbot[bot]"
+  },
+  "sender": {
+    "login": "developer"
+  }
+}

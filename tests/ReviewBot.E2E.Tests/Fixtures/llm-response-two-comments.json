@@ -1,0 +1,21 @@
+{
+  "summary": "Found two issues worth reviewing.",
+  "comments": [
+    {
+      "path": "src/Services/UserService.cs",
+      "line": 11,
+      "side": "RIGHT",
+      "severity": "warning",
+      "confidence": "high",
+      "body": "The null check returns an empty display name, which can hide missing users from callers that need to distinguish this case."
+    },
+    {
+      "path": "src/Services/UserService.cs",
+      "line": 12,
+      "side": "RIGHT",
+      "severity": "info",
+      "confidence": "high",
+      "body": "This console write adds noisy process output from a service path; consider using structured logging or removing it."
+    }
+  ]
+}

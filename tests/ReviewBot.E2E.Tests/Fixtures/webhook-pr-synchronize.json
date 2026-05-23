@@ -1,0 +1,26 @@
+{
+  "action": "synchronize",
+  "installation": {
+    "id": 98765
+  },
+  "repository": {
+    "name": "repo",
+    "owner": {
+      "login": "owner"
+    }
+  },
+  "pull_request": {
+    "number": 1,
+    "html_url": "https://github.com/owner/repo/pull/1",
+    "head": {
+      "sha": "def456"
+    },
+    "user": {
+      "login": "developer"
+    },
+    "requested_reviewers": []
+  },
+  "sender": {
+    "login": "developer"
+  }
+}

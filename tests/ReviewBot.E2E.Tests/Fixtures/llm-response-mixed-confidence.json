@@ -1,0 +1,21 @@
+{
+  "summary": "Found one likely issue and one speculative note.",
+  "comments": [
+    {
+      "path": "src/Services/UserService.cs",
+      "line": 12,
+      "side": "RIGHT",
+      "severity": "warning",
+      "confidence": "high",
+      "body": "Console output in service code can leak noisy operational data."
+    },
+    {
+      "path": "src/Services/UserService.cs",
+      "line": 11,
+      "side": "RIGHT",
+      "severity": "info",
+      "confidence": "low",
+      "body": "Returning an empty string may be surprising, depending on caller expectations."
+    }
+  ]
+}

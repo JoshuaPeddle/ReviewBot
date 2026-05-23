@@ -2,7 +2,7 @@
 
 ## Current state (v2, 2026-05-23)
 
-Phases 1–12 complete (Steps 1–38), plus Phase 13 Step 39. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 267 tests passing, 1 skipped Ollama E2E test. Docker image published on tags.
+Phases 1–12 complete (Steps 1–38), plus Phase 13 Steps 39–40. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Build green, 271 tests passing, 1 skipped Ollama E2E test. Docker image published on tags.
 
 Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 build runners (`DotNetBuildRunner`, `PythonBuildRunner`) are registered in `Program.cs`. `CompositeGroundingProvider` starts the workspace clone concurrently with Tier 1 `ExtractMetadataAsync`; on metadata failure the pre-started workspace is disposed; on clone failure `Build` is null and the review proceeds. `ReviewWorker` has a fast-exit when `files.Count == 0` after filtering (no grounding, no LLM call, no review post). Skip-reason counter (`reviewbot.jobs.skipped`) and grounding duration histogram (`reviewbot.grounding.duration_ms`) are live in `ReviewBotMetrics`.
 
@@ -314,10 +314,10 @@ In `ProcessAsync`, after config is loaded and before PR file patches are fetched
 - `WebhookSender` creates a correctly signed pull-request webhook.
 - `WorkerSyncHelper` detects matching requests and passes negative assertions.
 
-### Step 40: Fixture library and baseline E2E scenarios
+### Step 40: Fixture library and baseline E2E scenarios ✓ Complete
 
 **Fixture files** in `tests/ReviewBot.E2E.Tests/Fixtures/` (embedded resources):
-- `webhook-pr-opened.json` — realistic `pull_request.opened` payload for `owner/repo` PR #1, SHA `abc123`.
+- `webhook-pr-review-requested.json` — realistic `pull_request.review_requested` payload for `owner/repo` PR #1, SHA `abc123`, targeting `reviewbot[bot]`.
 - `webhook-pr-synchronize.json` — `pull_request.synchronize` payload, same PR, new SHA `def456`.
 - `pr-files-dotnet.json` — GitHub `/pulls/{n}/files` response with one `.cs` file diff.
 - `pr-files-empty.json` — empty files array.
@@ -325,16 +325,23 @@ In `ProcessAsync`, after config is loaded and before PR file patches are fetched
 - `llm-response-two-comments.json` — canned LLM response: summary + two `high`-confidence comments.
 - `llm-response-mixed-confidence.json` — one `high` and one `low` comment (used in Phase 11 tests).
 - `installation-token-response.json` — GitHub Apps installation access token response.
+- `repo-config-openai.yml` — selects the OpenAI-compatible provider, enables `review.trigger.on_push`, and leaves grounding enabled without local builds.
+- `repo-config-ignore-all.yml` — selects the OpenAI-compatible provider and ignores all changed files.
 
 **Baseline tests** in `ReviewBot.E2E.Tests/Scenarios/`:
 
 `BasicReviewTests` (uses `ReviewBotHarness`):
-- **`PrOpened_PostsTwoComments`**: stub GitHub token endpoint, stub PR files with `pr-files-dotnet.json`, stub LLM with `llm-response-two-comments.json`. Post `webhook-pr-opened.json`. Assert `WorkerSyncHelper` sees two `POST /repos/owner/repo/pulls/1/reviews` calls (or the review comments endpoint, depending on `ReviewPoster` implementation).
-- **`PrOpened_Idempotent`**: deliver same webhook twice (same `X-GitHub-Delivery` ID). Assert LLM called only once and review posted only once.
-- **`PrOpened_EmptyDiff`**: stub PR files with `pr-files-empty.json`. Assert `WorkerSyncHelper.WaitForNoCallAsync` confirms no LLM call, no review POST.
-- **`PrOpened_AllFilesIgnored`**: repo config sets `ignore: ['**']`. Assert no LLM call.
+- **`ReviewRequestedPostsReviewWithTwoComments`**: stubs GitHub token, repo config, PR metadata, PR files, .NET grounding contents, OpenAI-compatible LLM response, and review POST endpoint. Posts `webhook-pr-review-requested.json`. Asserts a single `POST /repos/owner/repo/pulls/1/reviews` payload contains commit `abc123` and two inline comments.
+- **`ReviewRequestedIsIdempotentForDuplicateDelivery`**: delivers the same webhook twice with the same `X-GitHub-Delivery` ID. Asserts the LLM is called once and the review is posted once.
+- **`ReviewRequestedWithEmptyDiffSkipsLlmAndReviewPost`**: stubs PR files with `pr-files-empty.json`. Asserts `WorkerSyncHelper.WaitForNoCallAsync` confirms no LLM call and no review POST.
+- **`ReviewRequestedWithAllFilesIgnoredSkipsLlmAndReviewPost`**: repo config sets `ignore: ['**']`. Asserts no LLM call and no review POST.
 
 Each test class registers a `[Collection("E2E")]` to run sequentially (WireMock port conflicts under parallel execution).
+
+**Corrected implementation assumptions discovered during Step 40:**
+- The production webhook endpoint does not enqueue `pull_request.opened`; it enqueues `pull_request.review_requested` when the requested reviewer is the bot, and `pull_request.synchronize`. Baseline E2E coverage therefore uses `review_requested` for first-review scenarios.
+- `ReviewPoster` posts one pull-request review containing a `comments` array, not one API call per inline comment. Baseline assertions inspect the single review payload and its comment count.
+- The Step 39 Anthropic base URL limitation is handled in Step 40 by embedding repo config fixtures that select the OpenAI-compatible provider for HTTP-mocked scenarios.
 
 ---
 
@@ -780,7 +787,8 @@ builder.Services
 - **Closed (Phase 12 Step 37)**: GitHub's compare API returns at most 300 files. `ChangedFilesResult.IsComplete` is `false` when `Paths.Count >= 300`; the worker (Step 38) must not use the truncated path list as an allowlist in that case.
 - **Open**: Octokit 14 model classes (`CompareResult`, `GitHubCommitFile`, etc.) have non-virtual properties. NSubstitute cannot mock them. Tests must construct these types directly via their public constructors. Future tests touching new Octokit model types should verify property virtuality before attempting `Substitute.For<T>()`. The `client.Repository.Commit.Compare` API uses singular `Commit`, not `Commits`.
 - **Closed (Phase 13 Step 39)**: E2E WireMock required a configurable GitHub API base URL. Added `GitHubApp.ApiBaseUrl` and used an explicit Octokit `Connection` so configured API URLs are not rewritten to GitHub Enterprise `/api/v3` paths.
-- **Open (Phase 13 Step 40)**: The current Anthropic SDK adapter has no configurable base URL. HTTP-mocked E2E scenarios should select the OpenAI-compatible provider through `.github/review-bot.yml`, or add Anthropic base URL injection before testing Anthropic over WireMock.
+- **Closed (Phase 13 Step 40)**: The baseline E2E plan assumed `pull_request.opened` was reviewable and that inline comments produced separate GitHub review API calls. The implemented tests now match production behavior: `review_requested` triggers first-review coverage, and assertions inspect the single review payload's `comments` array.
+- **Open (future Anthropic E2E)**: The current Anthropic SDK adapter has no configurable base URL. HTTP-mocked E2E scenarios should select the OpenAI-compatible provider through `.github/review-bot.yml`, as Step 40 does, or add Anthropic base URL injection before testing Anthropic over WireMock.
 - **Open (Phase 15)**: `IReviewLlm.CompleteRawAsync` is a new interface method. Both `AnthropicReviewLlm` and `OpenAiReviewLlm` must implement it. `StubReviewLlm` in tests needs a stub implementation.
 - **Open (Phase 15)**: Agentic context gives the model influence over which repository files are fetched. Path validation, ignore-glob enforcement, file-size caps, binary rejection, and secret-looking path denial must ship with the feature.
 - **Open (Phase 16)**: Local build/test execution requires SDKs on the worker and executes project code. Keep local-test E2E scenarios behind `[Trait("Category", "RequiresSdk")]` and a CI flag; default Tier 3 E2E should use mocked GitHub Checks/statuses.

@@ -29,4 +29,8 @@
     <ProjectReference Include="..\..\src\ReviewBot.Api\ReviewBot.Api.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="Fixtures\**\*" />
+  </ItemGroup>
+
 </Project>
