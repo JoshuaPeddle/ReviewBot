@@ -298,7 +298,7 @@ Completion notes:
 - Risk register unchanged; no new external dependencies or provider-specific behavior were introduced by this Core-only contract chunk.
 - Stop test passed: `dotnet test ReviewBot.sln -c Release` completed successfully with 30 green Core tests. Non-Core future-phase test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
-### Step 7: Anthropic implementation
+### Step 7: Anthropic implementation - Completed 2026-05-23
 
 ```text
 In ReviewBot.Llm.Anthropic, add the Anthropic.SDK NuGet package. Create `AnthropicReviewLlm : IReviewLlm`.
@@ -328,6 +328,14 @@ Tests in ReviewBot.Llm.Tests/Anthropic/AnthropicReviewLlmTests.cs:
 
 Deliverable: Anthropic implementation behind IReviewLlm with retry-on-malformed and proper error surface.
 ```
+
+Completion notes:
+- Added `ReviewBot.Llm.Anthropic/AnthropicReviewLlm` behind `IReviewLlm`. It builds prompts with `PromptBuilder`, calls the Anthropic Messages API through an internal client seam, parses responses with `LlmResultParser`, retries once when the model returns invalid JSON, and throws `LlmResponseException` after persistent parse failure.
+- Added `AnthropicLlmOptions`, the `AddAnthropicReviewLlm` DI extension, and the `Anthropic.SDK` package dependency. The SDK call is isolated behind `IAnthropicClient`/`AnthropicSdkClient` so retry behavior is unit-testable and SDK churn stays localized.
+- Added focused `ReviewBot.Llm.Tests/Anthropic/AnthropicReviewLlmTests` covering happy path parsing, retry-once recovery, persistent malformed output, cancellation-token propagation, and DI registration.
+- Corrected assumption: `Anthropic.SDK` 5.10.0 is an unofficial Anthropic client package. The current implementation keeps that dependency behind an internal adapter rather than letting SDK types spread across the app.
+- Risk register updated with the unofficial SDK dependency risk and its current mitigation.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests and 5 green LLM tests. The Api/GitHub/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
 ### Step 8: OpenAI-compatible implementation
 
@@ -1024,6 +1032,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 4; prompt construction is isolated to Core and covered by deterministic snapshot and behavior tests.
 - No new risks opened by Step 5; LLM result parsing is isolated to Core and covered by focused malformed-output and validation tests.
 - No new risks opened by Step 6; the LLM contract and stub are isolated to Core and covered by focused behavior tests.
+- Open: `Anthropic.SDK` 5.10.0 is an unofficial Anthropic client. Step 7 mitigates this by confining SDK usage to `AnthropicSdkClient`; revisit the adapter if an official Anthropic .NET SDK becomes available or if the package changes the Messages API surface.
 
 ## What is intentionally NOT in v1
 
