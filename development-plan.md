@@ -2,7 +2,7 @@
 
 ## Current state (v1, 2026-05-23)
 
-Phases 1–8 complete (22 steps + steps 23–28), Phase 9 Steps 29–30 complete. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 205 tests passing, Docker image published on tags. Tier 1 grounding live: .NET and Python repos grounded with verified language version from project config files. Workspace abstraction and git clone implementation ready for Tier 2 build grounding. `IBuildRunner` interface and `DotNetBuildRunner` implementation complete; `GroundingBuilder.AddBuildRunner<T>()` DI extension ready.
+Phases 1–8 complete (22 steps + steps 23–31), Phase 9 Steps 29–31 complete. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 215 tests passing, Docker image published on tags. Tier 1 grounding live: .NET and Python repos grounded with verified language version from project config files. Workspace abstraction and git clone implementation ready for Tier 2 build grounding. `IBuildRunner` interface, `DotNetBuildRunner`, and `PythonBuildRunner` implementations complete; `GroundingBuilder.AddBuildRunner<T>()` DI extension ready.
 
 Step 23 added: `ReviewBot.Grounding` class library with grounding abstractions (`GroundingContext`, `LanguageMetadata`, `BuildResult`, `TestResult`, `IGroundingProvider`, `GroundingRequest`, `ILanguageDetector`, `IRepoContentReader`); `GroundingConfig` record added to `ReviewBot.Core.Domain`; `ReviewConfig` extended with `Grounding` property; `RepoConfigFetcher` updated to parse `grounding:` YAML block with partial merge; example config updated; 5 new tests (3 in `ReviewBot.Grounding.Tests`, 2 in `ReviewBot.GitHub.Tests`).
 
@@ -298,14 +298,17 @@ Tests:
 
 5 tests in `ReviewBot.Grounding.Tests/Languages/DotNet/DotNetBuildRunnerTests.cs`: valid project → success; compile error → failure with error count; `#warning` directive → success with warning count; 1-second timeout → failure result not exception; external cancellation → rethrows `OperationCanceledException`.
 
-### Step 31: Python build runner
+### Step 31: Python build runner ✅
 
 **`PythonBuildRunner : IBuildRunner`** in `ReviewBot.Grounding/Languages/Python/`:
-- Prefers `mypy . --no-error-summary --no-color-output` if `[tool.mypy]` config detected
-- Falls back to `python -m py_compile` on changed files (filenames passed via the `GroundingRequest`)
+- Prefers `python3 -m mypy . --no-error-summary --no-color-output` if mypy config detected (checks `mypy.ini`, `.mypy.ini`, `[tool.mypy]` in `pyproject.toml`, `[mypy]` in `setup.cfg`)
+- Falls back to `python3 -m compileall -q .` on the workspace (syntax-only; all `.py` files recursively)
 - Respects timeout; returns `BuildResult`
+- Errors parsed via `": error:"` pattern for mypy, `SyntaxError` occurrence count for compileall
 
-Tests: fixture Python files with known errors; assert error detection.
+Implementation note: the plan said "filenames passed via `GroundingRequest`" for `py_compile` fallback, but `IBuildRunner.RunAsync` only receives `workspacePath` and `GroundingConfig` — not the request. Using `compileall` on the full workspace is correct: the cloned PR branch is small, and checking all files is the right safety net. Changing file names are not needed.
+
+10 tests in `ReviewBot.Grounding.Tests/Languages/Python/PythonBuildRunnerTests.cs`: valid file → success; syntax error → failure with error count; mypy config present → uses mypy (skipped when mypy not installed); timeout → returns failure not exception; external cancellation → rethrows; `HasMypyConfig` theory covering all 4 config locations plus a negative case.
 
 ### Step 32: Workspace integration in grounding provider
 
