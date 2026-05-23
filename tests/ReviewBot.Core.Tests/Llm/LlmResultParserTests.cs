@@ -168,6 +168,101 @@ public class LlmResultParserTests
     }
 
     [Fact]
+    public void ConfidenceLowParsedFromResponse()
+    {
+        const string rawResponse = """
+            {
+              "summary": "One issue.",
+              "comments": [
+                {
+                  "path": "src/Review.cs",
+                  "line": 5,
+                  "body": "Speculative suggestion.",
+                  "confidence": "low"
+                }
+              ]
+            }
+            """;
+
+        var result = LlmResultParser.Parse(rawResponse);
+
+        result.Success.Should().BeTrue();
+        result.Value!.Comments.Should().ContainSingle()
+            .Which.Confidence.Should().Be(Confidence.Low);
+    }
+
+    [Fact]
+    public void ConfidenceMediumParsedFromResponse()
+    {
+        const string rawResponse = """
+            {
+              "summary": "One issue.",
+              "comments": [
+                {
+                  "path": "src/Review.cs",
+                  "line": 5,
+                  "body": "Likely an issue.",
+                  "confidence": "medium"
+                }
+              ]
+            }
+            """;
+
+        var result = LlmResultParser.Parse(rawResponse);
+
+        result.Success.Should().BeTrue();
+        result.Value!.Comments.Should().ContainSingle()
+            .Which.Confidence.Should().Be(Confidence.Medium);
+    }
+
+    [Fact]
+    public void MissingConfidenceFieldDefaultsToHigh()
+    {
+        const string rawResponse = """
+            {
+              "summary": "One issue.",
+              "comments": [
+                {
+                  "path": "src/Review.cs",
+                  "line": 5,
+                  "body": "Definite bug."
+                }
+              ]
+            }
+            """;
+
+        var result = LlmResultParser.Parse(rawResponse);
+
+        result.Success.Should().BeTrue();
+        result.Value!.Comments.Should().ContainSingle()
+            .Which.Confidence.Should().Be(Confidence.High);
+    }
+
+    [Fact]
+    public void UnknownConfidenceValueDefaultsToHigh()
+    {
+        const string rawResponse = """
+            {
+              "summary": "One issue.",
+              "comments": [
+                {
+                  "path": "src/Review.cs",
+                  "line": 5,
+                  "body": "Unknown confidence.",
+                  "confidence": "critical"
+                }
+              ]
+            }
+            """;
+
+        var result = LlmResultParser.Parse(rawResponse);
+
+        result.Success.Should().BeTrue();
+        result.Value!.Comments.Should().ContainSingle()
+            .Which.Confidence.Should().Be(Confidence.High);
+    }
+
+    [Fact]
     public void MalformedJsonReturnsFailureWithError()
     {
         const string rawResponse = """

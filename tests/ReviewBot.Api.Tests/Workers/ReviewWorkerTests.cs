@@ -786,6 +786,90 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task MinConfidenceMediumFiltersLowConfidenceCommentsBeforePosting()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { MinConfidence = Confidence.Medium }
+        };
+        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(snapshot);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Mixed confidence.",
+                [
+                    new InlineComment("src/App.cs", 1, "RIGHT", "High confidence.", Severity.Error, Confidence.High),
+                    new InlineComment("src/App.cs", 2, "RIGHT", "Medium confidence.", Severity.Warning, Confidence.Medium),
+                    new InlineComment("src/App.cs", 3, "RIGHT", "Low confidence.", Severity.Info, Confidence.Low)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Should().HaveCount(2);
+        postedResult.Comments.Should().NotContain(c => c.Confidence == Confidence.Low);
+        postedResult.Comments.Should().Contain(c => c.Confidence == Confidence.High);
+        postedResult.Comments.Should().Contain(c => c.Confidence == Confidence.Medium);
+    }
+
+    [Fact]
+    public async Task MinConfidenceHighRetainsOnlyHighConfidenceComments()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { MinConfidence = Confidence.High }
+        };
+        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(snapshot);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "High threshold.",
+                [
+                    new InlineComment("src/App.cs", 1, "RIGHT", "High.", Severity.Error, Confidence.High),
+                    new InlineComment("src/App.cs", 2, "RIGHT", "Medium.", Severity.Warning, Confidence.Medium),
+                    new InlineComment("src/App.cs", 3, "RIGHT", "Low.", Severity.Info, Confidence.Low)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Confidence.Should().Be(Confidence.High);
+    }
+
+    [Fact]
     public async Task GroundingReturningEmptyContextDoesNotFailTheJob()
     {
         await using var fixture = new WorkerFixture();

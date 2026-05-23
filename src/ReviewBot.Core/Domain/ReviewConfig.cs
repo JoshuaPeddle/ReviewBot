@@ -66,7 +66,8 @@ public sealed record ReviewOutputConfig(
     bool Summary,
     int MaxFiles,
     int MaxPatchLines,
-    TriggerConfig Trigger);
+    TriggerConfig Trigger,
+    Confidence MinConfidence = Confidence.Low);
 
 public sealed record TriggerConfig(
     bool OnReviewRequest,

@@ -383,7 +383,22 @@ public sealed class ReviewWorker : BackgroundService
     private static ReviewResult ApplyOutputConfig(ReviewResult result, ReviewConfig config)
     {
         var summary = config.Review.Summary ? result.Summary : string.Empty;
-        var comments = config.Review.InlineComments ? result.Comments : [];
+
+        IReadOnlyList<InlineComment> comments;
+        if (!config.Review.InlineComments)
+        {
+            comments = Array.Empty<InlineComment>();
+        }
+        else if (config.Review.MinConfidence == Confidence.Low)
+        {
+            comments = result.Comments;
+        }
+        else
+        {
+            comments = result.Comments
+                .Where(c => c.Confidence >= config.Review.MinConfidence)
+                .ToArray();
+        }
 
         return summary == result.Summary && ReferenceEquals(comments, result.Comments)
             ? result

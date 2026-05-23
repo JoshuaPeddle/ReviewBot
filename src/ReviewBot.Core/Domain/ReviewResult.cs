@@ -9,11 +9,19 @@ public sealed record InlineComment(
     int Line,
     string Side,
     string Body,
-    Severity Severity);
+    Severity Severity,
+    Confidence Confidence = Confidence.High);
 
 public enum Severity
 {
     Info = 0,
     Warning = 1,
     Error = 2
+}
+
+public enum Confidence
+{
+    Low = 0,
+    Medium = 1,
+    High = 2
 }

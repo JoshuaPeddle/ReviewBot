@@ -115,9 +115,25 @@ public static class LlmResultParser
             Line: line,
             Side: ParseSide(element),
             Body: body,
-            Severity: ParseSeverity(element));
+            Severity: ParseSeverity(element),
+            Confidence: ParseConfidence(element));
         error = string.Empty;
         return true;
+    }
+
+    private static Confidence ParseConfidence(JsonElement element)
+    {
+        if (!TryGetString(element, "confidence", out var confidence))
+        {
+            return Confidence.High;
+        }
+
+        return confidence.ToLowerInvariant() switch
+        {
+            "low" => Confidence.Low,
+            "medium" => Confidence.Medium,
+            _ => Confidence.High
+        };
     }
 
     private static Severity ParseSeverity(JsonElement element)

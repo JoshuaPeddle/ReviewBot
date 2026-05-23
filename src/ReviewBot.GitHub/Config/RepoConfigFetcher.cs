@@ -166,7 +166,8 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
                 repo,
                 sha,
                 path),
-            trigger);
+            trigger,
+            ParseMinConfidence(fileConfig.Review?.MinConfidence, owner, repo, sha, path));
 
         var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
 
@@ -252,6 +253,34 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         return defaultValue;
     }
 
+    private Confidence ParseMinConfidence(string? value, string owner, string repo, string sha, string path)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return Confidence.Low;
+        }
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "low" => Confidence.Low,
+            "medium" => Confidence.Medium,
+            "high" => Confidence.High,
+            _ => LogUnknownMinConfidence(value, owner, repo, sha, path)
+        };
+    }
+
+    private Confidence LogUnknownMinConfidence(string value, string owner, string repo, string sha, string path)
+    {
+        logger.LogWarning(
+            "Unknown ReviewBot min_confidence value {Value} in {Path} for {Owner}/{Repo} at {Sha}; using default low",
+            value,
+            path,
+            owner,
+            repo,
+            sha);
+        return Confidence.Low;
+    }
+
     private static string MergeString(string? value, string defaultValue) =>
         string.IsNullOrWhiteSpace(value) ? defaultValue : value;
 
@@ -330,6 +359,8 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public int? MaxPatchLines { get; set; }
 
         public TriggerConfigFile? Trigger { get; set; }
+
+        public string? MinConfidence { get; set; }
     }
 
     private sealed class TriggerConfigFile

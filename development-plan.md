@@ -2,9 +2,11 @@
 
 ## Current state (v2, 2026-05-23)
 
-Phases 1–10 complete (Steps 1–33). The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 228 tests passing. Docker image published on tags.
+Phases 1–11 complete (Steps 1–35). The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 239 tests passing. Docker image published on tags.
 
 Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 build runners (`DotNetBuildRunner`, `PythonBuildRunner`) are registered in `Program.cs`. `CompositeGroundingProvider` starts the workspace clone concurrently with Tier 1 `ExtractMetadataAsync`; on metadata failure the pre-started workspace is disposed; on clone failure `Build` is null and the review proceeds. `ReviewWorker` has a fast-exit when `files.Count == 0` after filtering (no grounding, no LLM call, no review post). Skip-reason counter (`reviewbot.jobs.skipped`) and grounding duration histogram (`reviewbot.grounding.duration_ms`) are live in `ReviewBotMetrics`.
+
+Confidence scoring and filtering is live (Phase 11). `InlineComment` carries a `Confidence` enum (`Low`/`Medium`/`High`, default `High`). The parser reads the `confidence` field from LLM JSON. The system prompt instructs the model how to assign confidence and includes `"confidence"` in the response schema. `ReviewOutputConfig.MinConfidence` (default `Low`, i.e. no filtering) controls the threshold; `ReviewWorker.ApplyOutputConfig` filters below-threshold comments before posting. `review.min_confidence` in `.github/review-bot.yml` maps to the enum.
 
 ---
 
@@ -84,13 +86,13 @@ return new GroundingContext(language, buildResult, null);
 
 ---
 
-## Phase 11: Confidence scoring and comment filtering
+## Phase 11: Confidence scoring and comment filtering ✓ Complete (Steps 34–35)
 
 **The problem.** Every posted comment carries the same implicit weight. A speculative style nit gets the same treatment as a confirmed null-reference bug. Reviewers either override every comment or begin to ignore the bot entirely.
 
 **The approach.** Extend the response schema with a `confidence` field per comment. Add a configurable `min_confidence` threshold to `review-bot.yml`. The worker filters below-threshold comments before posting. This field is also foundational for Phase 14's self-critique pass, which uses confidence to decide which comments to defend.
 
-### Step 34: Confidence field in InlineComment, parser, and prompt schema
+### Step 34: Confidence field in InlineComment, parser, and prompt schema ✓
 
 **`ReviewBot.Core/Domain/ReviewResult.cs`:** Add `Confidence` property to `InlineComment`:
 
@@ -125,7 +127,7 @@ Update the inline JSON schema string to include `"confidence": "high|medium|low"
 - `LlmResultParserTests`: response with `"confidence": "low"` → `Confidence.Low`; response without `confidence` field → defaults to `Confidence.High`.
 - `PromptBuilderTests`: system prompt contains the confidence instruction text; JSON schema string contains `confidence` field.
 
-### Step 35: Filtering pipeline and config
+### Step 35: Filtering pipeline and config ✓
 
 **`ReviewBot.Core/Domain/ReviewConfig.cs`:** Add `MinConfidence` to `ReviewOutputConfig`:
 

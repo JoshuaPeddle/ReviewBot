@@ -45,6 +45,11 @@ public static class PromptBuilder
 
         prompt.Append("""
 
+Assign a confidence level to each comment based on how certain you are:
+- "high": you have seen the code in question and are certain this is a real issue
+- "medium": likely an issue but depends on context outside the diff
+- "low": speculative or stylistic; you would not block a merge on this alone
+
 Respond ONLY with a JSON object matching this schema and nothing else. Do not use markdown fences, preambles, or trailing prose.
 Schema:
 {
@@ -54,6 +59,7 @@ Schema:
       "path": "string, must match one of the changed files",
       "line": "integer, must be a commentable line on the new side",
       "severity": "info|warning|error",
+      "confidence": "high|medium|low",
       "body": "string, markdown allowed; for fixes use GitHub suggestion blocks"
     }
   ]

@@ -213,6 +213,82 @@ public class RepoConfigFetcherTests
     }
 
     [Fact]
+    public async Task FetchAsyncMapsMinConfidenceHigh()
+    {
+        const string yaml = """
+            review:
+              min_confidence: high
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Review.MinConfidence.Should().Be(Confidence.High);
+    }
+
+    [Fact]
+    public async Task FetchAsyncMapsMinConfidenceMedium()
+    {
+        const string yaml = """
+            review:
+              min_confidence: medium
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Review.MinConfidence.Should().Be(Confidence.Medium);
+    }
+
+    [Fact]
+    public async Task FetchAsyncDefaultsMinConfidenceToLowWhenMissing()
+    {
+        const string yaml = """
+            review:
+              max_files: 10
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Review.MinConfidence.Should().Be(Confidence.Low);
+    }
+
+    [Fact]
+    public async Task FetchAsyncLogsWarningAndDefaultsLowOnUnknownMinConfidence()
+    {
+        const string yaml = """
+            review:
+              min_confidence: extreme
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var logger = new CapturingLogger<RepoConfigFetcher>();
+        var fetcher = CreateFetcher(contents, logger);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Review.MinConfidence.Should().Be(Confidence.Low);
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains("Unknown ReviewBot min_confidence value", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task FetchAsyncFallsBackToDefaultsWhenNumericLimitsAreInvalid()
     {
         const string yaml = """
