@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using ReviewBot.Core.Domain;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding.Detection;
 

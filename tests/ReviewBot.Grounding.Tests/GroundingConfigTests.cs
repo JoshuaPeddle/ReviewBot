@@ -1,6 +1,5 @@
 using FluentAssertions;
 using ReviewBot.Core.Domain;
-using ReviewBot.Grounding;
 
 namespace ReviewBot.Grounding.Tests;
 

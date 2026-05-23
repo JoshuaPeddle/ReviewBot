@@ -5,16 +5,16 @@ namespace ReviewBot.Core.Prompting;
 
 public static class PromptBuilder
 {
-    public static PromptPayload Build(ReviewRequest request)
+    public static PromptPayload Build(ReviewRequest request, GroundingContext? grounding = null)
     {
         ArgumentNullException.ThrowIfNull(request);
 
         return new PromptPayload(
-            SystemPrompt: BuildSystemPrompt(request.Config),
+            SystemPrompt: BuildSystemPrompt(request.Config, grounding),
             UserPrompt: BuildUserPrompt(request));
     }
 
-    private static string BuildSystemPrompt(ReviewConfig config)
+    private static string BuildSystemPrompt(ReviewConfig config, GroundingContext? grounding)
     {
         var prompt = new StringBuilder();
 
@@ -37,6 +37,12 @@ public static class PromptBuilder
             prompt.Append('\n');
         }
 
+        if (grounding?.Language is { } language)
+        {
+            prompt.Append('\n');
+            prompt.Append(BuildGroundingSection(language, grounding.Build));
+        }
+
         prompt.Append("""
 
 Respond ONLY with a JSON object matching this schema and nothing else. Do not use markdown fences, preambles, or trailing prose.
@@ -56,6 +62,47 @@ Omit a comment entirely rather than pick a guessed line, and keep total comments
 """);
 
         return prompt.ToString();
+    }
+
+    private static string BuildGroundingSection(LanguageMetadata language, BuildResult? build)
+    {
+        var sb = new StringBuilder();
+        sb.Append("## Project context (verified from repository)\n");
+
+        var displayName = language.LanguageId switch
+        {
+            "dotnet" => $"C# (.NET {language.LanguageVersion})",
+            "python" => $"Python {language.LanguageVersion}",
+            _ => $"{language.LanguageId} {language.LanguageVersion}"
+        };
+        sb.Append($"- Language: {displayName}\n");
+
+        if (language.ToolchainVersion is not null)
+        {
+            var toolchainLabel = language.LanguageId switch
+            {
+                "dotnet" => $".NET SDK {language.ToolchainVersion}",
+                _ => language.ToolchainVersion
+            };
+            sb.Append($"- Toolchain: {toolchainLabel}\n");
+        }
+
+        foreach (var fact in language.Facts)
+            sb.Append($"- {fact}\n");
+
+        if (build is not null)
+        {
+            var buildLine = build.Success
+                ? $"Build: SUCCESS ({build.Warnings} warnings, {build.Errors} errors) — all syntax in changed files is confirmed valid"
+                : $"Build: FAILED ({build.Errors} errors) — see build output below";
+            sb.Append($"- {buildLine}\n");
+        }
+        else
+        {
+            sb.Append("- Build: not verified (syntax claims cannot be confirmed)\n");
+        }
+
+        return sb.ToString();
     }
 
     private static string BuildUserPrompt(ReviewRequest request)

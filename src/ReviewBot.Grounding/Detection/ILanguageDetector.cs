@@ -1,3 +1,5 @@
+using ReviewBot.Core.Domain;
+
 namespace ReviewBot.Grounding.Detection;
 
 public interface ILanguageDetector

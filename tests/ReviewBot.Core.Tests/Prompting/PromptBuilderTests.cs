@@ -180,6 +180,107 @@ Changed Files:
 """);
     }
 
+    [Fact]
+    public void NoGroundingProducesPromptIdenticalToPreviousBehavior()
+    {
+        var request = CreateRequest();
+
+        var withNull = PromptBuilder.Build(request, grounding: null);
+        var withoutParam = PromptBuilder.Build(request);
+
+        withNull.SystemPrompt.Should().Be(withoutParam.SystemPrompt);
+        withNull.UserPrompt.Should().Be(withoutParam.UserPrompt);
+    }
+
+    [Fact]
+    public void GroundingWithNullLanguageProducesNoGroundingSection()
+    {
+        var request = CreateRequest();
+        var grounding = new GroundingContext(Language: null, Build: null, Tests: null);
+
+        var payload = PromptBuilder.Build(request, grounding);
+
+        payload.SystemPrompt.Should().NotContain("## Project context");
+    }
+
+    [Fact]
+    public void DotNetGroundingInjectsVersionSectionBeforeResponseSchema()
+    {
+        var request = CreateRequest();
+        var grounding = new GroundingContext(
+            Language: new LanguageMetadata(
+                LanguageId: "dotnet",
+                LanguageVersion: "10.0",
+                ToolchainVersion: "10.0.100",
+                Facts: ["LangVersion: latest", "Nullable: enable"]),
+            Build: null,
+            Tests: null);
+
+        var payload = PromptBuilder.Build(request, grounding);
+
+        payload.SystemPrompt.Should().Contain("## Project context (verified from repository)");
+        payload.SystemPrompt.Should().Contain("- Language: C# (.NET 10.0)");
+        payload.SystemPrompt.Should().Contain("- Toolchain: .NET SDK 10.0.100");
+        payload.SystemPrompt.Should().Contain("- LangVersion: latest");
+        payload.SystemPrompt.Should().Contain("- Nullable: enable");
+        payload.SystemPrompt.Should().Contain("- Build: not verified (syntax claims cannot be confirmed)");
+
+        var groundingIndex = payload.SystemPrompt.IndexOf("## Project context", StringComparison.Ordinal);
+        var schemaIndex = payload.SystemPrompt.IndexOf("Respond ONLY with a JSON", StringComparison.Ordinal);
+        groundingIndex.Should().BeLessThan(schemaIndex);
+    }
+
+    [Fact]
+    public void PythonGroundingInjectsVersionSection()
+    {
+        var request = CreateRequest();
+        var grounding = new GroundingContext(
+            Language: new LanguageMetadata(
+                LanguageId: "python",
+                LanguageVersion: "3.12",
+                ToolchainVersion: null,
+                Facts: ["requires-python: >=3.12", "mypy configured"]),
+            Build: null,
+            Tests: null);
+
+        var payload = PromptBuilder.Build(request, grounding);
+
+        payload.SystemPrompt.Should().Contain("- Language: Python 3.12");
+        payload.SystemPrompt.Should().Contain("- requires-python: >=3.12");
+        payload.SystemPrompt.Should().Contain("- mypy configured");
+        payload.SystemPrompt.Should().NotContain("Toolchain");
+    }
+
+    [Fact]
+    public void BuildSuccessGroundingStatesConfirmedSyntax()
+    {
+        var request = CreateRequest();
+        var grounding = new GroundingContext(
+            Language: new LanguageMetadata("dotnet", "10.0", null, []),
+            Build: new BuildResult(Success: true, Warnings: 0, Errors: 0, Output: string.Empty),
+            Tests: null);
+
+        var payload = PromptBuilder.Build(request, grounding);
+
+        payload.SystemPrompt.Should().Contain(
+            "- Build: SUCCESS (0 warnings, 0 errors) — all syntax in changed files is confirmed valid");
+    }
+
+    [Fact]
+    public void BuildFailureGroundingStatesFailure()
+    {
+        var request = CreateRequest();
+        var grounding = new GroundingContext(
+            Language: new LanguageMetadata("dotnet", "10.0", null, []),
+            Build: new BuildResult(Success: false, Warnings: 0, Errors: 3, Output: "error output"),
+            Tests: null);
+
+        var payload = PromptBuilder.Build(request, grounding);
+
+        payload.SystemPrompt.Should().Contain(
+            "- Build: FAILED (3 errors) — see build output below");
+    }
+
     private static ReviewRequest CreateRequest(
         string title = "Add review bot",
         string body = "Please review the changes.",

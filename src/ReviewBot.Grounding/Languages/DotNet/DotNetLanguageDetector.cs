@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using Microsoft.Extensions.Logging;
+using ReviewBot.Core.Domain;
 using ReviewBot.Grounding.Detection;
 
 namespace ReviewBot.Grounding.Languages.DotNet;
