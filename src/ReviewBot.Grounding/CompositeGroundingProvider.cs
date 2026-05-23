@@ -68,9 +68,7 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
     public async Task<GroundingContext> GetContextAsync(GroundingRequest request, CancellationToken ct)
     {
         if (!request.Config.Enabled)
-        {
             return Empty;
-        }
 
         try
         {
@@ -78,17 +76,30 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
             var rootFiles = await reader.ListRootFilesAsync(request.HeadSha, ct).ConfigureAwait(false);
             var detector = detectors.FirstOrDefault(d => d.CanDetect(rootFiles));
             if (detector is null)
-            {
                 return Empty;
-            }
 
-            var language = await detector.ExtractMetadataAsync(reader, request.HeadSha, ct).ConfigureAwait(false);
+            // Start the workspace clone concurrently with Tier 1 metadata extraction.
+            // The clone URL is known as soon as the detector matches; we don't need metadata first.
+            Task<IWorkspace?>? cloneTask = null;
+            if (request.Config.Build && workspaceFactory is not null)
+                cloneTask = StartCloneAsync(request, ct);
+
+            LanguageMetadata? language = null;
+            try
+            {
+                language = await detector.ExtractMetadataAsync(reader, request.HeadSha, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Metadata extraction failed — cancel and dispose any in-flight clone to avoid leaks.
+                if (cloneTask is not null)
+                    await CancelAndDisposeCloneAsync(cloneTask).ConfigureAwait(false);
+                throw;
+            }
 
             BuildResult? buildResult = null;
-            if (language is not null && request.Config.Build)
-            {
-                buildResult = await RunBuildAsync(request, language.LanguageId, ct).ConfigureAwait(false);
-            }
+            if (language is not null && cloneTask is not null)
+                buildResult = await RunBuildOnCloneAsync(cloneTask, language.LanguageId, request, ct).ConfigureAwait(false);
 
             return new GroundingContext(language, buildResult, null);
         }
@@ -104,19 +115,52 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         }
     }
 
-    private async Task<BuildResult?> RunBuildAsync(GroundingRequest request, string languageId, CancellationToken ct)
+    private Task<IWorkspace?> StartCloneAsync(GroundingRequest request, CancellationToken ct)
     {
-        var runner = buildRunners.FirstOrDefault(r => r.LanguageId == languageId);
-        if (runner is null || workspaceFactory is null)
-            return null;
-
         var cloneUrl = $"https://github.com/{request.Owner}/{request.Repo}.git";
         var workspaceRequest = new WorkspaceRequest(cloneUrl, request.HeadSha, request.InstallationToken);
+        return CloneWorkspaceAsync(workspaceRequest, request, ct);
+    }
+
+    private async Task<IWorkspace?> CloneWorkspaceAsync(
+        WorkspaceRequest workspaceRequest, GroundingRequest request, CancellationToken ct)
+    {
+        try
+        {
+            return await workspaceFactory!.CreateAsync(workspaceRequest, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Workspace clone failed for {Owner}/{Repo}; build grounding skipped",
+                request.Owner, request.Repo);
+            return null;
+        }
+    }
+
+    private static async Task CancelAndDisposeCloneAsync(Task<IWorkspace?> cloneTask)
+    {
+        // OperationCanceledException propagates — the outer catch handles it.
+        var workspace = await cloneTask.ConfigureAwait(false);
+        if (workspace is not null)
+            await workspace.DisposeAsync().ConfigureAwait(false);
+    }
+
+    private async Task<BuildResult?> RunBuildOnCloneAsync(
+        Task<IWorkspace?> cloneTask, string languageId, GroundingRequest request, CancellationToken ct)
+    {
+        var runner = buildRunners.FirstOrDefault(r => r.LanguageId == languageId);
 
         IWorkspace? workspace = null;
         try
         {
-            workspace = await workspaceFactory.CreateAsync(workspaceRequest, ct).ConfigureAwait(false);
+            workspace = await cloneTask.ConfigureAwait(false);
+            if (workspace is null || runner is null)
+                return null;
+
             return await runner.RunAsync(workspace.LocalPath, request.Config, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)

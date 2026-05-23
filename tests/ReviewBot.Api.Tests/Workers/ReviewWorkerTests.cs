@@ -690,6 +690,102 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task EmptyDiffSkipsGroundingAndLlmAndPost()
+    {
+        await using var fixture = new WorkerFixture();
+        var emptySnapshot = new PullRequestSnapshot("No changes", "", "base", "head", []);
+        var prFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                prFetched.SetResult();
+                return emptySnapshot;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await prFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        await fixture.GroundingProvider.DidNotReceiveWithAnyArgs()
+            .GetContextAsync(default!, default);
+        fixture.LlmFactory.DidNotReceiveWithAnyArgs().Create(default!);
+        await fixture.ReviewPoster.DidNotReceiveWithAnyArgs()
+            .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task AllFilesIgnoredSkipsGroundingAndLlmAndPost()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with { Ignore = ["**"] };
+        var snapshot = CreateSnapshot(CreateFile("src/App.cs"), CreateFile("docs/readme.md"));
+        var prFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                prFetched.SetResult();
+                return snapshot;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await prFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        await fixture.GroundingProvider.DidNotReceiveWithAnyArgs()
+            .GetContextAsync(default!, default);
+        fixture.LlmFactory.DidNotReceiveWithAnyArgs().Create(default!);
+        await fixture.ReviewPoster.DidNotReceiveWithAnyArgs()
+            .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task PatchBudgetRemovesAllFilesSkipsGroundingAndLlmAndPost()
+    {
+        await using var fixture = new WorkerFixture();
+        // MaxPatchLines=1 means budget=5 chars; two 6-line files both exceed the budget individually,
+        // so the greedy selection loop picks neither.
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { MaxPatchLines = 1 }
+        };
+        var snapshot = CreateSnapshot(
+            CreateFile("src/A.cs", patchLines: 6),
+            CreateFile("src/B.cs", patchLines: 6));
+        var prFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                prFetched.SetResult();
+                return snapshot;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await prFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        await fixture.GroundingProvider.DidNotReceiveWithAnyArgs()
+            .GetContextAsync(default!, default);
+        fixture.LlmFactory.DidNotReceiveWithAnyArgs().Create(default!);
+        await fixture.ReviewPoster.DidNotReceiveWithAnyArgs()
+            .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
+    }
+
+    [Fact]
     public async Task GroundingReturningEmptyContextDoesNotFailTheJob()
     {
         await using var fixture = new WorkerFixture();

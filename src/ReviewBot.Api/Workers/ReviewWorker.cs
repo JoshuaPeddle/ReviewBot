@@ -143,6 +143,7 @@ public sealed class ReviewWorker : BackgroundService
                 job.Owner,
                 job.Repo,
                 job.PrNumber);
+            metrics.RecordSkip("disabled");
             return JobProcessStatus.Skipped;
         }
 
@@ -155,6 +156,7 @@ public sealed class ReviewWorker : BackgroundService
                 job.Owner,
                 job.Repo,
                 job.PrNumber);
+            metrics.RecordSkip("trigger_disabled");
             return JobProcessStatus.Skipped;
         }
 
@@ -166,13 +168,31 @@ public sealed class ReviewWorker : BackgroundService
         var patchBudgetResult = ApplyPatchBudget(files, config.Review.MaxPatchLines, job);
         files = patchBudgetResult.Files;
 
+        if (files.Count == 0)
+        {
+            logger.LogInformation(
+                "Skipping review job {DeliveryId} for {Owner}/{Repo}#{PrNumber}: no reviewable files after filtering",
+                job.DeliveryId,
+                job.Owner,
+                job.Repo,
+                job.PrNumber);
+            metrics.RecordSkip("no_reviewable_files");
+            return JobProcessStatus.Skipped;
+        }
+
         var groundingRequest = new GroundingRequest(
             Owner: job.Owner,
             Repo: job.Repo,
             HeadSha: snapshot.HeadSha,
             InstallationToken: installationToken.Token,
             Config: config.Grounding);
+        var groundingSw = Stopwatch.StartNew();
         var grounding = await groundingProvider.GetContextAsync(groundingRequest, ct).ConfigureAwait(false);
+        groundingSw.Stop();
+        var groundingResult = grounding.Build is not null
+            ? (grounding.Build.Success ? "build_success" : "build_failed")
+            : grounding.Language is not null ? "tier1" : "none";
+        metrics.RecordGroundingDuration(groundingSw.Elapsed.TotalMilliseconds, groundingResult);
 
         if (grounding.Language is { } language)
         {

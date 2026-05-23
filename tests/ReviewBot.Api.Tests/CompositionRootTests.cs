@@ -16,6 +16,7 @@ using ReviewBot.Core.Llm;
 using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
+using ReviewBot.Grounding.Build;
 using ReviewBot.Persistence;
 
 namespace ReviewBot.Api.Tests;
@@ -24,6 +25,18 @@ public class CompositionRootTests
 {
     private const string Secret = "composition-test-secret";
     private const string BotSlug = "reviewbot[bot]";
+
+    [Fact]
+    public async Task BuildRunnersForDotNetAndPythonAreRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        var runners = scope.ServiceProvider.GetServices<IBuildRunner>().ToList();
+
+        runners.Select(r => r.LanguageId).Should().Contain("dotnet");
+        runners.Select(r => r.LanguageId).Should().Contain("python");
+    }
 
     [Fact]
     public async Task HealthzReturnsOkAfterApplyingMigrations()

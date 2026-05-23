@@ -81,7 +81,9 @@ builder.Services.AddReviewBotPersistence(options => options.UseSqlite(persistenc
 builder.Services.AddChannelReviewJobQueue();
 builder.Services.AddGrounding()
     .AddLanguageDetector<DotNetLanguageDetector>()
-    .AddLanguageDetector<PythonLanguageDetector>();
+    .AddLanguageDetector<PythonLanguageDetector>()
+    .AddBuildRunner<DotNetBuildRunner>()
+    .AddBuildRunner<PythonBuildRunner>();
 builder.Services.AddSingleton<ReviewBotMetrics>();
 builder.Services.AddHostedService<ReviewWorker>();
 builder.Services.AddHostedService<DeliveryStoreCleanupService>();

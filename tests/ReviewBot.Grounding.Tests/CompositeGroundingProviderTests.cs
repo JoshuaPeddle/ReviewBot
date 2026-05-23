@@ -234,8 +234,10 @@ public class CompositeGroundingProviderTests
     }
 
     [Fact]
-    public async Task GetContextAsyncReturnsBuildFailureWhenWorkspaceCreationFails()
+    public async Task GetContextAsyncReturnsBuildNullWhenWorkspaceCreationFails()
     {
+        // With the parallel clone design, workspace creation failures are logged and return null —
+        // the clone task completes with null rather than propagating an exception into the build path.
         var detector = Substitute.For<ILanguageDetector>();
         detector.CanDetect(Arg.Any<IReadOnlyList<string>>()).Returns(true);
         detector.ExtractMetadataAsync(Arg.Any<IRepoContentReader>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
@@ -258,14 +260,15 @@ public class CompositeGroundingProviderTests
         var ctx = await provider.GetContextAsync(buildRequest, CancellationToken.None);
 
         ctx.Language.Should().NotBeNull();
-        ctx.Build.Should().NotBeNull();
-        ctx.Build!.Success.Should().BeFalse();
-        ctx.Build.Output.Should().Contain("git fetch failed");
+        ctx.Build.Should().BeNull();
     }
 
     [Fact]
     public async Task GetContextAsyncReturnsBuildNullWhenNoRunnerMatchesLanguage()
     {
+        // With the parallel clone design, the workspace clone starts as soon as Build=true is set,
+        // before we know the language ID from metadata. If no runner matches the extracted language,
+        // the workspace is disposed and Build is null.
         var detector = Substitute.For<ILanguageDetector>();
         detector.CanDetect(Arg.Any<IReadOnlyList<string>>()).Returns(true);
         detector.ExtractMetadataAsync(Arg.Any<IRepoContentReader>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
@@ -274,7 +277,13 @@ public class CompositeGroundingProviderTests
         var runner = Substitute.For<IBuildRunner>();
         runner.LanguageId.Returns("dotnet");
 
+        var workspace = Substitute.For<IWorkspace>();
+        workspace.LocalPath.Returns("/tmp/fake-workspace");
+        workspace.DisposeAsync().Returns(ValueTask.CompletedTask);
+
         var workspaceFactory = Substitute.For<IWorkspaceFactory>();
+        workspaceFactory.CreateAsync(Arg.Any<WorkspaceRequest>(), Arg.Any<CancellationToken>())
+            .Returns(workspace);
 
         var reader = Substitute.For<IRepoContentReader>();
         reader.ListRootFilesAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
@@ -287,7 +296,8 @@ public class CompositeGroundingProviderTests
 
         ctx.Language.Should().NotBeNull();
         ctx.Build.Should().BeNull();
-        await workspaceFactory.DidNotReceive().CreateAsync(Arg.Any<WorkspaceRequest>(), Arg.Any<CancellationToken>());
+        await runner.DidNotReceive().RunAsync(Arg.Any<string>(), Arg.Any<GroundingConfig>(), Arg.Any<CancellationToken>());
+        await workspace.Received(1).DisposeAsync();
     }
 
     [Fact]
@@ -322,6 +332,148 @@ public class CompositeGroundingProviderTests
 
         ctx.Build!.Success.Should().BeFalse();
         await workspace.Received(1).DisposeAsync();
+    }
+
+    [Fact]
+    public async Task CloneStartsBeforeMetadataExtractionCompletes()
+    {
+        // Verifies that the workspace clone is kicked off before ExtractMetadataAsync is awaited,
+        // proving the two operations run concurrently rather than sequentially.
+        var extractionTcs = new TaskCompletionSource<LanguageMetadata?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cloneStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var detector = Substitute.For<ILanguageDetector>();
+        detector.CanDetect(Arg.Any<IReadOnlyList<string>>()).Returns(true);
+        detector.ExtractMetadataAsync(Arg.Any<IRepoContentReader>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(_ => extractionTcs.Task);
+
+        var workspace = Substitute.For<IWorkspace>();
+        workspace.LocalPath.Returns("/tmp/ws");
+        workspace.DisposeAsync().Returns(ValueTask.CompletedTask);
+
+        var workspaceFactory = Substitute.For<IWorkspaceFactory>();
+        workspaceFactory.CreateAsync(Arg.Any<WorkspaceRequest>(), Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                cloneStarted.SetResult();
+                return workspace;
+            });
+
+        var runner = Substitute.For<IBuildRunner>();
+        runner.LanguageId.Returns("dotnet");
+        runner.RunAsync(Arg.Any<string>(), Arg.Any<GroundingConfig>(), Arg.Any<CancellationToken>())
+            .Returns(new BuildResult(true, 0, 0, "ok"));
+
+        var reader = Substitute.For<IRepoContentReader>();
+        reader.ListRootFilesAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(["MyApp.csproj"]);
+
+        var buildRequest = Request with { Config = GroundingConfig.Default with { Build = true } };
+        var provider = CreateProviderWithBuild([detector], [runner], workspaceFactory, reader);
+
+        var ctxTask = provider.GetContextAsync(buildRequest, CancellationToken.None);
+
+        // Clone factory should be called before metadata extraction unblocks.
+        await cloneStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        // Now unblock metadata extraction.
+        extractionTcs.SetResult(new LanguageMetadata("dotnet", "10.0", null, []));
+
+        var ctx = await ctxTask;
+
+        ctx.Language.Should().NotBeNull();
+        ctx.Build.Should().NotBeNull();
+        ctx.Build!.Success.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task CloneFailureDuringParallelExtractionMetadataStillReturnedBuildNull()
+    {
+        var detector = Substitute.For<ILanguageDetector>();
+        detector.CanDetect(Arg.Any<IReadOnlyList<string>>()).Returns(true);
+        detector.ExtractMetadataAsync(Arg.Any<IRepoContentReader>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new LanguageMetadata("dotnet", "10.0", null, []));
+
+        var workspaceFactory = Substitute.For<IWorkspaceFactory>();
+        workspaceFactory.CreateAsync(Arg.Any<WorkspaceRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("remote: Repository not found."));
+
+        var runner = Substitute.For<IBuildRunner>();
+        runner.LanguageId.Returns("dotnet");
+
+        var reader = Substitute.For<IRepoContentReader>();
+        reader.ListRootFilesAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(["MyApp.csproj"]);
+
+        var buildRequest = Request with { Config = GroundingConfig.Default with { Build = true } };
+        var provider = CreateProviderWithBuild([detector], [runner], workspaceFactory, reader);
+
+        var ctx = await provider.GetContextAsync(buildRequest, CancellationToken.None);
+
+        ctx.Language.Should().NotBeNull();
+        ctx.Build.Should().BeNull();
+        await runner.DidNotReceive().RunAsync(Arg.Any<string>(), Arg.Any<GroundingConfig>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task MetadataExtractionThrowsDisposesPreStartedWorkspace()
+    {
+        var workspace = Substitute.For<IWorkspace>();
+        workspace.LocalPath.Returns("/tmp/ws");
+        workspace.DisposeAsync().Returns(ValueTask.CompletedTask);
+
+        var workspaceFactory = Substitute.For<IWorkspaceFactory>();
+        workspaceFactory.CreateAsync(Arg.Any<WorkspaceRequest>(), Arg.Any<CancellationToken>())
+            .Returns(workspace);
+
+        var detector = Substitute.For<ILanguageDetector>();
+        detector.CanDetect(Arg.Any<IReadOnlyList<string>>()).Returns(true);
+        detector.ExtractMetadataAsync(Arg.Any<IRepoContentReader>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("contents API 503"));
+
+        var runner = Substitute.For<IBuildRunner>();
+        runner.LanguageId.Returns("dotnet");
+
+        var reader = Substitute.For<IRepoContentReader>();
+        reader.ListRootFilesAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(["MyApp.csproj"]);
+
+        var buildRequest = Request with { Config = GroundingConfig.Default with { Build = true } };
+        var provider = CreateProviderWithBuild([detector], [runner], workspaceFactory, reader);
+
+        var ctx = await provider.GetContextAsync(buildRequest, CancellationToken.None);
+
+        // Outer catch returns Empty; the pre-started workspace must have been disposed.
+        ctx.Language.Should().BeNull();
+        ctx.Build.Should().BeNull();
+        await workspace.Received(1).DisposeAsync();
+    }
+
+    [Fact]
+    public async Task BuildDisabledWorkspaceFactoryNeverCalledEvenWhenDetectorMatches()
+    {
+        var detector = Substitute.For<ILanguageDetector>();
+        detector.CanDetect(Arg.Any<IReadOnlyList<string>>()).Returns(true);
+        detector.ExtractMetadataAsync(Arg.Any<IRepoContentReader>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new LanguageMetadata("dotnet", "10.0", null, []));
+
+        var workspaceFactory = Substitute.For<IWorkspaceFactory>();
+
+        var runner = Substitute.For<IBuildRunner>();
+        runner.LanguageId.Returns("dotnet");
+
+        var reader = Substitute.For<IRepoContentReader>();
+        reader.ListRootFilesAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(["MyApp.csproj"]);
+
+        // Build = false (default GroundingConfig)
+        var provider = CreateProviderWithBuild([detector], [runner], workspaceFactory, reader);
+
+        var ctx = await provider.GetContextAsync(Request, CancellationToken.None);
+
+        ctx.Language.Should().NotBeNull();
+        ctx.Build.Should().BeNull();
+        await workspaceFactory.DidNotReceive().CreateAsync(Arg.Any<WorkspaceRequest>(), Arg.Any<CancellationToken>());
     }
 
     private static CompositeGroundingProvider CreateProvider(

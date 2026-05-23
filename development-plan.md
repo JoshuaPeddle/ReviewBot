@@ -2,21 +2,37 @@
 
 ## Current state (v2, 2026-05-23)
 
-Phases 1–9 complete (Steps 1–32). The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 220 tests passing. Docker image published on tags.
+Phases 1–10 complete (Steps 1–33). The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 228 tests passing. Docker image published on tags.
 
-Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 (workspace clone + build runner) is live and opt-in via `grounding.build: true`; workspace security guidance documented in `docs/configuration.md`. `GroundingContext`, `BuildResult`, and `TestResult` types are in `ReviewBot.Core.Domain`. `CompositeGroundingProvider` handles detection, Tier 1 extraction, and Tier 2 build in a single sequential pass. `ReviewWorker` injects the grounding context into `ReviewRequest` before the LLM call.
+Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 build runners (`DotNetBuildRunner`, `PythonBuildRunner`) are registered in `Program.cs`. `CompositeGroundingProvider` starts the workspace clone concurrently with Tier 1 `ExtractMetadataAsync`; on metadata failure the pre-started workspace is disposed; on clone failure `Build` is null and the review proceeds. `ReviewWorker` has a fast-exit when `files.Count == 0` after filtering (no grounding, no LLM call, no review post). Skip-reason counter (`reviewbot.jobs.skipped`) and grounding duration histogram (`reviewbot.grounding.duration_ms`) are live in `ReviewBotMetrics`.
 
 ---
 
-## Phase 10: Parallel grounding
+## Performance priority order
+
+The next iterations should reduce unnecessary work before adding new high-latency features:
+
+1. **Avoid work entirely:** skip empty/all-ignored/no-budget file sets before grounding or LLM calls; track last-reviewed SHAs; use compare results safely before spending prompt budget.
+2. **Fetch less:** on incremental reviews, fetch only changed file patches when the compare result is complete and trustworthy.
+3. **Overlap required I/O:** parallelize independent GitHub Contents API reads and workspace cloning/build setup where it is safe.
+4. **Improve signal quality behind gates:** confidence filtering is cheap and should be on the main path; self-critique, agentic context, local builds, and local tests all add latency/cost and remain opt-in.
+5. **Measure before/after:** every performance phase should add or update metrics for skip reason, GitHub API duration/count, grounding duration, prompt size, LLM duration, and comments posted.
+
+---
+
+## Phase 10: Cheap skips, grounding wiring, and parallel grounding ✓ Complete (Step 33)
 
 **The problem.** `CompositeGroundingProvider.GetContextAsync` is fully sequential: list root files → detect language → Tier 1 extraction → clone workspace → run build. When `grounding.build: true`, the git clone cannot start until Tier 1 extraction completes, even though the clone URL (`https://github.com/{owner}/{repo}.git`) is known the moment the detector matches. On a typical PR this serializes two independent network/IO operations that could overlap.
 
-**The approach.** After the matching detector is identified, start the workspace clone as a concurrent `Task` while Tier 1 `ExtractMetadataAsync` runs. Await both with `Task.WhenAll`. The clone result is only consumed after both complete. If the clone fails while metadata extraction is in progress, log and proceed without build result — same failure mode as today. If metadata extraction fails, cancel and dispose the pre-started workspace.
+**The approach.** First ensure the production composition actually registers build runners, then add fast worker exits when there is nothing reviewable. After the matching detector is identified, start the workspace clone as a concurrent `Task` while Tier 1 `ExtractMetadataAsync` runs. Await both with `Task.WhenAll`. The clone result is only consumed after both complete. If the clone fails while metadata extraction is in progress, log and proceed without build result — same failure mode as today. If metadata extraction fails, cancel and dispose the pre-started workspace.
 
 ### Step 33: Concurrent clone and Tier 1 extraction
 
-**`CompositeGroundingProvider.GetContextAsync`** refactored. The change is entirely internal to the private method; the public interface, constructor signatures, and DI registration are unchanged. All 220 existing tests continue to pass with no modifications.
+**`Program.cs` composition fixed first.** Register `DotNetBuildRunner` and `PythonBuildRunner` in the API composition root. Add a composition-root test proving `IEnumerable<IBuildRunner>` contains both runner language IDs when the app starts.
+
+**`ReviewWorker.ProcessAsync` fast path.** After ignore globs, max-file trimming, and patch-budget filtering, if `files.Count == 0`, log a skip reason and return `JobProcessStatus.Skipped` before calling grounding or the LLM. This avoids paying for Tier 1 grounding and prompt construction on empty diffs, all-ignored PRs, binary-only changes, or PRs whose reviewable patches were fully removed by budget policy.
+
+**`CompositeGroundingProvider.GetContextAsync`** refactored. The change is mostly internal to the private method; public interfaces stay unchanged. All existing tests continue to pass, with new tests covering the production DI wiring and the new worker skip path.
 
 Revised flow inside `GetContextAsync`:
 
@@ -58,6 +74,13 @@ return new GroundingContext(language, buildResult, null);
 - Clone failure during parallel extraction: metadata still returned; `Build` is null.
 - Metadata extraction throws: workspace is disposed (verify `DisposeAsync` called on the pre-started workspace).
 - Build disabled: `workspaceFactory` never called, even when a detector matches.
+
+**New tests** in `ReviewBot.Api.Tests/Workers/ReviewWorkerTests.cs`:
+- Empty diff: no grounding call, no LLM call, no review post, skipped metric recorded.
+- All files ignored: no grounding call, no LLM call, no review post, skipped metric recorded.
+- Patch budget removes all reviewable files: no grounding call, no LLM call, no review post, skipped metric recorded.
+
+**Metrics:** Extend `ReviewBotMetrics` with a skip-reason counter (`disabled`, `trigger_disabled`, `no_reviewable_files`, `incremental_no_changes`, `duplicate_delivery` where available) and a grounding duration histogram labelled by result (`none`, `tier1`, `build_success`, `build_failed`, `checks_success`, `checks_failed`). Keep labels low-cardinality.
 
 ---
 
@@ -141,7 +164,7 @@ var comments = config.Review.InlineComments
 
 **The problem.** When a developer pushes a fixup commit or force-pushes a rebase, the bot re-reviews the entire PR including files untouched since the last review. This wastes LLM tokens and re-surfaces already-seen feedback on unchanged lines.
 
-**The approach.** Track the last-reviewed HEAD SHA per PR in the database. On subsequent reviews, use GitHub's compare API to restrict the file list to files changed since that SHA. If no files changed since the last review, skip the LLM call entirely.
+**The approach.** Track the last-reviewed HEAD SHA per PR in the database. On subsequent reviews, fetch PR metadata first, use GitHub's compare API to identify files changed since that SHA, and only then fetch PR file patches. If the compare result is complete, fetch only those changed file patches; if the compare result is unavailable or potentially truncated, fall back to the current full-review path. If no files changed since the last review, skip grounding and the LLM call entirely.
 
 ### Step 36: PrReviewState entity and store
 
@@ -180,31 +203,59 @@ public interface IPrReviewStateStore
 
 ### Step 37: GitHub compare API integration
 
-**`ReviewBot.GitHub/Pulls/IPullRequestFetcher.cs`:** Add a new method (or a new interface `IPullRequestComparer`):
+**`ReviewBot.GitHub/Pulls/IPullRequestFetcher.cs`:** Split PR metadata from PR files so incremental filtering can happen before `max_files` truncation. Add either new methods on `IPullRequestFetcher` or dedicated interfaces (`IPullRequestMetadataFetcher`, `IPullRequestFileFetcher`, `IPullRequestComparer`):
 
 ```csharp
-Task<IReadOnlyList<string>> GetChangedFilesSinceAsync(
+Task<PullRequestMetadata> FetchMetadataAsync(
+    string owner, string repo, int prNumber,
+    string installationToken, CancellationToken ct);
+
+Task<IReadOnlyList<FileChange>> FetchFilesAsync(
+    string owner, string repo, int prNumber,
+    string installationToken, int maxFiles,
+    IReadOnlySet<string>? pathAllowlist,
+    CancellationToken ct);
+```
+
+`FetchFilesAsync(..., pathAllowlist: not null)` pages through the PR files API until all allowlisted paths are found or GitHub returns no more pages. The `maxFiles` limit applies after allowlist filtering, not before it, so a delta file past the first N files is still reviewable.
+
+Add compare support:
+
+```csharp
+Task<ChangedFilesResult> GetChangedFilesSinceAsync(
     string owner, string repo, string baseSha, string headSha,
     string installationToken, CancellationToken ct);
 ```
 
-**Implementation** in `ReviewBot.GitHub/Pulls/PullRequestFetcher.cs` (or a dedicated `PullRequestComparer`): uses Octokit's `client.Repository.Commits.Compare(owner, repo, baseSha, headSha)`, returns `response.Files.Select(f => f.Filename).ToArray()`. Octokit's compare response caps at 300 files; log a Warning if the response is exactly 300 (may be truncated).
+**Implementation** in `ReviewBot.GitHub/Pulls/PullRequestFetcher.cs` (or dedicated services): uses Octokit's `client.Repository.Commits.Compare(owner, repo, baseSha, headSha)`, returns a structured result:
 
-**Tests** in `ReviewBot.GitHub.Tests/`: substitute `IGitHubClientFactory`; assert `Compare` called with the correct SHAs; returns file name list; 404 response throws a descriptive exception.
+```csharp
+public sealed record ChangedFilesResult(
+    IReadOnlyList<string> Paths,
+    bool IsComplete);
+```
+
+`IsComplete` is false if the compare response hits GitHub's 300-file cap or any other known truncation signal. When `IsComplete` is false, the worker must not use the path list as an allowlist; it logs a Warning and falls back to the full file list.
+
+**Tests** in `ReviewBot.GitHub.Tests/`: substitute `IGitHubClientFactory`; assert `Compare` called with the correct SHAs; returns file name list; marks exactly-300-file responses as incomplete; 404 response throws a descriptive exception that the worker can catch and convert to a full-review fallback.
 
 ### Step 38: Worker integration
 
 **`ReviewBot.Api/Workers/ReviewWorker.cs`:** Inject `IPrReviewStateStore` alongside existing dependencies.
 
-In `ProcessAsync`, after `ApplyIgnoreGlobs` and before `ApplyMaxFiles`:
+In `ProcessAsync`, after config is loaded and before PR file patches are fetched:
 
 1. Query `IPrReviewStateStore.GetLastShaAsync(job.InstallationId, $"{job.Owner}/{job.Repo}", job.PrNumber, ct)`.
-2. If `lastSha` is non-null and differs from `snapshot.HeadSha`:
-   - Call `GetChangedFilesSinceAsync(lastSha, snapshot.HeadSha)` to get the changed-file name set.
-   - Filter `files` to those whose `Path` is in the changed set.
-   - If the resulting file list is empty: log Debug "No files changed since last review; skipping LLM call" and call `SetLastShaAsync` (to update timestamp), then return `JobProcessStatus.Skipped`.
-3. After `reviewPoster.PostAsync` completes successfully: call `SetLastShaAsync(job.InstallationId, ..., snapshot.HeadSha)`.
-4. On compare API failure: log Warning, fall back to the full file list, proceed normally.
+2. Fetch PR metadata (`title`, `body`, `baseSha`, `headSha`) without file patches.
+3. If `lastSha` is non-null and differs from `metadata.HeadSha`:
+   - Call `GetChangedFilesSinceAsync(lastSha, metadata.HeadSha)`.
+   - If compare succeeds and `IsComplete == true`, use the changed path set as the PR-file fetch allowlist.
+   - If the changed path set is empty: log Debug "No files changed since last review; skipping review", call `SetLastShaAsync` to update timestamp, and return `JobProcessStatus.Skipped`.
+   - If compare fails, returns 404, or `IsComplete == false`: log Warning and fetch the full PR file list.
+4. Fetch PR files with the allowlist when available, otherwise use the current full-file path.
+5. Apply ignore globs, max-files, patch-budget filtering, and the Phase 10 no-reviewable-files fast path.
+6. After `reviewPoster.PostAsync` completes successfully: call `SetLastShaAsync(job.InstallationId, ..., metadata.HeadSha)`.
+7. Record an incremental-review metric labelled `first_review`, `delta_review`, `no_changes`, `compare_failed_fallback`, or `compare_truncated_fallback`.
 
 `IPrReviewStateStore` is injected (not optional) — it is always registered.
 
@@ -213,6 +264,8 @@ In `ProcessAsync`, after `ApplyIgnoreGlobs` and before `ApplyMaxFiles`:
 - Second push (new SHA, files changed): compare API called with old SHA as base; only delta files in LLM request.
 - Second push (new SHA, no files changed since last review): LLM not called; SHA updated; returns Skipped.
 - Compare API throws: full file list used; Warning logged; review proceeds.
+- Compare API returns 300 files / `IsComplete == false`: full file list used; Warning logged; review proceeds.
+- Delta file is beyond the first `max_files` PR-file page/window: allowlist fetch still retrieves it and sends it to the LLM.
 
 ---
 
@@ -274,7 +327,7 @@ Each test class registers a `[Collection("E2E")]` to run sequentially (WireMock 
 
 **The problem.** A single-pass review contains false positives: code the model misreads, missing-error-handling comments where the caller handles it, and range-check complaints about values already validated upstream. A second LLM pass focused on finding false positives removes most of these at 2× the per-review LLM cost.
 
-**The approach.** After the initial review, if `review.self_critique: true`, make a second LLM call. The critique prompt presents the diff and the numbered proposed comments and asks the model to return the indices of comments worth posting. Only retained comments are posted. Critique LLM failures fall through to the full initial comment list — a review is never blocked.
+**The approach.** After the initial review, first apply the cheap inline-comment and `min_confidence` gates to produce the candidate comments that could actually be posted. If `review.self_critique: true`, make a second LLM call only when at least one surviving candidate is below `Confidence.High`; high-confidence comments are retained without critique by default. The critique prompt presents the diff and the numbered lower-confidence proposed comments and asks the model to return the indices worth posting. Critique LLM failures fall through to the filtered candidate list — a review is never blocked.
 
 ### Step 41: Self-critique prompt builder and response schema
 
@@ -291,7 +344,7 @@ public static class SelfCritiquePromptBuilder
 
 System prompt: instructs the model it is a senior reviewer evaluating a junior reviewer's proposed comments for accuracy and usefulness. Lists criteria for removal: comment targets a line not in the diff, claims a bug that is clearly handled elsewhere in the same diff, flagging valid modern syntax as invalid, pure style preference with no correctness implication.
 
-User prompt: the diff (same format as the primary review), followed by the numbered proposed comments (index, path, line, body).
+User prompt: the diff (same format as the primary review), followed by the numbered proposed comments (index, path, line, confidence, body). Only comments being critiqued are listed; automatically retained high-confidence comments are not sent to reduce prompt size and cost.
 
 Response schema (separate from the primary review schema):
 
@@ -323,12 +376,24 @@ public sealed record SelfCritiqueResult(IReadOnlyList<int> RetainedIndices, stri
 
 **`ReviewBot.GitHub/Config/RepoConfigFetcher.cs`:** YAML DTO updated with `self_critique` boolean under `review:`.
 
-**`ReviewBot.Api/Workers/ReviewWorker.cs`:** In `ProcessAsync`, after `result` is obtained from `llm.ReviewAsync` and before `AppendFilesSkippedNote`, add the critique gate:
+**`ReviewBot.Api/Workers/ReviewWorker.cs`:** Split output shaping into two stages:
+
+1. `FilterCandidateComments(result, config)` applies `inline_comments` and `min_confidence` before any optional second-pass work.
+2. Summary shaping and skipped-file notes happen after optional second-pass work.
+
+In `ProcessAsync`, after `result` is obtained from `llm.ReviewAsync`, after agentic context if enabled, and after candidate comment filtering, add the critique gate:
 
 ```csharp
-if (config.Review.SelfCritique && result.Comments.Count > 0)
+var highConfidence = candidateComments
+    .Where(c => c.Confidence == Confidence.High)
+    .ToArray();
+var critiqueCandidates = candidateComments
+    .Where(c => c.Confidence != Confidence.High)
+    .ToArray();
+
+if (config.Review.SelfCritique && critiqueCandidates.Length > 0)
 {
-    var critiquePayload = SelfCritiquePromptBuilder.Build(files, result.Comments);
+    var critiquePayload = SelfCritiquePromptBuilder.Build(files, critiqueCandidates);
     try
     {
         var rawCritique = await llm.CompleteRawAsync(critiquePayload, ct);
@@ -336,11 +401,13 @@ if (config.Review.SelfCritique && result.Comments.Count > 0)
         if (critique is not null)
         {
             var retained = critique.RetainedIndices
-                .Where(i => i >= 0 && i < result.Comments.Count)
-                .Select(i => result.Comments[i])
+                .Select(i => critiqueCandidates[i])
                 .ToArray();
-            result = new ReviewResult(result.Summary, retained);
-            logger.LogDebug("Self-critique retained {Retained}/{Total} comments", retained.Length, result.Comments.Count + (result.Comments.Count - retained.Length));
+            candidateComments = highConfidence.Concat(retained).ToArray();
+            logger.LogDebug(
+                "Self-critique retained {Retained}/{Total} lower-confidence comments",
+                retained.Length,
+                critiqueCandidates.Length);
         }
     }
     catch (Exception ex) when (ex is not OperationCanceledException)
@@ -350,17 +417,18 @@ if (config.Review.SelfCritique && result.Comments.Count > 0)
 }
 ```
 
-`IReviewLlm` gains a `CompleteRawAsync(PromptPayload, CancellationToken)` method that returns the raw string response, used for non-standard response schemas (self-critique, later agentic context). Both `AnthropicReviewLlm` and `OpenAiReviewLlm` implement it.
+`IReviewLlm` gains a `CompleteRawAsync(PromptPayload, CancellationToken)` method that returns the raw string response, used for non-standard response schemas (self-critique, later agentic context). Both `AnthropicReviewLlm` and `OpenAiReviewLlm` implement it by reusing their existing send/retry plumbing. Record a distinct metric label for second-pass LLM calls so the added cost is visible.
 
 **`docs/configuration.md`:** Document `review.self_critique`.
 
 **Tests** in `ReviewBot.Api.Tests/Workers/ReviewWorkerTests.cs`:
 - `SelfCritique = false`: `CompleteRawAsync` never called.
-- `SelfCritique = true`, critique retains indices `[0, 2]` from a 3-comment set: only comments 0 and 2 posted.
-- `SelfCritique = true`, critique fails: all 3 original comments posted; Warning logged.
+- `SelfCritique = true`, all surviving comments are high confidence: `CompleteRawAsync` never called.
+- `SelfCritique = true`, critique retains indices `[0, 2]` from a 3-comment lower-confidence set: high-confidence comments plus lower-confidence comments 0 and 2 are posted.
+- `SelfCritique = true`, critique fails: all surviving candidate comments are posted; Warning logged.
 - `SelfCritique = true`, empty initial comment list: `CompleteRawAsync` not called.
 
-**E2E scenario** (extends Phase 13 harness): stub LLM primary call with `llm-response-two-comments.json`; stub second LLM call (critique) with `{"retained_indices": [0], "rationale": "comment 1 targets unchanged code"}`; assert only one comment posted.
+**E2E scenario** (extends Phase 13 harness): stub LLM primary call with a mixed-confidence response containing one high-confidence and two medium-confidence comments; stub second LLM call (critique) with `{"retained_indices": [0], "rationale": "comment 1 targets unchanged code"}` for the medium-confidence subset; assert the high-confidence comment plus the retained medium-confidence comment are posted.
 
 ---
 
@@ -381,13 +449,25 @@ public sealed record ContextRequest(string Path, string? Reason);
 **`ReviewBot.Core/Domain/ReviewResult.cs`:** Extend `ReviewResult`:
 
 ```csharp
-public sealed record ReviewResult(
-    string Summary,
-    IReadOnlyList<InlineComment> Comments,
-    IReadOnlyList<ContextRequest> ContextRequests = null!);
+public sealed record ReviewResult
+{
+    public ReviewResult(
+        string summary,
+        IReadOnlyList<InlineComment> comments,
+        IReadOnlyList<ContextRequest>? contextRequests = null)
+    {
+        Summary = summary;
+        Comments = comments;
+        ContextRequests = contextRequests ?? Array.Empty<ContextRequest>();
+    }
+
+    public string Summary { get; }
+    public IReadOnlyList<InlineComment> Comments { get; }
+    public IReadOnlyList<ContextRequest> ContextRequests { get; }
+}
 ```
 
-Default `null!` with a null-coalescing guard in callers preserves backwards compatibility with all existing construction sites.
+The explicit constructor preserves existing two-argument construction sites while avoiding a `null!` list in the domain model.
 
 **`ReviewBot.Core/Llm/LlmResultParser.cs`:** In `ParseRoot`, after parsing `comments`, optionally parse `context_requests` array: each element must have a `path` string; `reason` is optional.
 
@@ -412,6 +492,7 @@ When `AgenticContext == false`, the field is absent from the schema instruction 
 ```csharp
 public static PromptPayload BuildContextEnrichedRequest(
     ReviewRequest request,
+    ReviewResult initialResult,
     IReadOnlyList<(string Path, string Content)> fetchedFiles);
 ```
 
@@ -420,7 +501,8 @@ Assembles the follow-up prompt: original diff + initial summary + initial commen
 **Tests** in `ReviewBot.Core.Tests/`:
 - `LlmResultParserTests`: response with `context_requests` → `ReviewResult.ContextRequests` populated; missing field → empty list.
 - `PromptBuilderTests`: `AgenticContext = true` → schema includes `context_requests` instruction; `AgenticContext = false` → schema does not.
-- `BuildContextEnrichedRequest`: prompt contains fetched file content in fenced block; omits files that were null (404).
+- `BuildContextEnrichedRequest`: prompt contains fetched file content in fenced block.
+- `BuildContextEnrichedRequest`: prompt includes the initial summary and comments so the second pass can retain or retract them intentionally.
 
 ### Step 44: Worker integration
 
@@ -428,12 +510,35 @@ Assembles the follow-up prompt: original diff + initial summary + initial commen
 
 ```csharp
 bool AgenticContext = false,
-int MaxContextRequests = 5
+int MaxContextRequests = 5,
+int MaxContextFileBytes = 50_000
 ```
 
-**`ReviewBot.GitHub/Config/RepoConfigFetcher.cs`:** YAML keys `agentic_context` and `max_context_requests` under `review:`.
+**`ReviewBot.GitHub/Config/RepoConfigFetcher.cs`:** YAML keys `agentic_context`, `max_context_requests`, and `max_context_file_bytes` under `review:`.
 
-**`ReviewBot.GitHub/Pulls/IPullRequestFetcher.cs`** (or `IGitHubContentService`): add `GetFileContentsAsync(string owner, string repo, string path, string sha, string installationToken, CancellationToken ct) → Task<string?>` (returns null on 404). Octokit's `Repository.Content.GetAllContentsByRef` already used in `GitHubRepoContentReader` — extract or reuse.
+**`ReviewBot.GitHub/Pulls/IPullRequestFetcher.cs`** (or `IGitHubContentService`): add a bounded batch helper:
+
+```csharp
+Task<IReadOnlyList<(string Path, string Content)>> GetFileContentsAsync(
+    string owner,
+    string repo,
+    IReadOnlyList<ContextRequest> requests,
+    string sha,
+    int maxBytes,
+    string installationToken,
+    CancellationToken ct);
+```
+
+Internally this can call a single-file helper that returns null on 404, binary content, or files over `maxBytes`. Octokit's `Repository.Content.GetAllContentsByRef` already used in `GitHubRepoContentReader` — extract or reuse.
+
+Before fetching, validate each requested path:
+- Must be repo-relative, use `/` separators, and not start with `/`.
+- Reject `..` segments, empty segments, and duplicate paths.
+- Reject files already ignored by repo config.
+- Reject obvious secret/private-key paths (`.env`, `*.pem`, `*.key`, `id_rsa`, etc.) even if present in the repo.
+- Cap to `MaxContextRequests` after validation and log how many were dropped by each reason.
+
+Fetch validated paths with small bounded parallelism (for example 3 concurrent GitHub Contents calls) so context gathering does not serialize independent network requests but also does not burst API usage.
 
 **`ReviewBot.Api/Workers/ReviewWorker.cs`:** After obtaining the initial `result` from `llm.ReviewAsync` and before self-critique (if enabled), add the agentic context gate:
 
@@ -441,24 +546,27 @@ int MaxContextRequests = 5
 if (config.Review.AgenticContext
     && result.ContextRequests is { Count: > 0 } requests)
 {
-    var capped = requests.Take(config.Review.MaxContextRequests).ToArray();
+    var validRequests = ContextRequestValidator.Filter(
+        requests,
+        config.Ignore,
+        config.Review.MaxContextRequests,
+        logger);
+    var capped = validRequests.ToArray();
     if (capped.Length < requests.Count)
         logger.LogWarning("Context requests capped at {Cap}; {Total} requested", capped.Length, requests.Count);
 
     var fetched = new List<(string Path, string Content)>();
-    foreach (var req in capped)
-    {
-        var content = await githubService.GetFileContentsAsync(
-            job.Owner, job.Repo, req.Path, snapshot.HeadSha, installationToken.Token, ct);
-        if (content is not null)
-            fetched.Add((req.Path, content));
-    }
+    // Fetch with bounded parallelism; preserve request order in the final prompt.
+    fetched.AddRange(await githubService.GetFileContentsAsync(
+        job.Owner, job.Repo, capped, snapshot.HeadSha,
+        config.Review.MaxContextFileBytes,
+        installationToken.Token, ct));
 
     if (fetched.Count > 0)
     {
         try
         {
-            var enrichedPayload = PromptBuilder.BuildContextEnrichedRequest(request, fetched);
+            var enrichedPayload = PromptBuilder.BuildContextEnrichedRequest(request, result, fetched);
             var enrichedRaw = await llm.CompleteRawAsync(enrichedPayload, ct);
             var enrichedParsed = LlmResultParser.Parse(enrichedRaw, logger);
             if (enrichedParsed.Success)
@@ -472,12 +580,13 @@ if (config.Review.AgenticContext
 }
 ```
 
-**`docs/configuration.md`:** Document `review.agentic_context` and `review.max_context_requests`.
+**`docs/configuration.md`:** Document `review.agentic_context`, `review.max_context_requests`, and `review.max_context_file_bytes`.
 
 **Tests** in `ReviewBot.Api.Tests/Workers/ReviewWorkerTests.cs`:
 - `AgenticContext = false`: `GetFileContentsAsync` never called.
 - `AgenticContext = true`, 2 requests, both fetched: second LLM call made; second-pass comments used.
 - 7 requests (over cap of 5): only 5 fetched; Warning logged.
+- Requests with `..`, absolute paths, ignored files, duplicate paths, secret-looking paths, binary files, and oversized files are dropped before the second LLM call.
 - All fetches return 404: second pass skipped; initial comments used.
 - Second LLM call fails: initial comments used; Warning logged.
 
@@ -485,13 +594,32 @@ if (config.Review.AgenticContext
 
 ---
 
-## Phase 16: Tier 3 grounding (test runners)
+## Phase 16: Tier 3 grounding (checks first, local test runners second)
 
-**The problem.** Tier 2 grounding proves the PR branch compiles. The model still cannot know whether the change breaks existing tests. A behavioral regression surfaces as "Tests: FAILED (4 failed)" in the grounding context, giving the model ground truth to mention in its summary.
+**The problem.** Tier 2 grounding proves the PR branch compiles. The model still cannot know whether the change breaks existing tests or CI checks. A behavioral regression surfaces as "Tests: FAILED (4 failed)" or "Checks: FAILED" in the grounding context, giving the model ground truth to mention in its summary.
 
-**The approach.** Add `ITestRunner` alongside `IBuildRunner`. `CompositeGroundingProvider` runs the test runner (in the same workspace, after a successful build) when `grounding.tests: true`. `TestResult` is already defined in `ReviewBot.Core.Domain`. `PromptBuilder` already has a placeholder for tests in `GroundingContext`. Tests only run after a successful build — running tests on a broken workspace produces no useful signal.
+**The approach.** Prefer already-computed GitHub Checks/statuses before executing anything locally. When `grounding.tests: true`, fetch completed check runs/statuses for the PR head SHA and include their aggregate result in the prompt; this is cheap, sandboxed by CI, and usually more representative than a local worker run. Add `ITestRunner` alongside `IBuildRunner` for the slower path, but run local tests only when a new explicit `grounding.local_tests: true` flag is set, after a successful build. Local tests remain opt-in because they add latency and execute project code on the worker.
 
-### Step 45: ITestRunner interface and CompositeGroundingProvider extension
+### Step 45: GitHub Checks grounding and local test-runner interface
+
+**`ReviewBot.GitHub/Checks/ICheckRunFetcher.cs`:** New interface:
+
+```csharp
+public interface ICheckRunFetcher
+{
+    Task<TestResult?> GetHeadCheckSummaryAsync(
+        string owner, string repo, string headSha,
+        string installationToken, CancellationToken ct);
+}
+```
+
+Implementation uses GitHub Checks and commit statuses for the head SHA. If no completed checks/statuses are found, returns null. If any required-looking check has `failure`, `timed_out`, `cancelled`, or `action_required`, returns a failed result. Successful checks count as passed; neutral/skipped checks count as skipped. `TestResult.Output` lists check names and conclusions, truncated to the same prompt-safe output length as local tests. Add a `Source` field to `TestResult` with default `"local"` and set it to `"github_checks"` for this path.
+
+**Tests** in `ReviewBot.GitHub.Tests/`:
+- All completed checks successful: returns `TestResult(Source: "github_checks", Failed: 0)`.
+- One failed check: returns failed result with the check name in output.
+- No completed checks/statuses: returns null.
+- GitHub API failure: throws; the worker/provider catches and proceeds without tests.
 
 **`ReviewBot.Grounding/Build/ITestRunner.cs`:**
 
@@ -505,18 +633,33 @@ public interface ITestRunner
 
 **`ReviewBot.Grounding/DependencyInjection/GroundingBuilder.cs`:** Add `AddTestRunner<T>()` extension method, mirroring `AddBuildRunner<T>()`.
 
-**`CompositeGroundingProvider`:** New constructor parameter `IEnumerable<ITestRunner> testRunners`. The existing 4-arg public constructor gains this parameter. All internal test constructors gain it with a default empty list to preserve compatibility.
+**`GroundingConfig`:** Keep `Tests` as the cheap check/status summary switch and add `LocalTests` for worker-executed test commands:
 
-`GetContextAsync` extended: after `RunBuildAsync` completes and when `request.Config.Tests == true && buildResult?.Success == true`, call `RunTestsAsync(request, language.LanguageId, ct)`. `RunTestsAsync` follows the same exception-isolation pattern as `RunBuildAsync`: runner exceptions → `TestResult(0, 0, 0, ex.Message)`, never rethrow.
+```csharp
+bool Tests,
+bool LocalTests,
+```
+
+`Tests = true, LocalTests = false` means "read GitHub Checks/statuses only." `LocalTests = true` implies `Tests = true` in config parsing.
+
+**`CompositeGroundingProvider`:** New constructor parameters `ICheckRunFetcher? checkRunFetcher` and `IEnumerable<ITestRunner> testRunners`. Internal test constructors gain defaults to preserve compatibility.
+
+`GetContextAsync` extended:
+1. When `request.Config.Tests == true`, first call `checkRunFetcher.GetHeadCheckSummaryAsync(...)`. If it returns a result, keep it even if no language detector matches.
+2. If no language detector matches, return `new GroundingContext(null, null, checkResult)` instead of `Empty` when check results exist.
+3. When check results exist, include them and do not run local tests unless `LocalTests == true`.
+4. When `request.Config.LocalTests == true && buildResult?.Success == true`, call `RunTestsAsync(request, language.LanguageId, ct)` in the ready workspace. `RunTestsAsync` follows the same exception-isolation pattern as `RunBuildAsync`: runner exceptions → failed `TestResult` with exception message, never rethrow.
+5. If both checks and local tests exist, prefer local test counts but append check conclusions to the output so the prompt still sees CI state.
 
 `GroundingContext` returned is now `new GroundingContext(language, buildResult, testResult)`.
 
 **`Program.cs`:** updated (Step 48).
 
-**Tests** in `ReviewBot.Grounding.Tests/CompositeGroundingProviderTests.cs` (4 new cases):
-- Tests enabled + build success: test runner called; `TestResult` in context.
-- Tests enabled + build failure: test runner not called; `Tests` is null.
-- Tests disabled: test runner not called.
+**Tests** in `ReviewBot.Grounding.Tests/CompositeGroundingProviderTests.cs`:
+- Local tests enabled + build success: test runner called; `TestResult` in context.
+- Tests enabled + GitHub checks available: local test runner not called when `LocalTests` is false.
+- Local tests enabled + build failure: local test runner not called; check result is still used if available.
+- Tests disabled: check fetcher and local test runner not called.
 - Test runner throws: `Tests.Passed = 0, Failed = 0`; review proceeds.
 
 ### Step 46: .NET test runner
@@ -535,7 +678,7 @@ Success when `exitCode == 0`. Output truncated to 4096 chars.
 
 Timeout (non-cancellation): returns `new TestResult(0, 0, 0, "dotnet test timed out")`. External cancellation propagates.
 
-**`PromptBuilder.BuildGroundingSection`** extended: when `build` is not null and `tests` is not null (parameter added), append:
+**`PromptBuilder.BuildGroundingSection`** extended: when `tests` is not null (parameter added), append source-aware output even if `build` is null:
 
 ```
 - Tests: PASSED (42 passed, 0 failed, 3 skipped) — existing behavior confirmed
@@ -544,8 +687,11 @@ or:
 ```
 - Tests: FAILED (38 passed, 4 failed) — existing behavior may have regressed
 ```
+For GitHub Checks-derived results, use `Checks:` instead of `Tests:` so the prompt does not confuse check counts with test-case counts.
 
-`BuildGroundingSection` signature becomes `BuildGroundingSection(LanguageMetadata language, BuildResult? build, TestResult? tests)`. All callers updated.
+`BuildGroundingSection` signature becomes `BuildGroundingSection(LanguageMetadata? language, BuildResult? build, TestResult? tests)`. All callers updated.
+
+If checks/tests are available but language metadata is null, `PromptBuilder` should still append a small `## Project verification` section rather than dropping the checks.
 
 **Tests** in `ReviewBot.Grounding.Tests/Languages/DotNet/DotNetTestRunnerTests.cs`:
 - Valid project with passing tests: `TestResult(Passed: N, Failed: 0, Skipped: 0)`.
@@ -585,6 +731,9 @@ Timeout from `GroundingConfig.TestTimeoutSeconds`. External cancellation propaga
 
 ```csharp
 builder.Services
+    .AddSingleton<ICheckRunFetcher, CheckRunFetcher>();
+
+builder.Services
     .AddGrounding()
     .AddLanguageDetector<DotNetLanguageDetector>()
     .AddLanguageDetector<PythonLanguageDetector>()
@@ -594,9 +743,14 @@ builder.Services
     .AddTestRunner<PythonTestRunner>();
 ```
 
+**`docs/configuration.md`:** Update grounding docs:
+- `grounding.tests: true` reads GitHub Checks/statuses for the PR head SHA and does not execute project code.
+- `grounding.local_tests: true` runs the local language test runner after a successful build and should use the same security guidance as `grounding.build`.
+- `grounding.test_command` and `grounding.test_timeout_seconds` apply only to local tests.
+
 **E2E scenario** (extends Phase 13 harness, grounding test path):
-- Stub GitHub Contents API to return `directory-build-props.xml` (net10.0); stub root tree to include `Directory.Build.props`. Build grounding is not exercised in E2E (requires a real dotnet SDK in CI).
-- Assert captured LLM request body contains `## Project context` section with `C# (.NET 10.0)`.
+- Stub GitHub Contents API to return `directory-build-props.xml` (net10.0); stub root tree to include `Directory.Build.props`; stub GitHub Checks API with one successful and one failed check. Local build/test grounding is not exercised in E2E (requires SDKs and executes code in CI).
+- Assert captured LLM request body contains `## Project context` with `C# (.NET 10.0)` and `Checks: FAILED`.
 
 ---
 
@@ -606,10 +760,11 @@ builder.Services
 - **Open**: `Anthropic.SDK` 5.10.0 is unofficial. Confined to `AnthropicReviewLlm`; revisit if an official .NET SDK ships.
 - **Open**: OpenAI-compatible providers may not all support JSON mode. Mitigated by `UseJsonMode` toggle.
 - **Open**: `DeliveryStoreCleanupServiceTests.ContinuesLoopWhenCleanupFails` is flaky under parallel test execution. Pre-existing; not related to current phases.
-- **Open (Phase 10)**: Parallel clone + extraction introduces a concurrent workspace lifecycle. If `ExtractMetadataAsync` throws after the clone starts, `CancelAndDisposeCloneAsync` must not swallow `OperationCanceledException` — validate this in tests.
-- **Open (Phase 12)**: GitHub's compare API returns at most 300 files. PRs wider than 300 files since the last review will silently miss some files. Log a Warning at 300 and document the cap.
+- **Closed (Phase 10)**: Parallel clone + extraction — `CancelAndDisposeCloneAsync` propagates `OperationCanceledException`; covered by `MetadataExtractionThrowsDisposesPreStartedWorkspace` test.
+- **Open (Phase 12)**: GitHub's compare API returns at most 300 files. PRs wider than 300 files since the last review must fall back to a full review, not use the truncated path list.
 - **Open (Phase 15)**: `IReviewLlm.CompleteRawAsync` is a new interface method. Both `AnthropicReviewLlm` and `OpenAiReviewLlm` must implement it. `StubReviewLlm` in tests needs a stub implementation.
-- **Open (Phase 16)**: Tier 3 build+test in E2E tests requires a real .NET SDK on the CI runner. Mark Tier 2/3 grounding E2E scenarios with `[Trait("Category", "RequiresSdk")]` and gate them on a CI flag.
+- **Open (Phase 15)**: Agentic context gives the model influence over which repository files are fetched. Path validation, ignore-glob enforcement, file-size caps, binary rejection, and secret-looking path denial must ship with the feature.
+- **Open (Phase 16)**: Local build/test execution requires SDKs on the worker and executes project code. Keep local-test E2E scenarios behind `[Trait("Category", "RequiresSdk")]` and a CI flag; default Tier 3 E2E should use mocked GitHub Checks/statuses.
 
 ## What is intentionally excluded
 
@@ -620,3 +775,4 @@ builder.Services
 - No fine-grained per-file model selection.
 - No Tier 3 grounding for languages other than .NET and Python in v2.
 - Agentic context fetching is bounded to one round of file fetching — no recursive context expansion.
+- No local build/test execution by default; local execution remains a per-repo opt-in.
