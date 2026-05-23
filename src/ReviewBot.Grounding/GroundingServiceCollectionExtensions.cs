@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using ReviewBot.Grounding.Build;
 using ReviewBot.Grounding.Detection;
+using ReviewBot.Grounding.Workspace;
 
 namespace ReviewBot.Grounding;
 
@@ -8,6 +9,7 @@ public static class GroundingServiceCollectionExtensions
 {
     public static GroundingBuilder AddGrounding(this IServiceCollection services)
     {
+        services.AddSingleton<IWorkspaceFactory, GitWorkspaceFactory>();
         services.AddSingleton<IGroundingProvider, CompositeGroundingProvider>();
         return new GroundingBuilder(services);
     }

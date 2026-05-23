@@ -2,7 +2,7 @@
 
 ## Current state (v1, 2026-05-23)
 
-Phases 1–8 complete (22 steps + steps 23–31), Phase 9 Steps 29–31 complete. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 215 tests passing, Docker image published on tags. Tier 1 grounding live: .NET and Python repos grounded with verified language version from project config files. Workspace abstraction and git clone implementation ready for Tier 2 build grounding. `IBuildRunner` interface, `DotNetBuildRunner`, and `PythonBuildRunner` implementations complete; `GroundingBuilder.AddBuildRunner<T>()` DI extension ready.
+Phases 1–8 complete (22 steps + steps 23–32), Phase 9 Steps 29–32 complete. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 220 tests passing (215 baseline + 5 new from Step 32), Docker image published on tags. Tier 1 grounding live: .NET and Python repos grounded with verified language version from project config files. Tier 2 build grounding fully wired: workspace clone + build runner integrated into `CompositeGroundingProvider`; `BuildResult` flows into `GroundingContext` and then into the prompt when `grounding.build: true` in repo config.
 
 Step 23 added: `ReviewBot.Grounding` class library with grounding abstractions (`GroundingContext`, `LanguageMetadata`, `BuildResult`, `TestResult`, `IGroundingProvider`, `GroundingRequest`, `ILanguageDetector`, `IRepoContentReader`); `GroundingConfig` record added to `ReviewBot.Core.Domain`; `ReviewConfig` extended with `Grounding` property; `RepoConfigFetcher` updated to parse `grounding:` YAML block with partial merge; example config updated; 5 new tests (3 in `ReviewBot.Grounding.Tests`, 2 in `ReviewBot.GitHub.Tests`).
 
@@ -310,18 +310,27 @@ Implementation note: the plan said "filenames passed via `GroundingRequest`" for
 
 10 tests in `ReviewBot.Grounding.Tests/Languages/Python/PythonBuildRunnerTests.cs`: valid file → success; syntax error → failure with error count; mypy config present → uses mypy (skipped when mypy not installed); timeout → returns failure not exception; external cancellation → rethrows; `HasMypyConfig` theory covering all 4 config locations plus a negative case.
 
-### Step 32: Workspace integration in grounding provider
+### Step 32: Workspace integration in grounding provider ✅
 
-Extend `CompositeGroundingProvider`:
-- If `config.Grounding.Build == true` and a matching `IBuildRunner` is registered for the detected language: acquire workspace, run build, populate `BuildResult` in `GroundingContext`
-- Same for Tests with `IBuildRunner` implementing a test variant (or separate `ITestRunner` interface)
-- Workspace always disposed after the runner completes regardless of outcome
-- Timeout honored; timeout treated as build failure (not a review failure)
+Extended `CompositeGroundingProvider` with build runner integration:
+- New public DI constructor takes `IEnumerable<IBuildRunner>` and `IWorkspaceFactory` alongside the existing detector/client params
+- New internal test constructor takes `IReadOnlyList<IBuildRunner>` + `IWorkspaceFactory` + `IRepoContentReader` for isolated unit tests
+- Existing 3-arg internal test constructor (no workspace/build) preserved for compatibility with all prior tests
+- `GetContextAsync` calls private `RunBuildAsync` when `Config.Build == true` and language is detected
+- `RunBuildAsync` derives clone URL as `https://github.com/{owner}/{repo}.git`; always disposes workspace in `finally`; converts workspace/runner exceptions to `BuildResult(false, 0, 0, ex.Message)` so reviews are never blocked; external cancellation propagates
+- `AddGrounding()` now also registers `GitWorkspaceFactory` as `IWorkspaceFactory`
+- `IWorkspaceFactory` is `null` for providers created via the 3-arg internal constructor (no workspace support); `RunBuildAsync` short-circuits when `workspaceFactory is null`
+
+Implementation note: CloneUrl is derived from `Owner`/`Repo` rather than added to `GroundingRequest` — the bot is GitHub-specific and the format is deterministic; this avoids a breaking record change.
+
+5 new tests: build enabled → workspace created, runner called, result in context; build disabled → no workspace, no runner; workspace creation failure → `Build.Success=false`, language still returned; no runner matches language → `Build=null`; runner throws → workspace still disposed.
 
 Tests:
-- Build enabled: workspace created, runner called, result in context
-- Build disabled: workspace not created, runner not called
-- Build timeout: result has `Success=false`, review proceeds
+- ✅ Build enabled: workspace created, runner called, result in context
+- ✅ Build disabled: workspace not created, runner not called
+- ✅ Workspace creation failure: `Build.Success=false`, review proceeds with language context
+- ✅ No matching runner: `Build=null`, review proceeds
+- ✅ Runner throws: workspace disposed in finally, `Build.Success=false`
 
 ---
 
