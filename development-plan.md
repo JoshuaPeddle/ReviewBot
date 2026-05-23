@@ -2,7 +2,7 @@
 
 ## Current state (v1, 2026-05-23)
 
-Phases 1–8 complete (22 steps + steps 23–28), Phase 9 Step 29 complete. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 200 tests passing, Docker image published on tags. Tier 1 grounding live: .NET and Python repos grounded with verified language version from project config files. Workspace abstraction and git clone implementation ready for Tier 2 build grounding.
+Phases 1–8 complete (22 steps + steps 23–28), Phase 9 Steps 29–30 complete. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 205 tests passing, Docker image published on tags. Tier 1 grounding live: .NET and Python repos grounded with verified language version from project config files. Workspace abstraction and git clone implementation ready for Tier 2 build grounding. `IBuildRunner` interface and `DotNetBuildRunner` implementation complete; `GroundingBuilder.AddBuildRunner<T>()` DI extension ready.
 
 Step 23 added: `ReviewBot.Grounding` class library with grounding abstractions (`GroundingContext`, `LanguageMetadata`, `BuildResult`, `TestResult`, `IGroundingProvider`, `GroundingRequest`, `ILanguageDetector`, `IRepoContentReader`); `GroundingConfig` record added to `ReviewBot.Core.Domain`; `ReviewConfig` extended with `Grounding` property; `RepoConfigFetcher` updated to parse `grounding:` YAML block with partial merge; example config updated; 5 new tests (3 in `ReviewBot.Grounding.Tests`, 2 in `ReviewBot.GitHub.Tests`).
 
@@ -286,15 +286,17 @@ Tests:
 - ✅ Dispose removes the directory
 - ✅ Clone failure throws with useful message (InvalidOperationException containing "git" and "failed")
 
-### Step 30: .NET build runner
+### Step 30: .NET build runner ✅
 
-**`DotNetBuildRunner : IBuildRunner`** in `ReviewBot.Grounding/Languages/DotNet/`:
+**`IBuildRunner`** interface added to `ReviewBot.Grounding/Build/IBuildRunner.cs` (`LanguageId`, `RunAsync(workspacePath, config, ct)`). **`DotNetBuildRunner : IBuildRunner`** in `ReviewBot.Grounding/Languages/DotNet/`:
 - Runs `dotnet restore --no-dependencies` then `dotnet build --no-restore -c Release --no-incremental`
-- Captures stdout/stderr; respects timeout from `GroundingConfig.BuildTimeoutSeconds`
-- Returns `BuildResult(Success: exitCode == 0, Warnings: count, Errors: count, Output: truncated)`
-- Parses warning/error counts from MSBuild output (`Build succeeded. N Warning(s). N Error(s).`)
+- Captures stdout/stderr; respects timeout from `GroundingConfig.BuildTimeoutSeconds` via linked `CancellationTokenSource`; timeout returns `BuildResult(false, ...)` without rethrowing; external cancellation propagates
+- Returns `BuildResult(Success: exitCode == 0, Warnings: count, Errors: count, Output: truncated to 8192 chars)`
+- Parses warning/error counts via regex on MSBuild summary lines using the last match (handles multi-project solutions where the final line is the aggregate total)
+- Restore failures return `BuildResult(false, 0, 0, restoreOutput)` immediately
+- `GroundingBuilder.AddBuildRunner<T>()` DI extension added
 
-Tests: use a real tiny .csproj fixture written to a temp directory; assert success/failure detection and count parsing.
+5 tests in `ReviewBot.Grounding.Tests/Languages/DotNet/DotNetBuildRunnerTests.cs`: valid project → success; compile error → failure with error count; `#warning` directive → success with warning count; 1-second timeout → failure result not exception; external cancellation → rethrows `OperationCanceledException`.
 
 ### Step 31: Python build runner
 

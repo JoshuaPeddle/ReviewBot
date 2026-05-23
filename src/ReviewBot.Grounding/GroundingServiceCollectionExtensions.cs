@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using ReviewBot.Grounding.Build;
 using ReviewBot.Grounding.Detection;
 
 namespace ReviewBot.Grounding;
@@ -21,6 +22,12 @@ public sealed class GroundingBuilder
     public GroundingBuilder AddLanguageDetector<T>() where T : class, ILanguageDetector
     {
         services.AddSingleton<ILanguageDetector, T>();
+        return this;
+    }
+
+    public GroundingBuilder AddBuildRunner<T>() where T : class, IBuildRunner
+    {
+        services.AddSingleton<IBuildRunner, T>();
         return this;
     }
 }
