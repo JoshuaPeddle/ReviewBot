@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Octokit;
 using ReviewBot.Core.Diff;
 using ReviewBot.Core.Domain;
@@ -10,18 +11,29 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
 
     private readonly IGitHubClientFactory clientFactory;
     private readonly int maxFiles;
+    private readonly TimeProvider clock;
+    private readonly ILogger<PullRequestFetcher> logger;
 
-    public PullRequestFetcher(IGitHubClientFactory clientFactory)
-        : this(clientFactory, ReviewConfig.Default.Review.MaxFiles)
+    public PullRequestFetcher(
+        IGitHubClientFactory clientFactory,
+        TimeProvider? clock = null,
+        ILogger<PullRequestFetcher>? logger = null)
+        : this(clientFactory, ReviewConfig.Default.Review.MaxFiles, clock, logger)
     {
     }
 
-    internal PullRequestFetcher(IGitHubClientFactory clientFactory, int maxFiles)
+    internal PullRequestFetcher(
+        IGitHubClientFactory clientFactory,
+        int maxFiles,
+        TimeProvider? clock = null,
+        ILogger<PullRequestFetcher>? logger = null)
     {
         this.clientFactory = clientFactory ?? throw new ArgumentNullException(nameof(clientFactory));
         this.maxFiles = maxFiles > 0
             ? maxFiles
             : throw new ArgumentOutOfRangeException(nameof(maxFiles), maxFiles, "Max files must be positive.");
+        this.clock = clock ?? TimeProvider.System;
+        this.logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<PullRequestFetcher>.Instance;
     }
 
     public async Task<PullRequestSnapshot> FetchAsync(
@@ -52,7 +64,13 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
         ct.ThrowIfCancellationRequested();
 
         var client = clientFactory.CreateForInstallation(installationToken);
-        var pullRequest = await client.PullRequest.Get(owner, repo, prNumber).ConfigureAwait(false);
+        var pullRequest = await OctokitRateLimitRetry
+            .ExecuteAsync(
+                () => client.PullRequest.Get(owner, repo, prNumber),
+                logger,
+                clock,
+                ct)
+            .ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
 
         var files = await FetchFilesAsync(client, owner, repo, prNumber, maxFiles, ct).ConfigureAwait(false);
@@ -83,16 +101,21 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
 
             var remaining = maxFiles - consideredFiles;
             var pageSize = Math.Min(PageSize, remaining);
-            var pageFiles = await client.PullRequest.Files(
-                    owner,
-                    repo,
-                    prNumber,
-                    new ApiOptions
-                    {
-                        StartPage = page,
-                        PageCount = 1,
-                        PageSize = pageSize,
-                    })
+            var pageFiles = await OctokitRateLimitRetry
+                .ExecuteAsync(
+                    () => client.PullRequest.Files(
+                        owner,
+                        repo,
+                        prNumber,
+                        new ApiOptions
+                        {
+                            StartPage = page,
+                            PageCount = 1,
+                            PageSize = pageSize,
+                        }),
+                    logger,
+                    clock,
+                    ct)
                 .ConfigureAwait(false);
 
             if (pageFiles.Count == 0)

@@ -100,6 +100,32 @@ public sealed class OpenAiReviewLlmTests
     }
 
     [Fact]
+    public async Task ReviewAsyncRetriesTransientHttpFailuresTwice()
+    {
+        var delays = new List<TimeSpan>();
+        var client = new FakeOpenAiChatClient(
+            new HttpRequestException("timeout"),
+            new HttpRequestException("gateway reset"),
+            """
+            {
+              "summary": "Recovered.",
+              "comments": []
+            }
+            """);
+        var llm = CreateLlm(client, delay =>
+        {
+            delays.Add(delay);
+            return Task.CompletedTask;
+        });
+
+        var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        result.Summary.Should().Be("Recovered.");
+        client.Requests.Should().HaveCount(3);
+        delays.Should().Equal(TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(200));
+    }
+
+    [Fact]
     public void AddOpenAiReviewLlmRegistersConfiguredProvider()
     {
         var services = new ServiceCollection();
@@ -182,6 +208,11 @@ public sealed class OpenAiReviewLlmTests
     }
 
     private static OpenAiReviewLlm CreateLlm(FakeOpenAiChatClient client) =>
+        CreateLlm(client, _ => Task.CompletedTask);
+
+    private static OpenAiReviewLlm CreateLlm(
+        FakeOpenAiChatClient client,
+        Func<TimeSpan, Task> delayAsync) =>
         new(
             new OpenAiLlmOptions
             {
@@ -189,7 +220,8 @@ public sealed class OpenAiReviewLlmTests
                 ModelName = "gpt-test"
             },
             NullLogger<OpenAiReviewLlm>.Instance,
-            client);
+            client,
+            (delay, _) => delayAsync(delay));
 
     private static ReviewRequest CreateRequest() =>
         new(
@@ -213,9 +245,9 @@ public sealed class OpenAiReviewLlmTests
             ],
             Config: ReviewConfig.Default);
 
-    private sealed class FakeOpenAiChatClient(params string[] responses) : IOpenAiChatClient
+    private sealed class FakeOpenAiChatClient(params object[] outcomes) : IOpenAiChatClient
     {
-        private readonly Queue<string> responses = new(responses);
+        private readonly Queue<object> outcomes = new(outcomes);
 
         public List<OpenAiChatRequest> Requests { get; } = [];
 
@@ -226,12 +258,18 @@ public sealed class OpenAiReviewLlmTests
             Requests.Add(request);
             CancellationTokens.Add(ct);
 
-            if (responses.Count == 0)
+            if (outcomes.Count == 0)
             {
                 throw new InvalidOperationException("No fake OpenAI response was configured.");
             }
 
-            return Task.FromResult(responses.Dequeue());
+            var outcome = outcomes.Dequeue();
+            return outcome switch
+            {
+                string response => Task.FromResult(response),
+                Exception exception => Task.FromException<string>(exception),
+                _ => throw new InvalidOperationException($"Unsupported fake outcome type {outcome.GetType().FullName}."),
+            };
         }
     }
 }

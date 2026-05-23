@@ -8,10 +8,17 @@ namespace ReviewBot.Llm.OpenAi;
 public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
 {
     private const string RetryInstruction = "Your previous response was not valid JSON. Respond again with ONLY the JSON object.";
+    private static readonly TimeSpan[] TransientRetryDelays =
+    [
+        TimeSpan.FromMilliseconds(100),
+        TimeSpan.FromMilliseconds(200),
+    ];
+
     public string ProviderName => "openai";
 
     private readonly OpenAiLlmOptions options;
     private readonly ILogger<OpenAiReviewLlm> logger;
+    private readonly Func<TimeSpan, CancellationToken, Task> delayAsync;
     private readonly IOpenAiChatClient? configuredClient;
     private IOpenAiChatClient? sdkClient;
 
@@ -23,13 +30,15 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
     internal OpenAiReviewLlm(
         OpenAiLlmOptions options,
         ILogger<OpenAiReviewLlm> logger,
-        IOpenAiChatClient? client)
+        IOpenAiChatClient? client,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
 
         this.options = options;
         this.logger = logger;
+        this.delayAsync = delayAsync ?? Task.Delay;
         configuredClient = client;
     }
 
@@ -64,19 +73,37 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
         return new OpenAiReviewLlm(
             options with { ModelName = modelName },
             logger,
-            configuredClient ?? sdkClient);
+            configuredClient ?? sdkClient,
+            delayAsync);
     }
 
-    private Task<string> SendAsync(PromptPayload prompt, IReadOnlyList<string> userMessages, CancellationToken ct) =>
-        GetClient().CompleteChatAsync(
-            new OpenAiChatRequest(
-                SystemPrompt: prompt.SystemPrompt,
-                UserMessages: userMessages,
-                ModelName: options.ModelName,
-                MaxTokens: options.MaxTokens,
-                Temperature: options.Temperature,
-                UseJsonMode: options.UseJsonMode),
-            ct);
+    private async Task<string> SendAsync(PromptPayload prompt, IReadOnlyList<string> userMessages, CancellationToken ct)
+    {
+        var request = new OpenAiChatRequest(
+            SystemPrompt: prompt.SystemPrompt,
+            UserMessages: userMessages,
+            ModelName: options.ModelName,
+            MaxTokens: options.MaxTokens,
+            Temperature: options.Temperature,
+            UseJsonMode: options.UseJsonMode);
+
+        for (var retryAttempt = 0; ; retryAttempt++)
+        {
+            try
+            {
+                return await GetClient().CompleteChatAsync(request, ct).ConfigureAwait(false);
+            }
+            catch (HttpRequestException ex) when (retryAttempt < TransientRetryDelays.Length)
+            {
+                var delay = TransientRetryDelays[retryAttempt];
+                logger.LogWarning(
+                    ex,
+                    "Transient OpenAI-compatible request failure; retrying after {RetryDelay}",
+                    delay);
+                await delayAsync(delay, ct).ConfigureAwait(false);
+            }
+        }
+    }
 
     private IOpenAiChatClient GetClient() =>
         configuredClient ?? (sdkClient ??= new OpenAiSdkChatClient(options));

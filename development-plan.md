@@ -1034,7 +1034,7 @@ A. Big PR truncation strategy in the worker: Completed 2026-05-23
 - If total > config.Review.MaxPatchLines * 5 (heuristic ceiling), prioritize files by smallest-patch-first, accumulate until you hit the budget, drop the rest
 - Add a "files_skipped" note to the summary if any were dropped (modify worker to pass the skipped list to a small helper that appends to the LLM-returned summary)
 
-B. Retries on transient errors:
+B. Retries on transient errors: Completed 2026-05-23
 - Add Microsoft.Extensions.Http.Resilience to the InstallationTokenClient and any direct HttpClient usage
 - 3 retries with exponential backoff on 5xx and HttpRequestException
 - Octokit calls: wrap in a small helper that retries on RateLimitExceededException with the suggested wait
@@ -1066,6 +1066,17 @@ Completion notes for Step 21A:
 - Fixed a pre-existing config bug found while reading this area: repo YAML could set non-positive `review.max_files` or `review.max_patch_lines`, which could make PR fetching fail or the new patch budget nonsensical. `RepoConfigFetcher` now logs a warning and falls back to defaults for those invalid numeric limits, with test coverage.
 - Corrected assumption: Step 21A depends on repo-config numeric limits being positive; that was not previously enforced for per-repo YAML.
 - Stop test passed: `dotnet build ReviewBot.sln -c Release --no-restore && dotnet test ReviewBot.sln -c Release --no-build` completed with zero warnings and all tests green: 35 Core, 20 LLM, 27 GitHub, 7 Persistence, and 26 API tests.
+
+Completion notes for Step 21B:
+- Added a shared API HTTP resilience extension using `Microsoft.Extensions.Http.Resilience` and wired it onto the typed `InstallationTokenClient` registration. The policy retries transient HTTP failures three times with exponential backoff; API tests verify a 500/500/500/201 token flow makes exactly four attempts and succeeds.
+- Added `OctokitRateLimitRetry` and wrapped the GitHub PR metadata fetch, changed-file pagination, repo config contents fetch, and review-post call. The helper retries once on Octokit's `RateLimitExceededException` using Octokit's suggested wait, honors cancellation, and logs the retry delay.
+- Added provider-side transport retries for Anthropic and OpenAI-compatible review calls. Each LLM call now retries `HttpRequestException` twice before surfacing the failure; the existing malformed-JSON retry remains separate and unchanged.
+- Added focused tests for Anthropic/OpenAI two-retry behavior and Octokit rate-limit retry behavior.
+- Fixed a project cleanup issue found before the retry code: the Anthropic and OpenAI projects still duplicated root `TargetFramework`, `ImplicitUsings`, and `Nullable` properties. Those provider projects now inherit the centralized root build settings like the rest of the solution.
+- Corrected assumption: Octokit's rate-limit wait is exposed through `RateLimitExceededException.GetRetryAfterTimeSpan()`, so the retry helper can use the SDK's own suggested delay rather than parsing headers itself.
+- Corrected assumption: the current LLM retry layer is intentionally transport-only. It retries `HttpRequestException` from provider adapters and leaves parser failures on the existing JSON-repair path.
+- Risk register unchanged; no new risks opened by the retry chunk.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release --no-restore` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 Core tests, 22 LLM tests, 28 GitHub tests, 7 Persistence tests, and 27 API tests.
 
 ---
 
@@ -1176,6 +1187,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 20; composition is covered by host-level health and signed-webhook pipeline tests, and unused LLM providers can remain uncredentialed until selected by repo config.
 - Closed 2026-05-23: Repo YAML accepted non-positive `review.max_files` and `review.max_patch_lines`, which could fail PR fetching or produce an invalid big-PR budget. Step 21A now logs and falls back to defaults for invalid numeric limits.
 - No new risks opened by Step 21A; big-PR truncation is isolated to the worker, discloses skipped files in the posted summary, and is covered by focused over-budget and at-budget tests.
+- No new risks opened by Step 21B; installation-token HTTP retries, Octokit rate-limit retries, and LLM transport retries are each isolated at their network boundary and covered by focused retry-count tests.
 
 ## What is intentionally NOT in v1
 

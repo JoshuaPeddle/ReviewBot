@@ -2,6 +2,7 @@ using System.Text;
 using Microsoft.Extensions.Logging;
 using Octokit;
 using ReviewBot.Core.Domain;
+using ReviewBot.GitHub;
 using ReviewBot.GitHub.Pulls;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
@@ -21,11 +22,16 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
 
     private readonly IGitHubClientFactory clientFactory;
     private readonly ILogger<RepoConfigFetcher> logger;
+    private readonly TimeProvider clock;
 
-    public RepoConfigFetcher(IGitHubClientFactory clientFactory, ILogger<RepoConfigFetcher> logger)
+    public RepoConfigFetcher(
+        IGitHubClientFactory clientFactory,
+        ILogger<RepoConfigFetcher> logger,
+        TimeProvider? clock = null)
     {
         this.clientFactory = clientFactory ?? throw new ArgumentNullException(nameof(clientFactory));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        this.clock = clock ?? TimeProvider.System;
     }
 
     public async Task<ReviewConfig> FetchAsync(
@@ -44,7 +50,7 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         {
             ct.ThrowIfCancellationRequested();
 
-            var yaml = await TryFetchConfigFileAsync(client, owner, repo, sha, path).ConfigureAwait(false);
+            var yaml = await TryFetchConfigFileAsync(client, owner, repo, sha, path, ct).ConfigureAwait(false);
             if (yaml is null)
             {
                 continue;
@@ -66,12 +72,17 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         string owner,
         string repo,
         string sha,
-        string path)
+        string path,
+        CancellationToken ct)
     {
         try
         {
-            var contents = await client.Repository.Content
-                .GetAllContentsByRef(owner, repo, path, sha)
+            var contents = await OctokitRateLimitRetry
+                .ExecuteAsync(
+                    () => client.Repository.Content.GetAllContentsByRef(owner, repo, path, sha),
+                    logger,
+                    clock,
+                    ct)
                 .ConfigureAwait(false);
             var file = contents.Count == 1 ? contents[0] : null;
 

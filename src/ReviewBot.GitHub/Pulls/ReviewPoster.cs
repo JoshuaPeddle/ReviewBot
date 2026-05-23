@@ -11,11 +11,16 @@ public sealed class ReviewPoster : IReviewPoster
 
     private readonly IGitHubClientFactory clientFactory;
     private readonly ILogger<ReviewPoster> logger;
+    private readonly TimeProvider clock;
 
-    public ReviewPoster(IGitHubClientFactory clientFactory, ILogger<ReviewPoster> logger)
+    public ReviewPoster(
+        IGitHubClientFactory clientFactory,
+        ILogger<ReviewPoster> logger,
+        TimeProvider? clock = null)
     {
         this.clientFactory = clientFactory ?? throw new ArgumentNullException(nameof(clientFactory));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        this.clock = clock ?? TimeProvider.System;
     }
 
     public async Task PostAsync(
@@ -87,7 +92,13 @@ public sealed class ReviewPoster : IReviewPoster
         {
             // Octokit's typed review model only exposes diff positions for draft comments.
             // The raw connection lets us send GitHub's modern line/side payload directly.
-            await client.Connection.Post(reviewUri, payload, GitHubJsonMediaType, ct).ConfigureAwait(false);
+            await OctokitRateLimitRetry
+                .ExecuteAsync(
+                    () => client.Connection.Post(reviewUri, payload, GitHubJsonMediaType, ct),
+                    logger,
+                    clock,
+                    ct)
+                .ConfigureAwait(false);
         }
         catch (ApiValidationException ex)
         {

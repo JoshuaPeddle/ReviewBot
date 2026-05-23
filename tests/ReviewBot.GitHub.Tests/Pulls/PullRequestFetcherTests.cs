@@ -191,6 +191,25 @@ public class PullRequestFetcherTests
     }
 
     [Fact]
+    public async Task FetchAsyncRetriesOnceWhenGitHubRateLimitIsExceeded()
+    {
+        var pullRequests = Substitute.For<IPullRequestsClient>();
+        var clientFactory = CreateClientFactory(pullRequests);
+        pullRequests.Get("octo", "repo", 42)
+            .Returns(
+                _ => Task.FromException<PullRequest>(CreateRateLimitExceeded()),
+                _ => Task.FromResult(CreatePullRequest()));
+        pullRequests.Files("octo", "repo", 42, Arg.Any<ApiOptions>())
+            .Returns(CreateFiles(1, 1));
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var snapshot = await fetcher.FetchAsync("octo", "repo", 42, "ghs_token", CancellationToken.None);
+
+        snapshot.Files.Should().ContainSingle();
+        await pullRequests.Received(2).Get("octo", "repo", 42);
+    }
+
+    [Fact]
     public void CreateForInstallationBuildsAnOctokitClientWithTokenCredentials()
     {
         var factory = new OctokitGitHubClientFactory();
@@ -292,4 +311,18 @@ public class PullRequestFetcherTests
                 +line {{index}}
                 """))
             .ToArray();
+
+    private static RateLimitExceededException CreateRateLimitExceeded()
+    {
+        var response = Substitute.For<IResponse>();
+        response.ApiInfo.Returns(new ApiInfo(
+            new Dictionary<string, Uri>(),
+            [],
+            [],
+            string.Empty,
+            new RateLimit(5000, 0, DateTimeOffset.UtcNow.AddSeconds(-1).ToUnixTimeSeconds()),
+            TimeSpan.Zero));
+
+        return new RateLimitExceededException(response);
+    }
 }

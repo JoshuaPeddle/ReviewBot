@@ -100,6 +100,32 @@ public sealed class AnthropicReviewLlmTests
     }
 
     [Fact]
+    public async Task ReviewAsyncRetriesTransientHttpFailuresTwice()
+    {
+        var delays = new List<TimeSpan>();
+        var client = new FakeAnthropicClient(
+            new HttpRequestException("timeout"),
+            new HttpRequestException("gateway reset"),
+            """
+            {
+              "summary": "Recovered.",
+              "comments": []
+            }
+            """);
+        var llm = CreateLlm(client, delay =>
+        {
+            delays.Add(delay);
+            return Task.CompletedTask;
+        });
+
+        var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        result.Summary.Should().Be("Recovered.");
+        client.Requests.Should().HaveCount(3);
+        delays.Should().Equal(TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(200));
+    }
+
+    [Fact]
     public void AddAnthropicReviewLlmRegistersConfiguredProvider()
     {
         var services = new ServiceCollection();
@@ -137,6 +163,11 @@ public sealed class AnthropicReviewLlmTests
     }
 
     private static AnthropicReviewLlm CreateLlm(FakeAnthropicClient client) =>
+        CreateLlm(client, _ => Task.CompletedTask);
+
+    private static AnthropicReviewLlm CreateLlm(
+        FakeAnthropicClient client,
+        Func<TimeSpan, Task> delayAsync) =>
         new(
             new AnthropicLlmOptions
             {
@@ -144,7 +175,8 @@ public sealed class AnthropicReviewLlmTests
                 ModelName = "claude-test"
             },
             NullLogger<AnthropicReviewLlm>.Instance,
-            client);
+            client,
+            (delay, _) => delayAsync(delay));
 
     private static ReviewRequest CreateRequest() =>
         new(
@@ -168,9 +200,9 @@ public sealed class AnthropicReviewLlmTests
             ],
             Config: ReviewConfig.Default);
 
-    private sealed class FakeAnthropicClient(params string[] responses) : IAnthropicClient
+    private sealed class FakeAnthropicClient(params object[] outcomes) : IAnthropicClient
     {
-        private readonly Queue<string> responses = new(responses);
+        private readonly Queue<object> outcomes = new(outcomes);
 
         public List<AnthropicMessageRequest> Requests { get; } = [];
 
@@ -181,12 +213,18 @@ public sealed class AnthropicReviewLlmTests
             Requests.Add(request);
             CancellationTokens.Add(ct);
 
-            if (responses.Count == 0)
+            if (outcomes.Count == 0)
             {
                 throw new InvalidOperationException("No fake Anthropic response was configured.");
             }
 
-            return Task.FromResult(responses.Dequeue());
+            var outcome = outcomes.Dequeue();
+            return outcome switch
+            {
+                string response => Task.FromResult(response),
+                Exception exception => Task.FromException<string>(exception),
+                _ => throw new InvalidOperationException($"Unsupported fake outcome type {outcome.GetType().FullName}."),
+            };
         }
     }
 }

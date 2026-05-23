@@ -49,7 +49,8 @@ builder.Services.AddOpenAiReviewLlm(options =>
 
 builder.Services.AddSingleton(provider =>
     new GitHubAppJwtSigner(provider.GetRequiredService<IOptions<GitHubAppOptions>>().Value));
-builder.Services.AddHttpClient<InstallationTokenClient>();
+builder.Services.AddHttpClient<InstallationTokenClient>()
+    .AddReviewBotHttpResilience();
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<IInstallationTokenProvider>(provider =>
     new CachingInstallationTokenProvider(

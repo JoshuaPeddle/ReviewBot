@@ -8,10 +8,17 @@ namespace ReviewBot.Llm.Anthropic;
 public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
 {
     private const string RetryInstruction = "Your previous response was not valid JSON. Respond again with ONLY the JSON object.";
+    private static readonly TimeSpan[] TransientRetryDelays =
+    [
+        TimeSpan.FromMilliseconds(100),
+        TimeSpan.FromMilliseconds(200),
+    ];
+
     public string ProviderName => "anthropic";
 
     private readonly AnthropicLlmOptions options;
     private readonly ILogger<AnthropicReviewLlm> logger;
+    private readonly Func<TimeSpan, CancellationToken, Task> delayAsync;
     private readonly IAnthropicClient? configuredClient;
     private IAnthropicClient? sdkClient;
 
@@ -26,13 +33,15 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
     internal AnthropicReviewLlm(
         AnthropicLlmOptions options,
         ILogger<AnthropicReviewLlm> logger,
-        IAnthropicClient? client)
+        IAnthropicClient? client,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
 
         this.options = options;
         this.logger = logger;
+        this.delayAsync = delayAsync ?? Task.Delay;
         configuredClient = client;
     }
 
@@ -67,18 +76,36 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         return new AnthropicReviewLlm(
             options with { ModelName = modelName },
             logger,
-            configuredClient ?? sdkClient);
+            configuredClient ?? sdkClient,
+            delayAsync);
     }
 
-    private Task<string> SendAsync(PromptPayload prompt, IReadOnlyList<string> userMessages, CancellationToken ct) =>
-        GetClient().CreateMessageAsync(
-            new AnthropicMessageRequest(
-                SystemPrompt: prompt.SystemPrompt,
-                UserMessages: userMessages,
-                ModelName: options.ModelName,
-                MaxTokens: options.MaxTokens,
-                Temperature: options.Temperature),
-            ct);
+    private async Task<string> SendAsync(PromptPayload prompt, IReadOnlyList<string> userMessages, CancellationToken ct)
+    {
+        var request = new AnthropicMessageRequest(
+            SystemPrompt: prompt.SystemPrompt,
+            UserMessages: userMessages,
+            ModelName: options.ModelName,
+            MaxTokens: options.MaxTokens,
+            Temperature: options.Temperature);
+
+        for (var retryAttempt = 0; ; retryAttempt++)
+        {
+            try
+            {
+                return await GetClient().CreateMessageAsync(request, ct).ConfigureAwait(false);
+            }
+            catch (HttpRequestException ex) when (retryAttempt < TransientRetryDelays.Length)
+            {
+                var delay = TransientRetryDelays[retryAttempt];
+                logger.LogWarning(
+                    ex,
+                    "Transient Anthropic request failure; retrying after {RetryDelay}",
+                    delay);
+                await delayAsync(delay, ct).ConfigureAwait(false);
+            }
+        }
+    }
 
     private IAnthropicClient GetClient() =>
         configuredClient ?? (sdkClient ??= new AnthropicSdkClient(options));
