@@ -1,0 +1,113 @@
+# ReviewBot per-repository configuration
+#
+# Copy this file to .github/review-bot.yml in any repository where ReviewBot is installed.
+# All fields are optional — omit any field to use the default shown in the comment.
+#
+# Full reference: https://github.com/your-org/ReviewBot/blob/main/docs/configuration.md
+
+# Set to false to disable ReviewBot for this repository without uninstalling the GitHub App.
+# Default: true
+enabled: true
+
+model:
+  # LLM provider. One of: "anthropic", "openai"
+  # "openai" also works for any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
+  # Default: anthropic
+  provider: openai
+
+  # Model name passed to the provider API.
+  # Default: claude-opus-4-7 (anthropic) / gpt-5.1 (openai)
+  name: granite4.1:8b-q4_K_M
+
+review:
+  # Post inline comments on individual diff lines.
+  # Default: true
+  inline_comments: true
+
+  # Post a top-level review summary.
+  # Default: true
+  summary: true
+
+  # Maximum number of changed files to include in the review.
+  # Files are sorted alphabetically; the first max_files are kept.
+  # Default: 50
+  max_files: 50
+
+  # Maximum diff lines per individual file before the patch is truncated with a note.
+  # When the total patch lines across all files exceed max_patch_lines * 5, the
+  # smallest-diff files are prioritised and larger ones are skipped. A note is appended
+  # to the review summary listing the skipped files.
+  # Default: 1500
+  max_patch_lines: 1500
+
+  trigger:
+    # Review when the bot is explicitly added as a reviewer on the PR.
+    # Default: true
+    on_review_request: true
+
+    # Review on every push to the PR branch.
+    # Default: false
+    on_push: false
+
+# Glob patterns for files to exclude from the review.
+# Uses Microsoft.Extensions.FileSystemGlobbing syntax (forward slashes, ** for any depth).
+# Default: [] (no files excluded)
+ignore:
+  - "**/*.generated.cs"
+  - "**/*.Designer.cs"
+  - "migrations/**"
+  - "*.lock"
+  - "docs/**"
+
+# Areas the LLM is asked to focus on. Included verbatim in the system prompt.
+# Default: [correctness, security, concurrency, error_handling]
+focus:
+  - correctness
+  - security
+  - concurrency
+  - error_handling
+
+# Free-form instructions appended to the system prompt verbatim.
+# Use this for project-specific conventions, languages, or frameworks.
+# Default: "" (no extra instructions)
+instructions: |
+  This is a TypeScript monorepo using React and Node. Focus on:
+  - Uncaught promise rejections and missing error boundaries
+  - SQL injection via raw query strings
+  - Missing input validation at API boundaries
+  Do not comment on code style or formatting — ESLint + Prettier handle that in CI.
+
+# Language grounding — inject verified project metadata into the review prompt so the
+# model cannot reason from stale training-data assumptions (e.g. treating .NET 10 as
+# "on the roadmap" rather than the current runtime).
+grounding:
+  # Read project config files via the GitHub Contents API and inject facts into the prompt.
+  # Tier 1 only. No cloning required, negligible latency overhead.
+  # Default: true
+  enabled: true
+
+  # Clone the PR branch and run a build/type-check command. Proves syntax validity.
+  # Tier 2. Adds clone + build time to the review latency.
+  # Recommended only when running ReviewBot in a resource-limited container (see docs).
+  # Default: false
+  build: false
+
+  # Build command to run. null = auto-detect from language (dotnet build / mypy / etc.)
+  # Default: null
+  # build_command: "dotnet build --no-restore -c Release"
+
+  # Timeout for the build command in seconds.
+  # Default: 120
+  build_timeout_seconds: 120
+
+  # Run the test suite during grounding. Proves behavioral correctness. Tier 3 (future).
+  # Default: false
+  tests: false
+
+  # Test command to run. null = auto-detect from language.
+  # Default: null
+  # test_command: "dotnet test --no-build"
+
+  # Timeout for the test command in seconds.
+  # Default: 300
+  test_timeout_seconds: 300
