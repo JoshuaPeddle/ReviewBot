@@ -452,7 +452,7 @@ Completion notes:
 - Risk register unchanged; no new risks opened by the signer chunk.
 - Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests, 20 green LLM tests, and 2 green GitHub tests. The Api/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
-### Step 11: Installation token client and cache
+### Step 11: Installation token client and cache - Completed 2026-05-23
 
 ```text
 In ReviewBot.GitHub/Auth/, create `InstallationTokenClient`.
@@ -483,6 +483,16 @@ Tests in ReviewBot.GitHub.Tests/Auth/:
 
 Deliverable: production-ready token acquisition that does not melt under load and respects token TTL.
 ```
+
+Completion notes:
+- Added `InstallationTokenClient`, `InstallationToken`, `IInstallationTokenProvider`, and `GitHubAuthException` under `ReviewBot.GitHub/Auth`. The client posts to GitHub's installation access-token endpoint with the app JWT bearer token, GitHub media `Accept` header, and `ReviewBot` user agent; it parses the `token`/`expires_at` response and raises `GitHubAuthException` with status and body on non-2xx responses.
+- Added `CachingInstallationTokenProvider` using `IMemoryCache`, a one-minute expiry safety margin, and per-installation `SemaphoreSlim` gates to deduplicate concurrent refreshes for the same installation.
+- Added GitHub auth tests covering token-client request shape and parsing, non-success auth failures, cached second reads, expiry refresh, near-expiry no-cache behavior, and concurrent request deduplication.
+- Fixed the GitHub test project area before adding tests: removed duplicate `TargetFramework`, `Nullable`, and `ImplicitUsings` properties so it inherits root build settings consistently from `Directory.Build.props`.
+- Corrected assumption: `Microsoft.Extensions.Caching.Memory` 10.0.1 pulls in `Microsoft.Extensions.Logging.Abstractions >= 10.0.1`; the GitHub project now pins logging abstractions to 10.0.1 to avoid restore warning-as-error package downgrades.
+- Corrected assumption: deterministic cache-expiry tests are simpler and more direct when the cached value stores its own `TimeProvider`-based expiry instant; `IMemoryCache` remains the backing store, but the provider owns token-TTL semantics.
+- Risk register unchanged; no new risks opened by the token-client/cache chunk.
+- Stop test passed: `dotnet test tests/ReviewBot.GitHub.Tests/ReviewBot.GitHub.Tests.csproj -c Release` completed successfully with 8 green GitHub tests.
 
 ### Step 12: GitHub PR fetcher
 
@@ -1062,6 +1072,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - Open: OpenAI-compatible providers such as Ollama, vLLM, and LM Studio may not all support OpenAI JSON mode exactly like api.openai.com. Step 8 mitigates this with the bindable `OpenAiLlmOptions.UseJsonMode` switch and keeps SDK-specific request construction isolated in `OpenAiSdkChatClient`.
 - No new risks opened by Step 9; provider selection is isolated behind Core-owned abstractions, unused providers are not resolved during selection, and per-call model override behavior is covered by factory and provider tests.
 - No new risks opened by Step 10; GitHub App JWT signing is dependency-free, isolated to `ReviewBot.GitHub.Auth`, and verified with generated RSA keypairs.
+- No new risks opened by Step 11; installation token acquisition is isolated to `ReviewBot.GitHub.Auth`, failures have a specific exception surface, and cache stampede behavior is covered by concurrent tests.
 
 ## What is intentionally NOT in v1
 
