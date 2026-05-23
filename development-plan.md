@@ -269,7 +269,7 @@ Completion notes:
 
 ## Phase 3: LLM layer
 
-### Step 6: IReviewLlm interface and stub
+### Step 6: IReviewLlm interface and stub - Completed 2026-05-22
 
 ```text
 In ReviewBot.Core/Llm/, define:
@@ -289,6 +289,14 @@ This step is intentionally tiny but it locks the contract that the next two step
 
 Deliverable: interface defined, stub usable for integration tests in later phases.
 ```
+
+Completion notes:
+- Added `ReviewBot.Core/Llm/IReviewLlm` as the provider contract for `ReviewRequest` to `ReviewResult` review execution with cancellation-token flow.
+- Added `ReviewBot.Core/Llm/StubReviewLlm` with fixed-result and request-function constructors for local development and later integration tests.
+- Added `ReviewBot.Core.Tests/Llm/StubReviewLlmTests` covering fixed-result behavior and request-dependent dynamic behavior.
+- Corrected assumption: although the planned stub only needed to return configured results, it should still validate null inputs and honor pre-canceled tokens so tests using it do not accidentally mask broken caller behavior.
+- Risk register unchanged; no new external dependencies or provider-specific behavior were introduced by this Core-only contract chunk.
+- Stop test passed: `dotnet test ReviewBot.sln -c Release` completed successfully with 30 green Core tests. Non-Core future-phase test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
 ### Step 7: Anthropic implementation
 
@@ -1015,6 +1023,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 3; the unified diff parser is isolated to Core and covered by focused tests.
 - No new risks opened by Step 4; prompt construction is isolated to Core and covered by deterministic snapshot and behavior tests.
 - No new risks opened by Step 5; LLM result parsing is isolated to Core and covered by focused malformed-output and validation tests.
+- No new risks opened by Step 6; the LLM contract and stub are isolated to Core and covered by focused behavior tests.
 
 ## What is intentionally NOT in v1
 
