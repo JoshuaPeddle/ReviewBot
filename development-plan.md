@@ -736,7 +736,7 @@ Completion notes:
 - Risk register unchanged; no new risks opened by the queue chunk.
 - Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 green Core tests, 25 green GitHub tests, 20 green LLM tests, and 9 green API tests. The Persistence test assembly still contains no tests and VSTest reports that as informational while returning success.
 
-### Step 18: Review worker
+### Step 18: Review worker - Completed 2026-05-23
 
 ```text
 In ReviewBot.Api/Workers/ (or in ReviewBot.Core if we want it reusable), create `ReviewWorker : BackgroundService`.
@@ -782,6 +782,16 @@ Tests in ReviewBot.Api.Tests/Workers/ReviewWorkerTests.cs:
 
 Deliverable: end-to-end orchestration with full test coverage of branch logic.
 ```
+
+Completion notes:
+- Added `ReviewBot.Api/Workers/ReviewWorker` as a `BackgroundService` that drains `IReviewJobQueue`, scopes logs by delivery/repo/PR/install, catches per-job failures without crashing the loop, and orchestrates installation-token acquisition, repo config fetch, PR fetch, ignore filtering, configured file capping, LLM review, output gating, and review posting.
+- Added small testable GitHub collaborator interfaces: `IPullRequestFetcher`, `IRepoConfigFetcher`, and `IReviewPoster`. Existing concrete implementations now implement those interfaces, keeping production behavior intact while allowing worker tests to substitute every external collaborator.
+- Fixed the PR-fetcher area before adding the worker: `PullRequestFetcher` previously capped files at `ReviewConfig.Default.Review.MaxFiles` before the worker could apply repo config. It now has a per-call `maxFiles` overload, and the worker uses `config.Review.MaxFiles` when fetching.
+- Added `ReviewBot.Api.Tests/Workers/ReviewWorkerTests` covering the full happy path, disabled-config short-circuit, `synchronize` with `on_push=false` short-circuit, ignore glob filtering, max-file trimming by path, inline/summary output gating, and per-job exception resilience with a subsequent job still processed.
+- Added a focused `PullRequestFetcher` test for the per-call max-file override.
+- Corrected assumption: the configured `max_files` limit must influence PR file retrieval itself, not only post-fetch trimming; otherwise repositories that set a lower or higher limit would not get the intended behavior.
+- Risk register unchanged; no new risks opened by the worker chunk.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 green Core tests, 20 green LLM tests, 26 green GitHub tests, and 21 green API tests. The Persistence test assembly still contains no tests and VSTest reports that as informational while returning success.
 
 ---
 
@@ -1131,6 +1141,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 15; webhook signature validation is isolated to `ReviewBot.Api.Webhooks` and covered by focused HMAC, malformed-header, and tamper tests.
 - No new risks opened by Step 16; the webhook endpoint now verifies raw-body signatures before parsing, filters events before queueing, and is covered by `WebApplicationFactory` tests around authenticity and queue handoff.
 - No new risks opened by Step 17; job handoff is isolated to `ReviewBot.Core.Jobs`, the bounded-channel backpressure and single-reader behavior are covered by focused tests, and production DI is ready for the Step 16 endpoint.
+- No new risks opened by Step 18; worker orchestration is isolated to `ReviewBot.Api.Workers`, uses interface seams for all GitHub/LLM collaborators, honors repo config before review execution, and has focused tests for branch logic and loop resilience.
 
 ## What is intentionally NOT in v1
 

@@ -161,6 +161,36 @@ public class PullRequestFetcherTests
     }
 
     [Fact]
+    public async Task FetchAsyncUsesPerCallMaxFilesOverride()
+    {
+        var pullRequests = Substitute.For<IPullRequestsClient>();
+        var clientFactory = CreateClientFactory(pullRequests);
+        pullRequests.Get("octo", "repo", 42).Returns(CreatePullRequest());
+        pullRequests.Files(
+                "octo",
+                "repo",
+                42,
+                Arg.Is<ApiOptions>(options => options.StartPage == 1 && options.PageSize == 3))
+            .Returns(CreateFiles(1, 3));
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var snapshot = await fetcher.FetchAsync("octo", "repo", 42, "ghs_token", maxFiles: 3, CancellationToken.None);
+
+        snapshot.Files.Should().HaveCount(3);
+        snapshot.Files.Last().Path.Should().Be("src/file-3.cs");
+        await pullRequests.Received(1).Files(
+            "octo",
+            "repo",
+            42,
+            Arg.Is<ApiOptions>(options => options.PageSize == 3));
+        await pullRequests.DidNotReceive().Files(
+            "octo",
+            "repo",
+            42,
+            Arg.Is<ApiOptions>(options => options.StartPage == 2));
+    }
+
+    [Fact]
     public void CreateForInstallationBuildsAnOctokitClientWithTokenCredentials()
     {
         var factory = new OctokitGitHubClientFactory();

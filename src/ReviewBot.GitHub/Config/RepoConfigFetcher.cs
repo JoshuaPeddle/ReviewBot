@@ -9,7 +9,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace ReviewBot.GitHub.Config;
 
-public sealed class RepoConfigFetcher
+public sealed class RepoConfigFetcher : IRepoConfigFetcher
 {
     private const string YmlPath = ".github/review-bot.yml";
     private const string YamlPath = ".github/review-bot.yaml";

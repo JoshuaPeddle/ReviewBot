@@ -4,7 +4,7 @@ using ReviewBot.Core.Domain;
 
 namespace ReviewBot.GitHub.Pulls;
 
-public sealed class PullRequestFetcher
+public sealed class PullRequestFetcher : IPullRequestFetcher
 {
     private const int PageSize = 30;
 
@@ -31,14 +31,31 @@ public sealed class PullRequestFetcher
         string installationToken,
         CancellationToken ct)
     {
+        return await FetchAsync(owner, repo, prNumber, installationToken, maxFiles, ct)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<PullRequestSnapshot> FetchAsync(
+        string owner,
+        string repo,
+        int prNumber,
+        string installationToken,
+        int maxFiles,
+        CancellationToken ct)
+    {
         ValidateInputs(owner, repo, prNumber, installationToken);
+        if (maxFiles <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxFiles), maxFiles, "Max files must be positive.");
+        }
+
         ct.ThrowIfCancellationRequested();
 
         var client = clientFactory.CreateForInstallation(installationToken);
         var pullRequest = await client.PullRequest.Get(owner, repo, prNumber).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
 
-        var files = await FetchFilesAsync(client, owner, repo, prNumber, ct).ConfigureAwait(false);
+        var files = await FetchFilesAsync(client, owner, repo, prNumber, maxFiles, ct).ConfigureAwait(false);
 
         return new PullRequestSnapshot(
             pullRequest.Title ?? string.Empty,
@@ -53,6 +70,7 @@ public sealed class PullRequestFetcher
         string owner,
         string repo,
         int prNumber,
+        int maxFiles,
         CancellationToken ct)
     {
         var files = new List<FileChange>();

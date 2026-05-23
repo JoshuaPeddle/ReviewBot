@@ -4,7 +4,7 @@ using ReviewBot.Core.Domain;
 
 namespace ReviewBot.GitHub.Pulls;
 
-public sealed class ReviewPoster
+public sealed class ReviewPoster : IReviewPoster
 {
     private const string DefaultBody = "Automated review by ReviewBot.";
     private const string GitHubJsonMediaType = "application/vnd.github+json";
