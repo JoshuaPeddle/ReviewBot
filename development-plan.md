@@ -2,7 +2,7 @@
 
 ## Current state (v2, 2026-05-23)
 
-Phases 1–12 complete (Steps 1–38). The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 260 tests passing. Docker image published on tags.
+Phases 1–12 complete (Steps 1–38), plus Phase 13 Step 39. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 267 tests passing, 1 skipped Ollama E2E test. Docker image published on tags.
 
 Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 build runners (`DotNetBuildRunner`, `PythonBuildRunner`) are registered in `Program.cs`. `CompositeGroundingProvider` starts the workspace clone concurrently with Tier 1 `ExtractMetadataAsync`; on metadata failure the pre-started workspace is disposed; on clone failure `Build` is null and the review proceeds. `ReviewWorker` has a fast-exit when `files.Count == 0` after filtering (no grounding, no LLM call, no review post). Skip-reason counter (`reviewbot.jobs.skipped`) and grounding duration histogram (`reviewbot.grounding.duration_ms`) are live in `ReviewBotMetrics`.
 
@@ -279,21 +279,26 @@ In `ProcessAsync`, after config is loaded and before PR file patches are fetched
 
 **The approach.** A dedicated test project hosts the full ASP.NET Core app in-process via `WebApplicationFactory<Program>`. GitHub API and LLM endpoints are replaced by `WireMock.Net` stubs. A `WorkerSyncHelper` polls for the expected GitHub API call to appear in the WireMock capture log. Scenarios are expressed as reusable fixture files.
 
-### Step 39: E2E test project and harness
+### Step 39: E2E test project and harness ✓ Complete
 
-**New project** `tests/ReviewBot.E2E.Tests/ReviewBot.E2E.Tests.csproj` targeting the same TFM as `ReviewBot.Api`. Added to solution file.
+**New project** `tests/ReviewBot.E2E.Tests/ReviewBot.E2E.Tests.csproj` targeting the same TFM as `ReviewBot.Api`. Added to solution file. This is separate from the pre-existing skipped/manual Ollama E2E project at `tests/ReviewBot.E2eTests/`.
 
 **Dependencies:**
 - `WireMock.Net` — in-process HTTP mock server.
 - `Microsoft.AspNetCore.Mvc.Testing` — `WebApplicationFactory<Program>`.
 - `xunit`, `xunit.runner.visualstudio` (already used elsewhere).
 
-**`ReviewBotHarness`** (`IAsyncLifetime`, used as `IClassFixture`):
+**Corrected implementation assumptions discovered during Step 39:**
+- There was no configurable GitHub API base URL, so Step 39 added `GitHubApp.ApiBaseUrl` and wired it into both `InstallationTokenClient` and `OctokitGitHubClientFactory`.
+- Octokit's `GitHubClient(product, uri)` constructor treats the URI as a GitHub Enterprise web root and appends `/api/v3`; `OctokitGitHubClientFactory` now uses an explicit `Connection` so the configured API URL is preserved exactly.
+- `AnthropicReviewLlm` does not currently expose a base URL option. The harness configures the OpenAI-compatible endpoint to `LlmMock`; mocked HTTP scenarios in Step 40 should use repo config to select provider `openai`, or a future chunk should add Anthropic base URL support before Anthropic-backed E2E scenarios.
+
+**`ReviewBotHarness`** (`IAsyncLifetime`, used as `IClassFixture` / `ICollectionFixture`):
 - Starts two `WireMockServer` instances on random ports: `GitHubMock` and `LlmMock`.
 - Creates a `WebApplicationFactory<Program>` that overrides:
-  - `GitHubOptions.BaseUrl` → `GitHubMock` URL.
-  - `LlmBaseUrl` (Anthropic/OpenAI) → `LlmMock` URL.
-  - `GitHubAppOptions.WebhookSecret` → `"test-secret"`.
+  - `GitHubApp.ApiBaseUrl` → `GitHubMock` URL.
+  - `OpenAi.BaseUrl` → `LlmMock` URL (`/v1`).
+  - `Webhook.Secret` → `"test-secret"`.
   - SQLite connection string → temp file path (cleaned up in `DisposeAsync`).
 - Exposes `HttpClient CreateClient()` for posting webhooks.
 - Exposes `GitHubMock` and `LlmMock` for per-test stub configuration.
@@ -302,6 +307,12 @@ In `ProcessAsync`, after config is loaded and before PR file patches are fetched
 **`WebhookSender`** helper: computes `X-Hub-Signature-256` HMAC-SHA256 over the body using `"test-secret"`, posts to `/webhook` with correct `X-GitHub-Event` and `X-GitHub-Delivery` headers.
 
 **`WorkerSyncHelper`**: polls `GitHubMock.LogEntries` in a loop (50 ms intervals, 10-second timeout) until a `POST` request matching a supplied path predicate appears. Throws `TimeoutException` with a diagnostic message on expiry. Also exposes `WaitForNoCallAsync` (asserts the predicate is never matched within 2 seconds) for negative assertions.
+
+**Harness tests added** in `ReviewBot.E2E.Tests/Infrastructure/ReviewBotHarnessTests.cs`:
+- Harness boots the full ASP.NET Core app and `/healthz` returns OK after applying migrations to temp SQLite.
+- `ResetAsync` clears WireMock logs.
+- `WebhookSender` creates a correctly signed pull-request webhook.
+- `WorkerSyncHelper` detects matching requests and passes negative assertions.
 
 ### Step 40: Fixture library and baseline E2E scenarios
 
@@ -763,11 +774,13 @@ builder.Services
 - **Open**: Dockerfile has not been exercised with an actual `docker build`. Validate before relying on container output.
 - **Open**: `Anthropic.SDK` 5.10.0 is unofficial. Confined to `AnthropicReviewLlm`; revisit if an official .NET SDK ships.
 - **Open**: OpenAI-compatible providers may not all support JSON mode. Mitigated by `UseJsonMode` toggle.
-- **Open**: `DeliveryStoreCleanupServiceTests.ContinuesLoopWhenCleanupFails` is flaky under parallel test execution. Pre-existing; not related to current phases.
+- **Open**: `DeliveryStoreCleanupServiceTests.ContinuesLoopWhenCleanupFails` is flaky under parallel test execution. Pre-existing; reproduced once during Phase 13 Step 39 full-solution verification, then passed on immediate project rerun.
 - **Closed (Phase 10)**: Parallel clone + extraction — `CancelAndDisposeCloneAsync` propagates `OperationCanceledException`; covered by `MetadataExtractionThrowsDisposesPreStartedWorkspace` test.
 - **Closed (Phase 12 Step 36)**: EF Core 10 promotes `PendingModelChangesWarning` to an error, so hand-crafted model snapshots always fail migration tests. Always use `dotnet ef migrations add` to generate both the migration file and the snapshot; never write them by hand.
 - **Closed (Phase 12 Step 37)**: GitHub's compare API returns at most 300 files. `ChangedFilesResult.IsComplete` is `false` when `Paths.Count >= 300`; the worker (Step 38) must not use the truncated path list as an allowlist in that case.
 - **Open**: Octokit 14 model classes (`CompareResult`, `GitHubCommitFile`, etc.) have non-virtual properties. NSubstitute cannot mock them. Tests must construct these types directly via their public constructors. Future tests touching new Octokit model types should verify property virtuality before attempting `Substitute.For<T>()`. The `client.Repository.Commit.Compare` API uses singular `Commit`, not `Commits`.
+- **Closed (Phase 13 Step 39)**: E2E WireMock required a configurable GitHub API base URL. Added `GitHubApp.ApiBaseUrl` and used an explicit Octokit `Connection` so configured API URLs are not rewritten to GitHub Enterprise `/api/v3` paths.
+- **Open (Phase 13 Step 40)**: The current Anthropic SDK adapter has no configurable base URL. HTTP-mocked E2E scenarios should select the OpenAI-compatible provider through `.github/review-bot.yml`, or add Anthropic base URL injection before testing Anthropic over WireMock.
 - **Open (Phase 15)**: `IReviewLlm.CompleteRawAsync` is a new interface method. Both `AnthropicReviewLlm` and `OpenAiReviewLlm` must implement it. `StubReviewLlm` in tests needs a stub implementation.
 - **Open (Phase 15)**: Agentic context gives the model influence over which repository files are fetched. Path validation, ignore-glob enforcement, file-size caps, binary rejection, and secret-looking path denial must ship with the feature.
 - **Open (Phase 16)**: Local build/test execution requires SDKs on the worker and executes project code. Keep local-test E2E scenarios behind `[Trait("Category", "RequiresSdk")]` and a CI flag; default Tier 3 E2E should use mocked GitHub Checks/statuses.

@@ -2,28 +2,31 @@ using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace ReviewBot.GitHub.Auth;
 
 public sealed class InstallationTokenClient : IInstallationTokenProvider
 {
-    private const string GitHubApiBaseUrl = "https://api.github.com";
-
     private readonly HttpClient httpClient;
     private readonly GitHubAppJwtSigner jwtSigner;
     private readonly ILogger<InstallationTokenClient> logger;
     private readonly TimeProvider clock;
+    private readonly Uri apiBaseUrl;
 
     public InstallationTokenClient(
         HttpClient httpClient,
         GitHubAppJwtSigner jwtSigner,
+        IOptions<GitHubAppOptions> options,
         ILogger<InstallationTokenClient> logger,
         TimeProvider? clock = null)
     {
         this.httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         this.jwtSigner = jwtSigner ?? throw new ArgumentNullException(nameof(jwtSigner));
+        ArgumentNullException.ThrowIfNull(options);
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
         this.clock = clock ?? TimeProvider.System;
+        apiBaseUrl = NormalizeBaseUrl(options.Value.ApiBaseUrl);
     }
 
     public async Task<InstallationToken> GetTokenAsync(long installationId, CancellationToken ct)
@@ -35,7 +38,7 @@ public sealed class InstallationTokenClient : IInstallationTokenProvider
 
         using var request = new HttpRequestMessage(
             HttpMethod.Post,
-            $"{GitHubApiBaseUrl}/app/installations/{installationId}/access_tokens");
+            new Uri(apiBaseUrl, $"app/installations/{installationId.ToString(CultureInfo.InvariantCulture)}/access_tokens"));
 
         request.Headers.Authorization = new AuthenticationHeaderValue(
             "Bearer",
@@ -56,6 +59,16 @@ public sealed class InstallationTokenClient : IInstallationTokenProvider
         }
 
         return ParseTokenResponse(responseBody);
+    }
+
+    private static Uri NormalizeBaseUrl(Uri apiBaseUrl)
+    {
+        ArgumentNullException.ThrowIfNull(apiBaseUrl);
+
+        var text = apiBaseUrl.AbsoluteUri.EndsWith("/", StringComparison.Ordinal)
+            ? apiBaseUrl.AbsoluteUri
+            : $"{apiBaseUrl.AbsoluteUri}/";
+        return new Uri(text, UriKind.Absolute);
     }
 
     private static InstallationToken ParseTokenResponse(string responseBody)

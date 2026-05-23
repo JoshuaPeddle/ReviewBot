@@ -20,6 +20,12 @@ public sealed class HttpResilienceTests
         services.AddSingleton(new GitHubAppJwtSigner(new GitHubAppOptions(
             AppId: 123456,
             PrivateKeyPem: rsa.ExportPkcs8PrivateKeyPem())));
+        services.AddOptions<GitHubAppOptions>()
+            .Configure(options =>
+            {
+                options.AppId = 123456;
+                options.PrivateKeyPem = rsa.ExportPkcs8PrivateKeyPem();
+            });
         services.AddHttpClient<InstallationTokenClient>()
             .ConfigurePrimaryHttpMessageHandler(() => handler)
             .AddReviewBotHttpResilience();

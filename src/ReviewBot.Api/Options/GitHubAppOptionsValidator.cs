@@ -20,6 +20,15 @@ public sealed class GitHubAppOptionsValidator : IValidateOptions<GitHubAppOption
             failures.Add("GitHubApp:PrivateKeyPem must be provided.");
         }
 
+        if (options.ApiBaseUrl is null || !options.ApiBaseUrl.IsAbsoluteUri)
+        {
+            failures.Add("GitHubApp:ApiBaseUrl must be an absolute URI.");
+        }
+        else if (options.ApiBaseUrl.Scheme is not "https" and not "http")
+        {
+            failures.Add("GitHubApp:ApiBaseUrl must use HTTP or HTTPS.");
+        }
+
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);

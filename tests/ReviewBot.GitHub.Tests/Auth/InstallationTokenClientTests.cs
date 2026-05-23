@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Cryptography;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using ReviewBot.GitHub.Auth;
 
 namespace ReviewBot.GitHub.Tests.Auth;
@@ -53,10 +54,34 @@ public class InstallationTokenClientTests
         exception.Which.ResponseBody.Should().Contain("Bad credentials");
     }
 
+    [Fact]
+    public async Task GetTokenAsyncUsesConfiguredApiBaseUrl()
+    {
+        using var rsa = RSA.Create(2048);
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.Created)
+        {
+            Content = new StringContent(
+                """{"token":"ghs_installation_token","expires_at":"2026-05-23T13:45:00Z"}"""),
+        });
+        var client = CreateClient(handler, rsa, new Uri("http://localhost:4567/api/v3"));
+
+        await client.GetTokenAsync(12345, CancellationToken.None);
+
+        handler.Requests.Should().ContainSingle();
+        handler.Requests.Single().RequestUri.Should().Be("http://localhost:4567/api/v3/app/installations/12345/access_tokens");
+    }
+
     private static InstallationTokenClient CreateClient(CapturingHandler handler, RSA rsa) =>
+        CreateClient(handler, rsa, apiBaseUrl: null);
+
+    private static InstallationTokenClient CreateClient(CapturingHandler handler, RSA rsa, Uri? apiBaseUrl) =>
         new(
             new HttpClient(handler),
             new GitHubAppJwtSigner(new GitHubAppOptions(123456, rsa.ExportPkcs8PrivateKeyPem())),
+            Options.Create(new GitHubAppOptions(123456, rsa.ExportPkcs8PrivateKeyPem())
+            {
+                ApiBaseUrl = apiBaseUrl ?? new Uri("https://api.github.com/")
+            }),
             NullLogger<InstallationTokenClient>.Instance,
             new ManualTimeProvider(new DateTimeOffset(2026, 5, 23, 12, 0, 0, TimeSpan.Zero)));
 

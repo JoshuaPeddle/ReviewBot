@@ -1,7 +1,9 @@
 using FluentAssertions;
+using Microsoft.Extensions.Options;
 using NSubstitute;
 using Octokit;
 using ReviewBot.Core.Domain;
+using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Pulls;
 
 namespace ReviewBot.GitHub.Tests.Pulls;
@@ -219,6 +221,20 @@ public class PullRequestFetcherTests
         var githubClient = client.Should().BeOfType<GitHubClient>().Subject;
         githubClient.Credentials.Password.Should().Be("ghs_token");
         githubClient.Credentials.AuthenticationType.Should().Be(AuthenticationType.Oauth);
+    }
+
+    [Fact]
+    public void CreateForInstallationUsesConfiguredApiBaseUrl()
+    {
+        var factory = new OctokitGitHubClientFactory(Options.Create(new GitHubAppOptions
+        {
+            ApiBaseUrl = new Uri("http://localhost:9876/")
+        }));
+
+        var client = factory.CreateForInstallation("ghs_token");
+
+        var githubClient = client.Should().BeOfType<GitHubClient>().Subject;
+        githubClient.Connection.BaseAddress.Should().Be(new Uri("http://localhost:9876/"));
     }
 
     [Fact]
