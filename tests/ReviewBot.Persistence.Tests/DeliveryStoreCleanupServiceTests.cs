@@ -13,7 +13,7 @@ public class DeliveryStoreCleanupServiceTests
     public async Task RunsCleanupEachHourWithThirtyDayCutoff()
     {
         var now = new DateTimeOffset(2026, 5, 23, 12, 0, 0, TimeSpan.Zero);
-        var clock = new FakeTimeProvider(now);
+        var clock = new TrackingFakeTimeProvider(now);
         var store = Substitute.For<IDeliveryStore>();
         var called = new TaskCompletionSource<DateTimeOffset>(TaskCreationOptions.RunContinuationsAsynchronously);
         store.CleanupAsync(Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
@@ -25,10 +25,10 @@ public class DeliveryStoreCleanupServiceTests
         var service = CreateService(store, clock);
 
         await service.StartAsync(CancellationToken.None);
-        await WaitForTimerRegistrationAsync();
+        await clock.WaitForTimerAsync().WaitAsync(TimeSpan.FromSeconds(5));
         clock.Advance(TimeSpan.FromHours(1));
 
-        var cutoff = await called.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var cutoff = await called.Task.WaitAsync(TimeSpan.FromSeconds(5));
         cutoff.Should().Be(now.AddHours(1).AddDays(-30));
 
         await service.StopAsync(CancellationToken.None);
@@ -38,7 +38,7 @@ public class DeliveryStoreCleanupServiceTests
     public async Task ContinuesLoopWhenCleanupFails()
     {
         var now = new DateTimeOffset(2026, 5, 23, 12, 0, 0, TimeSpan.Zero);
-        var clock = new FakeTimeProvider(now);
+        var clock = new TrackingFakeTimeProvider(now);
         var store = Substitute.For<IDeliveryStore>();
         var firstAttempt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var secondAttempt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -58,11 +58,11 @@ public class DeliveryStoreCleanupServiceTests
         var service = CreateService(store, clock);
 
         await service.StartAsync(CancellationToken.None);
-        await WaitForTimerRegistrationAsync();
+        await clock.WaitForTimerAsync().WaitAsync(TimeSpan.FromSeconds(5));
         clock.Advance(TimeSpan.FromHours(1));
-        await firstAttempt.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await firstAttempt.Task.WaitAsync(TimeSpan.FromSeconds(5));
         clock.Advance(TimeSpan.FromHours(1));
-        await secondAttempt.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await secondAttempt.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         calls.Should().Be(2);
         await service.StopAsync(CancellationToken.None);
@@ -71,9 +71,16 @@ public class DeliveryStoreCleanupServiceTests
     private static DeliveryStoreCleanupService CreateService(IDeliveryStore store, TimeProvider clock) =>
         new(store, clock, NullLogger<DeliveryStoreCleanupService>.Instance);
 
-    private static async Task WaitForTimerRegistrationAsync()
+    private sealed class TrackingFakeTimeProvider(DateTimeOffset startDateTime) : FakeTimeProvider(startDateTime)
     {
-        await Task.Yield();
-        await Task.Delay(25);
+        private readonly TaskCompletionSource _timerRegistered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task WaitForTimerAsync() => _timerRegistered.Task;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            _timerRegistered.TrySetResult();
+            return base.CreateTimer(callback, state, dueTime, period);
+        }
     }
 }
