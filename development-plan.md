@@ -1,1227 +1,340 @@
-# Build Plan: GitHub PR Review Bot
+# ReviewBot Development Plan
 
-A step-by-step, test-driven blueprint for building a GitHub App that reviews pull requests using Anthropic or any OpenAI-compatible LLM endpoint. Each step is sized to be implementable in one focused session, ships with tests, and builds directly on the previous step. The final step wires everything together into a runnable service.
+## Current state (v1, 2026-05-23)
 
-## Target stack
-
-- .NET 10, latest C# language version
-- ASP.NET Core for the webhook endpoint
-- `IHostedService` + `System.Threading.Channels` for the worker
-- Octokit.NET for GitHub REST
-- Anthropic.SDK and OpenAI 2.x SDK for the two LLM paths
-- YamlDotNet for the repo config file
-- xUnit + FluentAssertions + NSubstitute for tests
-- EF Core with the SQLite provider for idempotency storage, abstracted behind `IDeliveryStore` so swapping to Postgres later is a one-line provider change
-
-## Phased breakdown
-
-The build is grouped into seven phases. Each phase ends in a runnable, testable state.
-
-1. Foundation: solution scaffolding, shared domain types.
-2. Core logic: diff parsing, prompt building, LLM result parsing. Pure functions, no I/O.
-3. LLM layer: the `IReviewLlm` abstraction and its two implementations.
-4. GitHub integration: App auth, fetching PR data, posting reviews, reading the config file.
-5. HTTP and worker: webhook endpoint, queue, orchestrating worker.
-6. Reliability: idempotency, configuration validation, observability, big-PR handling.
-7. Polish: documentation, sample config, App registration walkthrough.
+Phases 1–7 complete (22 steps). The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 124 tests passing, Docker image published on tags.
 
 ---
 
-## Phase 1: Foundation
+## Phase 8: Language grounding — Tier 1 (metadata)
 
-### Step 1: Solution scaffolding and CI - Completed 2026-05-22
+**The problem.** LLMs have stale training data about language versions and cannot verify syntax without external grounding. A model trained before .NET 10 ships will reason about .NET 6 defaults and flag valid collection expressions as invalid syntax.
 
-```text
-You are building a .NET solution called ReviewBot. Create the following structure using `dotnet new` commands and `dotnet sln add`:
+**The approach.** A pluggable grounding layer that extracts language metadata from the reviewed repository and injects it as verified facts into the review prompt. Three tiers:
+- **Tier 1** (this phase): read project config files via the GitHub Contents API. No cloning. Minimal latency.
+- **Tier 2** (Phase 9): clone the PR branch and run build/type-check commands. Proves syntax validity. User-configurable latency tradeoff.
+- **Tier 3** (future): run test suite. Proves behavioral correctness.
 
-src/
-  ReviewBot.Api/              (webapi, minimal hosting)
-  ReviewBot.Core/             (classlib)
-  ReviewBot.GitHub/           (classlib)
-  ReviewBot.Llm.Anthropic/    (classlib)
-  ReviewBot.Llm.OpenAi/       (classlib)
-  ReviewBot.Persistence/      (classlib)
-tests/
-  ReviewBot.Core.Tests/       (xunit)
-  ReviewBot.GitHub.Tests/     (xunit)
-  ReviewBot.Llm.Tests/        (xunit)
-  ReviewBot.Persistence.Tests/(xunit)
-  ReviewBot.Api.Tests/        (xunit, references Microsoft.AspNetCore.Mvc.Testing)
+**Design constraints:**
+- Language-agnostic abstractions; concrete implementations plugged in per language.
+- Tier 1 uses only the GitHub Contents API — no cloning required.
+- Tier 2 config fields and interfaces are designed now so there are no breaking changes when Phase 9 ships.
+- Grounding failures must never block a review; fall through silently to ungrounded mode.
+- Users control the latency tradeoff via `grounding:` in `.github/review-bot.yml`.
 
-Project references:
-- Api depends on Core, GitHub, Llm.Anthropic, Llm.OpenAi, Persistence
-- GitHub, Llm.Anthropic, Llm.OpenAi, Persistence each depend on Core
-- Each test project references its corresponding src project
-- Llm.Tests references both Llm.Anthropic and Llm.OpenAi
+### Step 23: Grounding abstractions and config schema
 
-Add these NuGet packages where appropriate (do not add them everywhere, scope each one):
-- All test projects: xunit, xunit.runner.visualstudio, FluentAssertions, NSubstitute, Microsoft.NET.Test.Sdk
-- Api.Tests: Microsoft.AspNetCore.Mvc.Testing
-- Persistence: Microsoft.EntityFrameworkCore.Sqlite
-- Api: Microsoft.EntityFrameworkCore.Design (so `dotnet ef` migrations work from the Api as startup project)
+Create `src/ReviewBot.Grounding/` (new classlib, depends on Core) and `tests/ReviewBot.Grounding.Tests/`.
 
-Create a Directory.Build.props at the repo root setting:
-- TargetFramework = net10.0
-- Nullable = enable
-- ImplicitUsings = enable
-- TreatWarningsAsErrors = true
-- LangVersion = latest
+**Type system** in `ReviewBot.Grounding/`:
 
-Create a .editorconfig with sensible C# defaults (file-scoped namespaces, prefer var, expression-bodied members where appropriate).
+```csharp
+public sealed record GroundingContext(
+    LanguageMetadata? Language,
+    BuildResult? Build,
+    TestResult? Tests);
 
-Create a GitHub Actions workflow at .github/workflows/ci.yml that:
-- Runs on push and pull_request
-- Sets up .NET 10 (use `actions/setup-dotnet@v4` with `dotnet-version: 10.0.x`)
-- Runs `dotnet restore`, `dotnet build --no-restore -c Release`, `dotnet test --no-build -c Release`
+public sealed record LanguageMetadata(
+    string LanguageId,          // "dotnet" | "python" | "typescript" | "go"
+    string LanguageVersion,     // "10.0", "3.12", etc.
+    string? ToolchainVersion,   // SDK/runtime version when available
+    IReadOnlyList<string> Facts);
 
-Add a single placeholder test in ReviewBot.Core.Tests called `SolutionBuildsTest` that asserts `true.Should().BeTrue()` so CI has something to run.
+public sealed record BuildResult(bool Success, int Warnings, int Errors, string Output);
 
-Deliverable: `dotnet build` succeeds at repo root with zero warnings, `dotnet test` runs the placeholder green.
+public sealed record TestResult(int Passed, int Failed, int Skipped, string Output);
+
+public interface IGroundingProvider
+{
+    Task<GroundingContext> GetContextAsync(GroundingRequest request, CancellationToken ct);
+}
+
+public sealed record GroundingRequest(
+    string Owner, string Repo, string HeadSha,
+    string InstallationToken, GroundingConfig Config);
+
+public interface ILanguageDetector
+{
+    string LanguageId { get; }
+    bool CanDetect(IReadOnlyList<string> rootFileNames);
+    Task<LanguageMetadata?> ExtractMetadataAsync(
+        IRepoContentReader reader, string headSha, CancellationToken ct);
+}
+
+// Thin adapter over the GitHub Contents API
+public interface IRepoContentReader
+{
+    Task<string?> TryReadFileAsync(string path, string sha, CancellationToken ct);
+    Task<IReadOnlyList<string>> ListRootFilesAsync(string sha, CancellationToken ct);
+}
 ```
 
-Completion notes:
-- Created the planned `src/` and `tests/` project layout, wired the solution/project references, scoped NuGet packages, root `Directory.Build.props`, `.editorconfig`, and GitHub Actions CI.
-- Moved the pre-existing `ReviewBot.Api` project from the repository root into `src/ReviewBot.Api` before building the scaffold. This required fixing the API project's linked `.dockerignore` path and updating Dockerfile project-copy paths.
-- Removed generated empty `Class1` and `UnitTest1` placeholders so the next phase starts from intentional files only; the single planned `SolutionBuildsTest` remains in `ReviewBot.Core.Tests`.
-- Removed the extra `ReviewBot.slnx` generated by the local .NET 10 SDK because having both `ReviewBot.sln` and `ReviewBot.slnx` caused bare root `dotnet restore`/`dotnet build` to fail with "Specify which project or solution file to use."
-- Stop test passed: `dotnet restore && dotnet build --no-restore -c Release && dotnet test --no-build -c Release` completed with zero warnings and one green `SolutionBuildsTest` in `ReviewBot.Core.Tests`.
+**Config schema extension** in `ReviewBot.Core/Domain/ReviewConfig.cs`:
 
-### Step 2: Core domain records - Completed 2026-05-22
+Add `GroundingConfig Grounding` property to `ReviewConfig`. New record:
 
-```text
-In ReviewBot.Core, create the immutable domain model used everywhere downstream. Use file-scoped namespaces and `sealed record` types.
+```csharp
+public sealed record GroundingConfig(
+    bool Enabled,               // default: true
+    bool Build,                 // default: false (Tier 2)
+    bool Tests,                 // default: false (Tier 3)
+    int BuildTimeoutSeconds,    // default: 120
+    int TestTimeoutSeconds,     // default: 300
+    string? BuildCommand,       // null = auto-detect
+    string? TestCommand);       // null = auto-detect
 
-Files to create under ReviewBot.Core/Domain/:
-
-1. FileChange.cs:
-   - Properties: string Path, string Patch, IReadOnlySet<int> CommentableLines, long AdditionsCount, long DeletionsCount, FileChangeStatus Status
-   - FileChangeStatus enum: Added, Modified, Removed, Renamed, Copied
-
-2. ReviewRequest.cs:
-   - Properties: string PrTitle, string PrBody, string BaseSha, string HeadSha, IReadOnlyList<FileChange> Files, ReviewConfig Config
-
-3. ReviewConfig.cs (and its sub-records):
-   - Properties: bool Enabled, ModelConfig Model, ReviewOutputConfig Review, IReadOnlyList<string> Ignore, IReadOnlyList<string> Focus, string Instructions
-   - ModelConfig: string Provider ("anthropic" or "openai"), string Name, string? BaseUrlEnvVar (optional override)
-   - ReviewOutputConfig: bool InlineComments, bool Summary, int MaxFiles, int MaxPatchLines, TriggerConfig Trigger
-   - TriggerConfig: bool OnReviewRequest, bool OnPush
-   - Provide a static `ReviewConfig Default` property with sensible defaults matching the system spec (anthropic claude-opus-4-7, inline+summary on, max 50 files, max 1500 patch lines, on_review_request true, on_push false, empty ignore, focus = [correctness, security, concurrency, error_handling], empty instructions).
-
-4. ReviewResult.cs:
-   - Properties: string Summary, IReadOnlyList<InlineComment> Comments
-   - InlineComment record: string Path, int Line, string Side ("LEFT" or "RIGHT"), string Body, Severity Severity
-   - Severity enum: Info, Warning, Error
-
-In ReviewBot.Core.Tests, add tests asserting:
-- ReviewConfig.Default has Provider == "anthropic", Name == "claude-opus-4-7", InlineComments == true, Summary == true, MaxFiles == 50, MaxPatchLines == 1500
-- Record equality works for InlineComment (two instances with identical fields are equal)
-- FileChangeStatus enum values are stable (use FluentAssertions to compare numeric values explicitly: Added=0, Modified=1, etc.)
-
-Remove the placeholder SolutionBuildsTest from Step 1.
-
-Deliverable: `dotnet test` green with the new domain tests covering defaults and equality.
+public static GroundingConfig Default => new(
+    Enabled: true, Build: false, Tests: false,
+    BuildTimeoutSeconds: 120, TestTimeoutSeconds: 300,
+    BuildCommand: null, TestCommand: null);
 ```
 
-Completion notes:
-- Added the immutable Core domain records under `ReviewBot.Core/Domain`: `FileChange`, `ReviewRequest`, `ReviewConfig` with sub-records and defaults, and `ReviewResult` with `InlineComment`.
-- Removed the Step 1 placeholder `SolutionBuildsTest` and replaced it with domain tests covering default config values, `InlineComment` record equality, and stable `FileChangeStatus` numeric values.
-- Corrected assumption: after removing the placeholder, only `ReviewBot.Core.Tests` currently contains tests. The scaffolded Api/GitHub/Llm/Persistence test assemblies are still empty, so VSTest reports "No test is available" for them while `dotnet test` exits successfully.
-- Risk register unchanged; no new risks opened or closed by this domain-only chunk.
-- Stop test passed: `dotnet test` and `dotnet test -c Release` both completed successfully with three green Core tests.
+Update `ReviewConfig.Default` to include `GroundingConfig.Default`. Update `RepoConfigFetcher` YAML DTO to handle the `grounding:` block (snake_case, partial merge with defaults). Update the example config file.
+
+**Tests** in `ReviewBot.Grounding.Tests/`:
+- `GroundingConfig.Default` values are correct
+- `ReviewConfig.Default` includes grounding defaults
+- YAML `grounding:` block maps correctly; partial merge fills unset fields from defaults
+- `GroundingContext` with all nulls is valid (no grounding available)
+
+**Tests** in `ReviewBot.GitHub.Tests/`:
+- Updated `RepoConfigFetcherTests`: grounding section in YAML maps to `GroundingConfig`
+
+Deliverable: type system and config schema locked in. No language implementations yet, but the shape is fixed so subsequent steps never need breaking interface changes.
 
 ---
 
-## Phase 2: Core logic (pure functions)
+### Step 24: GitHub Contents reader and composite provider
 
-### Step 3: Unified diff parser - Completed 2026-05-22
+**`GitHubRepoContentReader : IRepoContentReader`** in `ReviewBot.Grounding/Detection/`:
+- Backed by `IGitHubClientFactory`
+- `ListRootFilesAsync`: fetches the root tree at the given SHA via Octokit's `GitDatabase.Tree.Get`
+- `TryReadFileAsync`: fetches contents via Octokit's `Repository.Content.GetAllContentsByRef`; returns null on 404; decodes base64
 
-```text
-GitHub returns each changed file's diff as a unified-diff "patch" string. To post inline review comments via the GitHub API you must target a line number that exists in the diff hunks of that file on the new side (RIGHT). Posting any other line returns 422.
+**`CompositeGroundingProvider : IGroundingProvider`** in `ReviewBot.Grounding/`:
+- Constructor: `IReadOnlyList<ILanguageDetector> detectors`, `IRepoContentReader reader`, `ILogger<CompositeGroundingProvider>`
+- If `request.Config.Grounding.Enabled == false`: return `new GroundingContext(null, null, null)` immediately
+- Call `ListRootFilesAsync`; iterate detectors in registration order; first `CanDetect` match wins
+- Call `ExtractMetadataAsync` on the matching detector
+- On any exception: log Warning, return `GroundingContext(null, null, null)` — never rethrow
+- Tier 2/3 (`Build`/`Tests` fields) remain null until Phase 9
 
-In ReviewBot.Core/Diff/, create a static class `UnifiedDiffParser` with one public method:
+**DI extension** `AddGrounding(IServiceCollection)`:
+- Registers `GitHubRepoContentReader` as `IRepoContentReader`
+- Registers `CompositeGroundingProvider` as `IGroundingProvider`
+- Returns a builder so callers can chain `.AddLanguageDetector<T>()`
 
-  IReadOnlySet<int> GetCommentableLines(string patch)
+**Tests:**
+- Reader: substitute `IGitHubClientFactory`; assert correct SHA passed to tree/content calls; not-found returns null
+- Provider: two detectors registered; first match wins; second not called
+- Provider: detector throws → returns empty context, does not rethrow
+- Provider: grounding disabled in config → returns empty context, detectors not called
+- DI registration wires correctly
 
-Behavior:
-- Returns the set of line numbers on the new file (RIGHT side) that appear in the patch hunks. These are lines marked with '+' or context lines ' ' inside any @@ hunk. Lines marked '-' are old-side and not commentable on RIGHT, so they do not count.
-- Parse hunk headers of the form `@@ -oldStart,oldCount +newStart,newCount @@`. The count fields are optional (default 1). Track the running new-file line number as you walk the hunk body.
-- Ignore lines starting with `\` (such as `\ No newline at end of file`).
-- Return an empty set for null, empty, or patch with no hunks.
-- Throw FormatException only on truly malformed hunk headers, not on minor irregularities.
-
-Tests in ReviewBot.Core.Tests/Diff/UnifiedDiffParserTests.cs covering:
-- Single hunk, all additions: lines 1..N are returned
-- Single hunk, mixed +/- /context: only + and context contribute, with correct line counting
-- Multiple hunks with gaps between them
-- Hunk header with omitted counts (`@@ -1 +1 @@`)
-- Empty / null / whitespace input returns empty set
-- A real fixture string (paste a 20-line patch with two hunks) and assert the exact expected line set
-
-Use FluentAssertions throughout. No I/O, no async.
-
-Deliverable: parser with 100% branch coverage on the parsing logic, all tests green.
-```
-
-Completion notes:
-- Added `ReviewBot.Core/Diff/UnifiedDiffParser` as a pure parser for GitHub unified-diff patch strings. It returns RIGHT-side commentable line numbers from hunk additions and context lines, ignores old-side deletions and `\ No newline at end of file` markers, supports omitted hunk counts, and throws `FormatException` for malformed hunk headers.
-- Added `ReviewBot.Core.Tests/Diff/UnifiedDiffParserTests` covering all specified cases plus malformed hunk headers and no-newline markers. Core tests now include 14 passing tests.
-- Corrected assumption: the public parser method accepts `string?` rather than `string` so the documented null-input behavior is represented in the type system.
-- Risk register unchanged; no new risks opened or closed by this pure Core chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with the new parser tests green. The non-Core test assemblies still contain no tests and VSTest reports that as informational while returning success, matching the prior phase notes.
-
-### Step 4: Prompt builder - Completed 2026-05-22
-
-```text
-In ReviewBot.Core/Prompting/, create `PromptBuilder` (static class) with:
-
-  PromptPayload Build(ReviewRequest request)
-
-  public sealed record PromptPayload(string SystemPrompt, string UserPrompt);
-
-The system prompt should:
-- Define the LLM's role as a senior code reviewer
-- State the focus areas from request.Config.Focus
-- Include request.Config.Instructions verbatim if non-empty
-- Instruct it to respond ONLY with a JSON object matching the schema (see below) and nothing else, no markdown fences, no preamble
-- Specify the schema:
-    {
-      "summary": "string, markdown allowed, 1-3 short paragraphs",
-      "comments": [
-        {
-          "path": "string, must match one of the changed files",
-          "line": "integer, must be a commentable line on the new side",
-          "severity": "info|warning|error",
-          "body": "string, markdown allowed; for fixes use GitHub suggestion blocks"
-        }
-      ]
-    }
-- Tell it to omit a comment entirely rather than pick a guessed line, and to keep total comments under 25.
-
-The user prompt should include:
-- PR title and body
-- A section per file: header line `=== {path} ({status}, +{additions} -{deletions}) ===`, then the patch verbatim, fenced with ```diff
-- Files in stable order (sorted by path) for reproducibility
-
-Implement helper sanitization: strip null bytes from patches and truncate any individual patch above request.Config.Review.MaxPatchLines lines, appending a marker `... (truncated, N more lines)`.
-
-Tests in ReviewBot.Core.Tests/Prompting/PromptBuilderTests.cs:
-- System prompt includes each focus area and the schema definition
-- System prompt contains custom Instructions when set
-- User prompt orders files alphabetically by path regardless of input order
-- Patch truncation kicks in above the configured limit and appends the marker
-- Use a snapshot-style test: fixture ReviewRequest in, assert the built payload matches an expected string (store the expected string inline as a C# raw string literal for clarity)
-
-Deliverable: builder produces a deterministic, schema-explicit prompt; tests cover ordering, truncation, focus areas, and instructions.
-```
-
-Completion notes:
-- Added `ReviewBot.Core/Prompting/PromptBuilder` and `PromptPayload`. The builder emits a senior-reviewer system prompt with the configured focus areas, optional custom instructions, the strict JSON response schema, and comment-line safety guidance.
-- Added deterministic user prompt generation with PR title/body, per-file `diff` fences, ordinal path ordering, null-byte stripping, and per-file patch truncation based on `ReviewConfig.Review.MaxPatchLines`.
-- Added `ReviewBot.Core.Tests/Prompting/PromptBuilderTests` covering focus/schema text, custom instructions, path ordering, truncation markers, null-byte sanitization, and a full inline raw-string snapshot.
-- Corrected assumption: patch strings may end with a trailing newline; truncation now avoids counting that terminator as an extra omitted blank line.
-- Risk register unchanged; no new risks opened or closed by this pure Core chunk.
-- Stop test passed: `dotnet test tests/ReviewBot.Core.Tests/ReviewBot.Core.Tests.csproj -c Release` completed successfully with 20 green Core tests. Full-solution verification is recorded in the final work summary.
-
-### Step 5: LLM result parser - Completed 2026-05-22
-
-```text
-LLMs return JSON of variable cleanliness: sometimes wrapped in markdown fences, sometimes with trailing prose, sometimes with extra fields. Build a tolerant parser.
-
-In ReviewBot.Core/Llm/, create `LlmResultParser` (static) with:
-
-  ParseResult Parse(string rawResponse)
-
-  public sealed record ParseResult(bool Success, ReviewResult? Value, string? Error);
-
-Behavior:
-- Strip any leading/trailing whitespace
-- If the response starts with a markdown code fence (``` or ```json), strip the fence and matching closer
-- Find the first `{` and the matching closing `}` using a brace counter that respects string literals (so braces inside strings do not throw off counting)
-- Parse with System.Text.Json using a permissive options (`PropertyNameCaseInsensitive = true`, `ReadCommentHandling = Skip`, `AllowTrailingCommas = true`)
-- Validate required fields: `summary` (string), `comments` (array, may be empty)
-- For each comment: require path (string), line (positive int), body (string). severity is optional and defaults to Severity.Info; accept case-insensitive "info"/"warning"/"error" and map unknown values to Info. side is optional and defaults to "RIGHT".
-- Drop individual comments that fail validation (do not fail the whole parse) and log via a passed-in optional ILogger? parameter. If logger is null, drop silently.
-- If the JSON is not parseable at all, return Success=false with Error describing the failure.
-- Cap parsed comments at 100 (defense against runaway model output) before returning.
-
-Tests in ReviewBot.Core.Tests/Llm/LlmResultParserTests.cs:
-- Clean JSON parses
-- JSON wrapped in ```json fences parses
-- JSON with leading "Here is the review:" prose parses (brace-finder skips it)
-- Missing summary returns Success=false
-- One invalid comment is dropped, others retained
-- Unknown severity falls back to Info
-- Truly malformed JSON returns Success=false with non-null Error
-- Comment cap at 100 enforced
-
-Deliverable: a robust parser with strong test coverage; downstream code can trust ReviewResult invariants.
-```
-
-Completion notes:
-- Added `ReviewBot.Core/Llm/LlmResultParser` and `ParseResult`. The parser strips leading fences, extracts the first complete JSON object with a string-aware brace counter, parses permissive JSON, validates the required root fields, drops invalid individual comments, defaults optional `severity` and `side`, and caps returned comments at 100.
-- Added `Microsoft.Extensions.Logging.Abstractions` to `ReviewBot.Core` for the optional invalid-comment logging hook without pulling in a concrete logger.
-- Added `ReviewBot.Core.Tests/Llm/LlmResultParserTests` covering clean JSON, fenced JSON, leading prose, missing summary, dropped invalid comments, unknown severity fallback, malformed JSON, and the 100-comment cap.
-- Corrected assumption: `ReviewResult` record equality is not structural for the `IReadOnlyList<InlineComment>` property; tests that compare whole results should use structural equivalence unless the domain model later changes to a value-equality collection type.
-- Risk register unchanged; no new risks opened or closed by this pure Core chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 28 green Core tests. The non-Core test assemblies still contain no tests and VSTest reports that as informational while returning success.
+Deliverable: plumbing complete. Register a detector and it works.
 
 ---
 
-## Phase 3: LLM layer
+### Step 25: .NET language detector
 
-### Step 6: IReviewLlm interface and stub - Completed 2026-05-22
+**`DotNetLanguageDetector : ILanguageDetector`** in `ReviewBot.Grounding/Languages/DotNet/`:
 
-```text
-In ReviewBot.Core/Llm/, define:
+`CanDetect`: true if root files contain any name ending in `.csproj`, `.sln`, `.slnx`, or equal to `Directory.Build.props`.
 
-  public interface IReviewLlm
-  {
-      Task<ReviewResult> ReviewAsync(ReviewRequest request, CancellationToken ct);
-  }
+`ExtractMetadataAsync`:
+1. Try `Directory.Build.props` at repo root; parse XML for `<TargetFramework>`, `<LangVersion>`, `<Nullable>`, `<TreatWarningsAsErrors>`
+2. If not found, try the first `*.csproj` name in the root file list; parse the same properties
+3. Try `global.json` at repo root; extract `sdk.version`
+4. Map TFM to version: `net10.0` → `"10.0"`, `net9.0` → `"9.0"`, etc.
+5. Build `Facts` list: include LangVersion if set, Nullable setting, TreatWarningsAsErrors, any `<ImplicitUsings>` setting
+6. Return null if no TFM can be determined (not enough signal to ground the model)
 
-In ReviewBot.Core/Llm/, also add a `StubReviewLlm : IReviewLlm` for testing and local development. Constructor takes a `ReviewResult` to return; ReviewAsync returns it. Add a second constructor taking `Func<ReviewRequest, ReviewResult>` for dynamic responses.
+`LanguageId = "dotnet"`.
 
-In ReviewBot.Core.Tests/Llm/, add tests:
-- StubReviewLlm with a fixed result returns it
-- StubReviewLlm with a function calls the function with the request and returns its result
+Use `System.Xml.Linq` for XML parsing. No new package dependency.
 
-This step is intentionally tiny but it locks the contract that the next two steps will implement against. Do not add Anthropic or OpenAI dependencies yet.
+**Tests** with inline fixture strings (raw string literals):
+- `Directory.Build.props` with `net10.0` + `LangVersion=latest` → version `"10.0"`, fact includes LangVersion
+- `.csproj` fallback when no `Directory.Build.props`
+- `global.json` SDK version appears in `ToolchainVersion`
+- Missing files → returns null (not enough signal)
+- Malformed XML → returns null (caught, logged)
+- `CanDetect` positive/negative cases
 
-Deliverable: interface defined, stub usable for integration tests in later phases.
-```
-
-Completion notes:
-- Added `ReviewBot.Core/Llm/IReviewLlm` as the provider contract for `ReviewRequest` to `ReviewResult` review execution with cancellation-token flow.
-- Added `ReviewBot.Core/Llm/StubReviewLlm` with fixed-result and request-function constructors for local development and later integration tests.
-- Added `ReviewBot.Core.Tests/Llm/StubReviewLlmTests` covering fixed-result behavior and request-dependent dynamic behavior.
-- Corrected assumption: although the planned stub only needed to return configured results, it should still validate null inputs and honor pre-canceled tokens so tests using it do not accidentally mask broken caller behavior.
-- Risk register unchanged; no new external dependencies or provider-specific behavior were introduced by this Core-only contract chunk.
-- Stop test passed: `dotnet test ReviewBot.sln -c Release` completed successfully with 30 green Core tests. Non-Core future-phase test assemblies still contain no tests and VSTest reports that as informational while returning success.
-
-### Step 7: Anthropic implementation - Completed 2026-05-23
-
-```text
-In ReviewBot.Llm.Anthropic, add the Anthropic.SDK NuGet package. Create `AnthropicReviewLlm : IReviewLlm`.
-
-Constructor dependencies (inject via DI later):
-- AnthropicLlmOptions (record with ApiKey, ModelName, MaxTokens default 4096, Temperature default 0.2)
-- ILogger<AnthropicReviewLlm>
-- Optional HttpClient (for tests; default null means SDK manages its own)
-
-Implementation:
-- In ReviewAsync, call PromptBuilder.Build(request) to get system and user prompts
-- Call the Anthropic Messages API with the system prompt as system, user prompt as the single user message
-- Use the SDK's normal text completion mode (not tool use for v1; we will revisit if reliability is poor). Request JSON output via the system prompt itself.
-- Pass the cancellation token through
-- On success, extract the text content and call LlmResultParser.Parse
-- If parser returns Success=false, retry once with an appended user message "Your previous response was not valid JSON. Respond again with ONLY the JSON object."
-- If still fails, throw `LlmResponseException` with the raw response truncated to 2KB in the message
-
-Add `AnthropicLlmOptions` record and a `ReviewBot.Llm.Anthropic.DependencyInjection.AddAnthropicReviewLlm(IServiceCollection, Action<AnthropicLlmOptions>)` extension.
-
-Tests in ReviewBot.Llm.Tests/Anthropic/AnthropicReviewLlmTests.cs:
-- Use Anthropic.SDK's testability hooks (or wrap the SDK call behind an internal interface you can substitute). If the SDK is hard to mock, extract the actual HTTP call into a private virtual or a thin internal `IAnthropicClient` interface and test against that.
-- Happy path: client returns clean JSON, ReviewAsync returns parsed ReviewResult
-- Malformed JSON triggers exactly one retry, then succeeds
-- Malformed twice throws LlmResponseException
-- Cancellation token propagates
-
-Deliverable: Anthropic implementation behind IReviewLlm with retry-on-malformed and proper error surface.
-```
-
-Completion notes:
-- Added `ReviewBot.Llm.Anthropic/AnthropicReviewLlm` behind `IReviewLlm`. It builds prompts with `PromptBuilder`, calls the Anthropic Messages API through an internal client seam, parses responses with `LlmResultParser`, retries once when the model returns invalid JSON, and throws `LlmResponseException` after persistent parse failure.
-- Added `AnthropicLlmOptions`, the `AddAnthropicReviewLlm` DI extension, and the `Anthropic.SDK` package dependency. The SDK call is isolated behind `IAnthropicClient`/`AnthropicSdkClient` so retry behavior is unit-testable and SDK churn stays localized.
-- Added focused `ReviewBot.Llm.Tests/Anthropic/AnthropicReviewLlmTests` covering happy path parsing, retry-once recovery, persistent malformed output, cancellation-token propagation, and DI registration.
-- Corrected assumption: `Anthropic.SDK` 5.10.0 is an unofficial Anthropic client package. The current implementation keeps that dependency behind an internal adapter rather than letting SDK types spread across the app.
-- Risk register updated with the unofficial SDK dependency risk and its current mitigation.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests and 5 green LLM tests. The Api/GitHub/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
-
-### Step 8: OpenAI-compatible implementation - Completed 2026-05-23
-
-```text
-In ReviewBot.Llm.OpenAi, add the official `OpenAI` NuGet package (version 2.x). Create `OpenAiReviewLlm : IReviewLlm`.
-
-Constructor dependencies:
-- OpenAiLlmOptions (record with ApiKey, ModelName, BaseUrl (Uri, nullable; null means default api.openai.com), MaxTokens, Temperature, UseJsonMode (bool, default true))
-- ILogger<OpenAiReviewLlm>
-
-Implementation:
-- Build the OpenAI ChatClient with `OpenAIClientOptions { Endpoint = options.BaseUrl }` when BaseUrl is set, otherwise default
-- In ReviewAsync, build prompts via PromptBuilder
-- If UseJsonMode is true, set ChatCompletionOptions.ResponseFormat = ChatResponseFormat.CreateJsonObjectFormat()
-- Send system + user messages, await completion
-- Parse via LlmResultParser; same retry-once behavior as the Anthropic implementation
-- Same LlmResponseException on persistent failure
-
-Add `AddOpenAiReviewLlm` DI extension. The BaseUrl, ApiKey, and ModelName should be bindable from config so Ollama (`http://localhost:11434/v1`), vLLM, LM Studio, etc. all work without code changes.
-
-Tests in ReviewBot.Llm.Tests/OpenAi/OpenAiReviewLlmTests.cs:
-- If the SDK is not easily mockable, hide it behind an internal `IOpenAiChatClient` thin wrapper and test against that interface (same pattern as the Anthropic tests).
-- Happy path, retry-once, persistent-failure-throws, cancellation
-- A test asserting that when BaseUrl is set to a custom value, the constructed client uses it (this can be verified by observing the URL the mocked handler receives)
-
-Deliverable: OpenAI-compatible implementation with custom endpoint support, same contract and error behavior as Anthropic.
-```
-
-Completion notes:
-- Added the official `OpenAI` 2.10.0 SDK package to `ReviewBot.Llm.OpenAi`.
-- Added `OpenAiReviewLlm` behind `IReviewLlm`. It builds prompts with `PromptBuilder`, calls an OpenAI-compatible chat completion through an internal `IOpenAiChatClient` adapter, parses with `LlmResultParser`, retries once on invalid JSON, and throws `LlmResponseException` after persistent malformed output.
-- Added `OpenAiLlmOptions`, `OpenAiSdkChatClient`, `OpenAiChatRequest`, and `AddOpenAiReviewLlm`. `ApiKey`, `ModelName`, `BaseUrl`, `MaxTokens`, `Temperature`, and `UseJsonMode` are mutable options properties so they can be bound from configuration later; custom endpoints are passed via `OpenAIClientOptions.Endpoint`.
-- Added `ReviewBot.Llm.Tests/OpenAi/OpenAiReviewLlmTests` covering happy path parsing, retry-once recovery, persistent malformed output, cancellation-token propagation, DI registration, configured completion options, and custom endpoint option construction.
-- Corrected assumption: the OpenAI SDK exposes `ChatClient.Endpoint`, but it is marked with diagnostic `OPENAI001` as evaluation-only. The implementation avoids that property and verifies custom endpoint wiring through the stable `OpenAIClientOptions.Endpoint` configuration object instead.
-- Risk register updated with the JSON-mode compatibility risk for OpenAI-compatible local/proxy providers and the existing `UseJsonMode` mitigation.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests and 12 green LLM tests. The Api/GitHub/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
-
-### Step 9: LLM provider factory - Completed 2026-05-23
-
-```text
-In ReviewBot.Core/Llm/, create `ReviewLlmFactory`:
-
-  public sealed class ReviewLlmFactory
-  {
-      public ReviewLlmFactory(IServiceProvider provider);
-      public IReviewLlm Create(ModelConfig modelConfig);
-  }
-
-Behavior:
-- modelConfig.Provider == "anthropic" returns an AnthropicReviewLlm resolved from DI (the registered options can be overridden per-call by re-binding ModelName from modelConfig.Name)
-- modelConfig.Provider == "openai" returns an OpenAiReviewLlm similarly
-- Unknown provider throws InvalidOperationException with a list of supported providers
-- The factory does NOT instantiate the implementations directly; it resolves them from the container so test substitutes work
-
-To make per-call model name overrides clean, define `IReviewLlmFactory` and have the registered implementations expose a `WithModelName(string)` method that returns a new instance with the same dependencies but a different model. Alternative: have the factory hold typed options snapshots and rebuild on demand. Pick whichever is cleaner; document the choice in code comments.
-
-Wire-up extension in ReviewBot.Core:
-  AddReviewLlmFactory(IServiceCollection) registers the factory.
-The Api project's composition root will call AddAnthropicReviewLlm and AddOpenAiReviewLlm with options from configuration, plus AddReviewLlmFactory.
-
-Tests in ReviewBot.Llm.Tests/ReviewLlmFactoryTests.cs:
-- Returns Anthropic impl for "anthropic"
-- Returns OpenAI impl for "openai"
-- Throws on unknown provider
-- Per-call model name override is honored
-- Use a real ServiceCollection in tests, register substitute IReviewLlm implementations, build the provider, exercise the factory
-
-Deliverable: a single seam where the worker says "give me an LLM for this config" and gets the right one.
-```
-
-Completion notes:
-- Added `IReviewLlmFactory`/`ReviewLlmFactory` and `AddReviewLlmFactory` in Core. The factory selects lightweight `ReviewLlmProviderRegistration` entries by `ModelConfig.Provider` case-insensitively, resolves only the selected provider from DI, applies the per-call `ModelConfig.Name` override, and reports supported provider names when config references an unknown provider.
-- Added `IConfigurableReviewLlm` so Core can own provider selection without referencing the Anthropic or OpenAI implementation projects. Both provider implementations now expose their provider name and a `WithModelName` override method.
-- Fixed the provider area before building the factory: `OpenAiSdkChatClient` previously bound the model name into the SDK `ChatClient` at construction time, which made per-call model selection impossible. The OpenAI request shape now carries `ModelName`, and the SDK adapter constructs the `ChatClient` for the requested model.
-- Added `ReviewBot.Llm.Tests/ReviewLlmFactoryTests` covering Anthropic selection, OpenAI selection, unknown-provider errors, DI registration, lazy selected-provider resolution, and substitute-based model override behavior. Expanded provider tests to assert overridden model names reach the outbound Anthropic/OpenAI request records.
-- Corrected assumption: putting the factory in Core cannot mean Core directly knows about `AnthropicReviewLlm` or `OpenAiReviewLlm`, because provider projects depend on Core. The provider-agnostic `IConfigurableReviewLlm` registration keeps the dependency direction intact while preserving test substitutes.
-- Risk register unchanged; no new risks opened by the provider-factory chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests and 20 green LLM tests. The Api/GitHub/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
+Deliverable: .NET repos accurately grounded with version and compiler settings.
 
 ---
 
-## Phase 4: GitHub integration
+### Step 26: Python language detector
 
-### Step 10: GitHub App JWT signer - Completed 2026-05-23
+**`PythonLanguageDetector : ILanguageDetector`** in `ReviewBot.Grounding/Languages/Python/`:
 
-```text
-In ReviewBot.GitHub/Auth/, create `GitHubAppJwtSigner`.
+`CanDetect`: true if root files contain `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, or `.python-version`.
 
-Inputs (record GitHubAppOptions): long AppId, string PrivateKeyPem (RSA PEM, PKCS1 or PKCS8).
+`ExtractMetadataAsync`:
+1. Try `pyproject.toml` first; extract `[project] requires-python` (e.g. `">=3.12"`) and note presence of `[tool.mypy]` / `[tool.ruff]` / `[tool.pyright]` sections as type-checker facts. Parse with simple regex/string scanning — do not add a TOML library; the fields needed are simple enough. Note the exact version constraint in Facts.
+2. Try `.python-version` (plain version string, e.g. `3.12.2`)
+3. Try `setup.cfg` for `[options] python_requires`
+4. Note major.minor as `LanguageVersion`; full string as `ToolchainVersion` when available
 
-Public method:
-  string CreateAppJwt(DateTimeOffset now)
+`LanguageId = "python"`.
 
-Behavior:
-- Builds a JWT with claims: iat = now - 60s (clock skew), exp = now + 9 minutes (GitHub max is 10), iss = AppId
-- Signs with RS256 using the loaded RSA key
-- Use System.IdentityModel.Tokens.Jwt OR Microsoft.IdentityModel.Tokens with RsaSecurityKey; whichever stays compatible with .NET 9
-- Cache the parsed RSA key so each call does not re-parse PEM
+**Tests** with inline fixture strings:
+- `pyproject.toml` with `requires-python = ">=3.12"` → version `"3.12"`
+- `pyproject.toml` with `[tool.mypy]` section → facts include mypy present
+- `.python-version` fallback
+- `setup.cfg` fallback
+- Priority order: `pyproject.toml` wins over `.python-version`
+- No Python files at all → null
 
-Tests in ReviewBot.GitHub.Tests/Auth/GitHubAppJwtSignerTests.cs:
-- Generate an RSA keypair in the test (RSA.Create()), export to PEM, feed to the signer
-- Sign a JWT, then verify it using the corresponding public key
-- Assert claims iat, exp, iss are set correctly relative to a fixed `now`
-- Assert exp - iat is at most 10 minutes
-
-Deliverable: deterministic JWT minting verified end-to-end with a real keypair, no external dependency.
-```
-
-Completion notes:
-- Added `ReviewBot.GitHub/Auth/GitHubAppOptions` and `GitHubAppJwtSigner`. The signer mints RS256 GitHub App JWTs with `iat = now - 60s`, `exp = now + 9 minutes`, and `iss = AppId`, imports PKCS#1 or PKCS#8 RSA PEM keys, and caches the parsed RSA key for reuse.
-- Added `ReviewBot.GitHub.Tests/Auth/GitHubAppJwtSignerTests` with in-test RSA keypair generation, public-key signature verification, claim assertions against a fixed clock, max-lifetime validation, and coverage for both PKCS#8 and PKCS#1 PEM inputs.
-- Fixed the GitHub project area before adding code: removed duplicate `TargetFramework`, `Nullable`, and `ImplicitUsings` properties from `ReviewBot.GitHub.csproj` because those are already inherited from the root `Directory.Build.props`.
-- Corrected assumption: no JWT package was needed for this chunk. Manual compact-JWT construction with `System.Security.Cryptography.RSA.SignData` keeps the signer dependency-free while still producing a standard RS256 token.
-- Risk register unchanged; no new risks opened by the signer chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests, 20 green LLM tests, and 2 green GitHub tests. The Api/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
-
-### Step 11: Installation token client and cache - Completed 2026-05-23
-
-```text
-In ReviewBot.GitHub/Auth/, create `InstallationTokenClient`.
-
-Dependencies: IHttpClientFactory (or HttpClient directly via named client), GitHubAppJwtSigner, ILogger<InstallationTokenClient>.
-
-Public method:
-  Task<InstallationToken> GetTokenAsync(long installationId, CancellationToken ct);
-
-  public sealed record InstallationToken(string Token, DateTimeOffset ExpiresAt);
-
-Behavior:
-- POST to https://api.github.com/app/installations/{installationId}/access_tokens
-- Authorization: Bearer {appJwt}, Accept: application/vnd.github+json, User-Agent: ReviewBot
-- Parse `{ "token": "...", "expires_at": "ISO8601" }`
-- Throws GitHubAuthException on non-2xx with status and response body
-
-Wrap this in `CachingInstallationTokenProvider : IInstallationTokenProvider`:
-- IMemoryCache keyed by installationId
-- TTL = (token.ExpiresAt - now) - 1 minute safety margin
-- Concurrent requests for the same installation deduplicate via per-key SemaphoreSlim so we do not stampede the API
-- Public API: same signature as the client
-
-Tests in ReviewBot.GitHub.Tests/Auth/:
-- InstallationTokenClient: use a mock HttpMessageHandler, assert the request URL, headers (Bearer present, User-Agent present), and parse the response
-- CachingInstallationTokenProvider: substitute IInstallationTokenProvider for the inner, assert second call returns cached value without calling inner; assert expired tokens trigger refresh; assert concurrent calls for the same installation hit the inner exactly once
-- Use a fake `TimeProvider` (System.TimeProvider in .NET 9) so cache expiry is deterministic
-
-Deliverable: production-ready token acquisition that does not melt under load and respects token TTL.
-```
-
-Completion notes:
-- Added `InstallationTokenClient`, `InstallationToken`, `IInstallationTokenProvider`, and `GitHubAuthException` under `ReviewBot.GitHub/Auth`. The client posts to GitHub's installation access-token endpoint with the app JWT bearer token, GitHub media `Accept` header, and `ReviewBot` user agent; it parses the `token`/`expires_at` response and raises `GitHubAuthException` with status and body on non-2xx responses.
-- Added `CachingInstallationTokenProvider` using `IMemoryCache`, a one-minute expiry safety margin, and per-installation `SemaphoreSlim` gates to deduplicate concurrent refreshes for the same installation.
-- Added GitHub auth tests covering token-client request shape and parsing, non-success auth failures, cached second reads, expiry refresh, near-expiry no-cache behavior, and concurrent request deduplication.
-- Fixed the GitHub test project area before adding tests: removed duplicate `TargetFramework`, `Nullable`, and `ImplicitUsings` properties so it inherits root build settings consistently from `Directory.Build.props`.
-- Corrected assumption: `Microsoft.Extensions.Caching.Memory` 10.0.1 pulls in `Microsoft.Extensions.Logging.Abstractions >= 10.0.1`; the GitHub project now pins logging abstractions to 10.0.1 to avoid restore warning-as-error package downgrades.
-- Corrected assumption: deterministic cache-expiry tests are simpler and more direct when the cached value stores its own `TimeProvider`-based expiry instant; `IMemoryCache` remains the backing store, but the provider owns token-TTL semantics.
-- Risk register unchanged; no new risks opened by the token-client/cache chunk.
-- Stop test passed: `dotnet test tests/ReviewBot.GitHub.Tests/ReviewBot.GitHub.Tests.csproj -c Release` completed successfully with 8 green GitHub tests.
-
-### Step 12: GitHub PR fetcher - Completed 2026-05-23
-
-```text
-In ReviewBot.GitHub/Pulls/, create `PullRequestFetcher`.
-
-Dependencies: an Octokit `IGitHubClient` factory that takes an installation token and returns a configured client. Define `IGitHubClientFactory` with `IGitHubClient CreateForInstallation(string token)`; implement using new `GitHubClient(new ProductHeaderValue("ReviewBot")) { Credentials = new Credentials(token) }`.
-
-PullRequestFetcher public method:
-  Task<PullRequestSnapshot> FetchAsync(string owner, string repo, int prNumber, string installationToken, CancellationToken ct);
-
-  public sealed record PullRequestSnapshot(
-      string Title,
-      string Body,
-      string BaseSha,
-      string HeadSha,
-      IReadOnlyList<FileChange> Files);
-
-Behavior:
-- Get the PR (title, body, baseSha, headSha)
-- Get the changed files (paginated; iterate all pages, cap at config.MaxFiles default 50)
-- For each file, build a FileChange. Use UnifiedDiffParser to compute CommentableLines from the file's Patch (null patch means binary or too large; treat as empty set).
-- Map Octokit file status strings ("added"/"modified"/"removed"/"renamed"/"copied") to FileChangeStatus.
-- Skip files with no patch and no commentable lines from the resulting list (cannot comment on them).
-
-Tests in ReviewBot.GitHub.Tests/Pulls/PullRequestFetcherTests.cs:
-- Substitute IGitHubClient (NSubstitute) and stub `PullRequest.Get`, `PullRequest.Files.GetAll`
-- Build fixture Octokit objects (or use the Octokit constructor where available; if internals are sealed, wrap behind a thin adapter interface and test the adapter against that)
-- Happy path with two changed files: snapshot has correct title, shas, file count
-- Files with null patch are omitted
-- Pagination handled if more than one page is returned
-
-Deliverable: one call gets everything the LLM needs to review a PR.
-```
-
-Completion notes:
-- Added `ReviewBot.GitHub/Pulls/PullRequestFetcher`, `PullRequestSnapshot`, `IGitHubClientFactory`, and `OctokitGitHubClientFactory`. The fetcher creates an installation-authenticated Octokit client, fetches PR title/body/base/head metadata, pages through changed files up to the default `ReviewConfig.Default.Review.MaxFiles` cap, maps GitHub file statuses to `FileChangeStatus`, computes RIGHT-side commentable lines with `UnifiedDiffParser`, and omits files whose patch is unavailable.
-- Added the planned `Octokit` package reference to `ReviewBot.GitHub`. This was a missing dependency for Phase 4 and was fixed before writing the fetcher code.
-- Added `ReviewBot.GitHub.Tests/Pulls/PullRequestFetcherTests` covering metadata/file mapping, null-patch omission, multi-page file fetching, the default 50-file cap, and installation-token client creation.
-- Corrected assumption: Octokit 14 exposes changed-file fetching as `PullRequest.Files(...)`, not `PullRequest.Files.GetAll`.
-- Corrected assumption: Octokit response model properties are readable but not publicly settable in test code, so tests construct `PullRequest`, `GitReference`, and `PullRequestFile` instances through Octokit's public constructors rather than object initializers.
-- Risk register updated to record that Step 12's pagination risk is covered by focused tests; no new open risks were introduced.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests, 20 green LLM tests, and 13 green GitHub tests. The Api/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
-
-### Step 13: Review poster - Completed 2026-05-23
-
-```text
-In ReviewBot.GitHub/Pulls/, create `ReviewPoster`.
-
-Dependencies: IGitHubClientFactory, ILogger<ReviewPoster>.
-
-Public method:
-  Task PostAsync(string owner, string repo, int prNumber, string commitSha, ReviewResult result, IReadOnlyList<FileChange> files, string installationToken, CancellationToken ct);
-
-Behavior:
-- Build a lookup `Dictionary<string, IReadOnlySet<int>>` of path -> commentable lines from the input files list
-- Filter result.Comments: drop any comment whose path is not in the lookup, or whose line is not in the set. Log dropped ones at Information level with reason.
-- If there are zero valid inline comments AND the summary is empty, log a warning and return without posting.
-- Build the review payload:
-    - commit_id = commitSha (HeadSha)
-    - body = result.Summary (prefix each section appropriately; if summary is empty, body = "Automated review by ReviewBot.")
-    - event = "COMMENT"
-    - comments = each valid InlineComment mapped to { path, line, side, body }
-- Post via Octokit's `PullRequestReview.Create` (or the raw HTTP if Octokit's surface is awkward; document the choice)
-- On Octokit ApiValidationException (422), log the response details and rethrow as ReviewPostException with the dropped/accepted counts so debugging is possible.
-
-Tests in ReviewBot.GitHub.Tests/Pulls/ReviewPosterTests.cs:
-- Comments outside commentable lines are dropped
-- Comments referencing unknown paths are dropped
-- Empty summary + empty valid comments: no API call made
-- Happy path: API called with correct payload (assert on the substitute)
-- 422 from API rethrown as ReviewPostException
-
-Deliverable: posting is defensive about line validity (matches the gotcha called out in the architecture), and quiet when there is nothing to say.
-```
-
-Completion notes:
-- Added `ReviewBot.GitHub/Pulls/ReviewPoster`, which builds a path-to-commentable-lines lookup from fetched `FileChange` data, drops comments for unknown paths or non-commentable RIGHT-side lines with Information logs, posts summary-only or summary-plus-inline review payloads, and skips GitHub entirely when both summary and valid inline comments are empty.
-- Added `ReviewPostException` for GitHub 422 validation failures. It preserves the original `ApiValidationException` and reports accepted/dropped comment counts so invalid review payloads are easier to diagnose.
-- Added `ReviewBot.GitHub.Tests/Pulls/ReviewPosterTests` covering line filtering, unknown-path filtering, no-op behavior, payload shape, default body behavior, and 422 wrapping.
-- Corrected assumption: Octokit's typed `PullRequestReviewCreate` model still exposes draft comments by diff `position`, while ReviewBot needs GitHub's modern `line`/`side` review-comment payload. The poster therefore uses Octokit's authenticated raw `IConnection.Post` with a small dictionary payload rather than the typed model.
-- Risk register updated to record that the line/side payload compatibility risk is now isolated and covered by tests.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests, 20 green LLM tests, and 19 green GitHub tests. The Api/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
-
-### Step 14: Repo config file fetcher and parser - Completed 2026-05-23
-
-```text
-In ReviewBot.GitHub/Config/, create `RepoConfigFetcher`.
-
-Dependencies: IGitHubClientFactory, ILogger<RepoConfigFetcher>.
-
-Public method:
-  Task<ReviewConfig> FetchAsync(string owner, string repo, string sha, string installationToken, CancellationToken ct);
-
-Behavior:
-- Try to fetch `.github/review-bot.yml` at the given sha via the Contents API. If 404, also try `.github/review-bot.yaml`. If both 404, return ReviewConfig.Default and log Info.
-- Decode the base64 content, parse YAML with YamlDotNet.
-- Map YAML to ReviewConfig. Missing fields fall back to the corresponding ReviewConfig.Default field (use a merge helper).
-- On YAML parse failure, log Warning with the error and return ReviewConfig.Default to avoid blocking reviews.
-
-YAML mapping notes:
-- Use snake_case naming convention via YamlDotNet's UnderscoredNamingConvention
-- Validate provider is one of: "anthropic", "openai"; otherwise fall back to default and log Warning
-- Trim Instructions; treat empty string as null
-
-Tests in ReviewBot.GitHub.Tests/Config/RepoConfigFetcherTests.cs:
-- Missing file returns Default
-- Valid YAML maps correctly (use the sample from the spec)
-- Partial YAML (only overrides model.name) merges with Default for the rest
-- Invalid YAML returns Default and logs Warning
-- Unknown provider falls back to Default
-
-Deliverable: config can live in the repo and is robust to absence and malformation.
-```
-
-Completion notes:
-- Added `ReviewBot.GitHub/Config/RepoConfigFetcher`, backed by the existing installation-token `IGitHubClientFactory`. It looks for `.github/review-bot.yml` first, then `.github/review-bot.yaml`, decodes the repository contents API's base64 payload, parses YAML with YamlDotNet's underscored naming convention, and merges partial repo config over `ReviewConfig.Default`.
-- Added defensive fallback behavior for absent config files, malformed YAML/base64 content, non-file contents responses, and unknown model providers. Missing or malformed repo config now logs and returns defaults so reviews are not blocked by config mistakes.
-- Added the planned `YamlDotNet` dependency to `ReviewBot.GitHub`.
-- Added `ReviewBot.GitHub.Tests/Config/RepoConfigFetcherTests` covering missing files, `.yaml` fallback, valid full YAML, partial YAML merge, invalid YAML warning/default behavior, and unknown-provider fallback.
-- Corrected assumption: YamlDotNet 18.0.0 does not populate `IReadOnlyList<string>` DTO properties directly, so the YAML-facing DTO uses mutable `List<string>` properties and merges into the immutable Core `ReviewConfig` shape.
-- Risk register unchanged; no new risks opened by the repo config chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests, 20 green LLM tests, and 25 green GitHub tests. The Api/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
+Deliverable: Python repos accurately grounded.
 
 ---
 
-## Phase 5: HTTP and worker
+### Step 27: Prompt builder grounding injection
 
-### Step 15: Webhook signature validator - Completed 2026-05-23
+Extend `PromptBuilder.Build`:
 
-```text
-In ReviewBot.Api/Webhooks/, create `WebhookSignatureValidator`.
-
-Public method:
-  bool IsValid(string secret, ReadOnlySpan<byte> body, string? signatureHeader);
-
-Behavior:
-- signatureHeader format: "sha256=HEX"
-- Compute HMAC-SHA256 of body with secret as key
-- Compare in constant time (CryptographicOperations.FixedTimeEquals) against the hex from the header
-- Return false on null/empty header, wrong prefix, wrong length, or mismatch
-
-Tests in ReviewBot.Api.Tests/Webhooks/WebhookSignatureValidatorTests.cs:
-- Known body + known secret produces known HMAC (precompute and assert)
-- Wrong secret returns false
-- Missing/null header returns false
-- Wrong prefix ("sha1=...") returns false
-- Tampered body returns false
-
-Deliverable: small, exhaustively tested function. The API endpoint will call it on every webhook request.
+```csharp
+public static PromptPayload Build(ReviewRequest request, GroundingContext? grounding = null)
 ```
 
-Completion notes:
-- Added `ReviewBot.Api/Webhooks/WebhookSignatureValidator` as a pure static validator for GitHub's `X-Hub-Signature-256` value. It requires the `sha256=` prefix, validates the exact SHA-256 hex length, decodes hex without throwing on malformed input, computes the HMAC-SHA256 over the raw body with the configured secret, and compares with `CryptographicOperations.FixedTimeEquals`.
-- Added `ReviewBot.Api.Tests/Webhooks/WebhookSignatureValidatorTests` covering the planned known-HMAC success case, wrong secret, missing headers, wrong prefix, tampered body, wrong signature length, and non-hex signatures. API tests now contain 9 green tests.
-- Fixed the API project area before adding code: removed duplicate `TargetFramework`, `Nullable`, and `ImplicitUsings` properties from `ReviewBot.Api.csproj` and `ReviewBot.Api.Tests.csproj` because those are already inherited from root `Directory.Build.props`.
-- Corrected assumption: this target framework/project surface did not expose `Convert.TryFromHexString`, so the validator uses a small local hex decoder to keep invalid signatures on the normal `false` path.
-- Risk register unchanged; no new risks opened by the signature-validator chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests, 20 green LLM tests, 25 green GitHub tests, and 9 green API tests. The Persistence test assembly still contains no tests and VSTest reports that as informational while returning success.
+If `grounding?.Language` is non-null, inject a `## Project context (verified)` section into the system prompt, placed before the response schema section:
 
-### Step 16: Webhook endpoint and event filter - Completed 2026-05-23
-
-```text
-In ReviewBot.Api, add a minimal-API endpoint `POST /webhook` in Webhooks/WebhookEndpoint.cs.
-
-Behavior:
-- Read the raw body as bytes (do NOT bind to a model first; we need bytes for signature verification)
-- Read headers: X-Hub-Signature-256, X-GitHub-Event, X-GitHub-Delivery
-- If signature invalid: return 401, log Warning with delivery id
-- If event is not "pull_request": return 204 ("not interested")
-- Parse the JSON body as a `PullRequestEvent` record with at least: string action, long installation_id (from installation.id), repository (owner.login, name), pull_request (number, html_url, head.sha, user.login, requested_reviewers[]), sender, action
-- Filter logic:
-    - If action == "review_requested" AND requested_reviewer.login == botSlug (from options), accept
-    - Else if action == "synchronize" AND config-on-push enabled (we cannot know per-repo config yet at this stage; for now accept and let the worker decide whether to actually review), accept
-    - Else return 204
-- For accepted events: create a ReviewJob and enqueue (we will define the queue in Step 17; for this step, depend on `IReviewJobQueue` and inject a stub if needed)
-- Return 202 Accepted
-
-Add a `WebhookOptions` record bound from configuration (Secret, BotSlug).
-
-Tests in ReviewBot.Api.Tests/Webhooks/WebhookEndpointTests.cs using WebApplicationFactory:
-- Bad signature returns 401
-- Wrong event type returns 204
-- review_requested for our bot returns 202 and enqueues a job (assert on captured stub queue)
-- review_requested for someone else returns 204
-- Use a test queue substitute registered in the factory's `ConfigureServices`
-
-Deliverable: a fast, well-tested HTTP boundary that does not block, hands work to a queue, and is paranoid about authenticity.
+```
+## Project context (verified from repository)
+- Language: C# (.NET 10.0)
+- Toolchain: .NET SDK 10.0.x
+- LangVersion: latest — modern C# syntax (collection expressions, primary constructors, etc.) is valid
+- TreatWarningsAsErrors: true
+- Build: not verified (syntax claims cannot be confirmed)
 ```
 
-Completion notes:
-- Added `ReviewBot.Api/Webhooks/WebhookEndpoint`, `WebhookOptions`, and minimal pull-request event DTOs. The endpoint reads raw request bytes for HMAC verification, rejects invalid signatures with 401, ignores non-`pull_request` events with 204, parses the GitHub pull request payload, accepts `review_requested` only for the configured bot slug, accepts `synchronize` for later repo-config gating in the worker, and enqueues a `ReviewJob` with the GitHub delivery id.
-- Wired the endpoint in `Program.cs`, registered `WebhookOptions`, registered the real `ChannelReviewJobQueue` for production, and removed the generated weather-forecast sample endpoint from the API startup path before adding the webhook surface.
-- Added webhook option placeholders to `appsettings.json` and local development examples to `appsettings.Development.json`.
-- Added `ReviewBot.Api.Tests/Webhooks/WebhookEndpointTests` using `WebApplicationFactory` and a captured test queue to cover bad signatures, ignored event types, bot-targeted review requests, review requests for someone else, and `synchronize` handoff.
-- Corrected assumption: `WebhookOptions` must use mutable `set` properties so ASP.NET Core options binding and test-time `Configure<WebhookOptions>` overrides can populate it.
-- Risk register unchanged; no new risks opened by the webhook endpoint chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 green Core tests, 25 green GitHub tests, 20 green LLM tests, and 14 green API tests. The Persistence test assembly still contains no tests and VSTest reports that as informational while returning success.
-
-### Step 17: Job model and channel queue - Completed 2026-05-23
-
-```text
-In ReviewBot.Core/Jobs/, define:
-
-  public sealed record ReviewJob(
-      string DeliveryId,
-      long InstallationId,
-      string Owner,
-      string Repo,
-      int PrNumber,
-      string HeadSha,
-      string Reason);  // "review_requested" | "synchronize"
-
-  public interface IReviewJobQueue
-  {
-      ValueTask EnqueueAsync(ReviewJob job, CancellationToken ct);
-      IAsyncEnumerable<ReviewJob> DequeueAllAsync(CancellationToken ct);
-  }
-
-In ReviewBot.Core/Jobs/, implement `ChannelReviewJobQueue : IReviewJobQueue` backed by `Channel.CreateBounded<ReviewJob>(new BoundedChannelOptions(capacity: 1000) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true })`.
-
-DI extension: AddChannelReviewJobQueue(IServiceCollection).
-
-Tests in ReviewBot.Core.Tests/Jobs/ChannelReviewJobQueueTests.cs:
-- Enqueued items come out in FIFO order
-- DequeueAllAsync respects cancellation
-- Enqueue blocks (with timeout in test) when capacity reached
-- Multiple readers not supported (document the assumption; the worker is single)
-
-Now go back to the Step 16 endpoint and wire the real ChannelReviewJobQueue for production while keeping the test substitute path. Make sure the endpoint enqueues with the DeliveryId set from X-GitHub-Delivery.
-
-Deliverable: the HTTP boundary truly hands off; nothing blocks the request thread.
+If `BuildResult` is also present (Tier 2):
+```
+- Build: SUCCESS (0 warnings, 0 errors) — all syntax in changed files is confirmed valid
+```
+or:
+```
+- Build: FAILED (3 errors) — see build output below
 ```
 
-Completion notes:
-- Added `ReviewBot.Core/Jobs/ReviewJob`, `IReviewJobQueue`, `ChannelReviewJobQueue`, and `AddChannelReviewJobQueue`. The queue uses a bounded channel with production capacity 1000, wait-on-full backpressure, multiple writers, and a single active reader.
-- Added `ReviewBot.Core.Tests/Jobs/ChannelReviewJobQueueTests` covering FIFO ordering, cancellation from `DequeueAllAsync`, enqueue backpressure when capacity is reached, explicit rejection of a second active reader, and DI registration.
-- Fixed the Core project area before adding code: removed duplicate `TargetFramework`, `Nullable`, and `ImplicitUsings` properties from `ReviewBot.Core.csproj` and `ReviewBot.Core.Tests.csproj` because those are already inherited from root `Directory.Build.props`.
-- Corrected assumption: `SingleReader = true` is a channel optimization hint, not an enforcement mechanism, so `ChannelReviewJobQueue` now rejects a second active reader explicitly. The queue also has an optional capacity constructor so the blocking behavior can be tested without filling 1000 items.
-- Corrected assumption: Step 17's "go back to Step 16 endpoint" wiring could not be completed during Step 17 because the endpoint did not exist yet. That deferred production queue registration and endpoint handoff were completed in Step 16.
-- Risk register unchanged; no new risks opened by the queue chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 green Core tests, 25 green GitHub tests, 20 green LLM tests, and 9 green API tests. The Persistence test assembly still contains no tests and VSTest reports that as informational while returning success.
+The section is explicit that facts come from project configuration, not from the model's training data.
 
-### Step 18: Review worker - Completed 2026-05-23
+**Tests:**
+- No grounding → prompt identical to current behavior (no regression)
+- .NET 10 grounding → system prompt contains version section with correct facts
+- Python 3.12 grounding → system prompt contains Python version
+- Grounding with build success → states syntax confirmed; with build failure → states failure
 
-```text
-In ReviewBot.Api/Workers/ (or in ReviewBot.Core if we want it reusable), create `ReviewWorker : BackgroundService`.
-
-Dependencies:
-- IReviewJobQueue
-- IInstallationTokenProvider
-- PullRequestFetcher
-- RepoConfigFetcher
-- ReviewLlmFactory (IReviewLlmFactory)
-- ReviewPoster
-- ILogger<ReviewWorker>
-
-ExecuteAsync loop:
-- await foreach (var job in queue.DequeueAllAsync(stoppingToken))
-    - Process each job inside a try/catch that logs but does not crash the loop
-    - Use a structured logging scope with DeliveryId, Owner, Repo, PrNumber
-
-Per-job pipeline:
-1. Acquire installation token
-2. Fetch repo config at job.HeadSha
-3. If config.Enabled == false, log and skip
-4. If job.Reason == "synchronize" and config.Review.Trigger.OnPush == false, log and skip
-5. Fetch PR snapshot (title, body, files)
-6. Apply config.Ignore globs to file list (use Microsoft.Extensions.FileSystemGlobbing.Matcher)
-7. Cap at config.Review.MaxFiles; if exceeded, keep the first N by path order and log Warning
-8. Build ReviewRequest
-9. Get IReviewLlm via factory.Create(config.Model)
-10. Call llm.ReviewAsync
-11. If config.Review.InlineComments == false, drop comments before posting
-12. If config.Review.Summary == false, blank the summary
-13. Post via ReviewPoster
-
-Tests in ReviewBot.Api.Tests/Workers/ReviewWorkerTests.cs:
-- Wire the worker with substitutes for every dependency
-- Pump one job through, assert each downstream substitute received the expected inputs
-- Config Enabled=false short-circuits
-- synchronize + OnPush=false short-circuits
-- Ignore globs drop matching files
-- MaxFiles trims the file list
-- Exception in any step is logged and does not stop the worker (subsequent job still processed)
-- Use a small in-process ChannelReviewJobQueue for the test rather than a substitute
-
-Deliverable: end-to-end orchestration with full test coverage of branch logic.
-```
-
-Completion notes:
-- Added `ReviewBot.Api/Workers/ReviewWorker` as a `BackgroundService` that drains `IReviewJobQueue`, scopes logs by delivery/repo/PR/install, catches per-job failures without crashing the loop, and orchestrates installation-token acquisition, repo config fetch, PR fetch, ignore filtering, configured file capping, LLM review, output gating, and review posting.
-- Added small testable GitHub collaborator interfaces: `IPullRequestFetcher`, `IRepoConfigFetcher`, and `IReviewPoster`. Existing concrete implementations now implement those interfaces, keeping production behavior intact while allowing worker tests to substitute every external collaborator.
-- Fixed the PR-fetcher area before adding the worker: `PullRequestFetcher` previously capped files at `ReviewConfig.Default.Review.MaxFiles` before the worker could apply repo config. It now has a per-call `maxFiles` overload, and the worker uses `config.Review.MaxFiles` when fetching.
-- Added `ReviewBot.Api.Tests/Workers/ReviewWorkerTests` covering the full happy path, disabled-config short-circuit, `synchronize` with `on_push=false` short-circuit, ignore glob filtering, max-file trimming by path, inline/summary output gating, and per-job exception resilience with a subsequent job still processed.
-- Added a focused `PullRequestFetcher` test for the per-call max-file override.
-- Corrected assumption: the configured `max_files` limit must influence PR file retrieval itself, not only post-fetch trimming; otherwise repositories that set a lower or higher limit would not get the intended behavior.
-- Risk register unchanged; no new risks opened by the worker chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 green Core tests, 20 green LLM tests, 26 green GitHub tests, and 21 green API tests. The Persistence test assembly still contains no tests and VSTest reports that as informational while returning success.
+Deliverable: the model cannot claim .NET 10 is "on the roadmap" when it's told otherwise.
 
 ---
 
-## Phase 6: Reliability
+### Step 28: Worker integration and wiring
 
-### Step 19: EF Core persistence and idempotency store - Completed 2026-05-23
+**Worker:**
+- Inject `IGroundingProvider?` (null if not registered)
+- After fetching PR snapshot and applying file filters, call `GetContextAsync` if provider is non-null
+- Pass `GroundingContext?` through to `PromptBuilder.Build`
+- Log at Debug: detected language and version; at Warning: grounding failed
 
-```text
-GitHub retries failed webhook deliveries, sometimes after we have already processed them. Add idempotency on top of EF Core, behind an interface so we can swap to Postgres later by changing one provider.
+**`Program.cs`:**
+- Call `AddGrounding(services).AddLanguageDetector<DotNetLanguageDetector>().AddLanguageDetector<PythonLanguageDetector>()`
+- `AddGrounding` is conditional on `GroundingConfig.Enabled` being bindable from options; default on
 
-In ReviewBot.Core/Idempotency/, define the interface (interface only, no EF Core dependency in Core):
+**`ReviewBot.Grounding.csproj`** added to the solution and wired:
+- `ReviewBot.Api` references `ReviewBot.Grounding`
+- `ReviewBot.Grounding` references `ReviewBot.Core` and `ReviewBot.GitHub` (for `IGitHubClientFactory`)
 
-  public interface IDeliveryStore
-  {
-      // Returns true if newly recorded, false if the id already existed.
-      Task<bool> TryRecordAsync(string deliveryId, CancellationToken ct);
-      Task CleanupAsync(DateTimeOffset olderThan, CancellationToken ct);
-  }
+**Tests:**
+- Worker: grounding provider called with correct owner/repo/sha
+- Worker: grounding failure (provider returns empty context) does not fail the job
+- Worker: grounding disabled in repo config → provider called but returns empty context immediately
+- Smoke test in `ReviewBot.Api.Tests`: `/healthz` still returns 200 with grounding wired in
 
-In ReviewBot.Persistence/, build the EF Core implementation.
+Deliverable: end-to-end Tier 1 grounding live. Model grounded in real language version from the actual project config, zero latency overhead beyond one extra GitHub Contents API call per review.
 
-A. Entity in ReviewBot.Persistence/Entities/DeliveryRecord.cs:
-  public sealed class DeliveryRecord
-  {
-      public string DeliveryId { get; set; } = "";
-      public DateTimeOffset ProcessedAt { get; set; }
-  }
+---
 
-B. DbContext in ReviewBot.Persistence/ReviewBotDbContext.cs:
-  public sealed class ReviewBotDbContext(DbContextOptions<ReviewBotDbContext> options) : DbContext(options)
-  {
-      public DbSet<DeliveryRecord> Deliveries => Set<DeliveryRecord>();
+## Phase 9: Language grounding — Tier 2 (workspace + build)
 
-      protected override void OnModelCreating(ModelBuilder b)
-      {
-          b.Entity<DeliveryRecord>(e =>
-          {
-              e.HasKey(x => x.DeliveryId);
-              e.Property(x => x.DeliveryId).HasMaxLength(64);
-              e.Property(x => x.ProcessedAt).IsRequired();
-              e.HasIndex(x => x.ProcessedAt);  // used by cleanup
-          });
-      }
-  }
+This phase adds the workspace subsystem that clones the PR branch and runs build/type-check commands. All Tier 1 abstractions extend cleanly with no breaking changes.
 
-C. Store implementation in ReviewBot.Persistence/EfCoreDeliveryStore.cs:
-  public sealed class EfCoreDeliveryStore(
-      IDbContextFactory<ReviewBotDbContext> factory,
-      TimeProvider clock,
-      ILogger<EfCoreDeliveryStore> logger) : IDeliveryStore
-  {
-      public async Task<bool> TryRecordAsync(string deliveryId, CancellationToken ct)
-      {
-          await using var db = await factory.CreateDbContextAsync(ct);
-          // Atomic upsert-or-ignore. The semantics need to be portable to Postgres later
-          // (Postgres equivalent: ON CONFLICT DO NOTHING). Keep the provider-specific SQL
-          // tightly scoped here; the rest of the code touches only IDeliveryStore.
-          var sql = db.Database.IsSqlite()
-              ? "INSERT OR IGNORE INTO \"Deliveries\" (\"DeliveryId\", \"ProcessedAt\") VALUES ({0}, {1})"
-              : throw new NotSupportedException("Only SQLite is wired in v1. Add the Postgres branch when the provider changes.");
+### Step 29: Workspace abstraction and git clone implementation
 
-          var rows = await db.Database.ExecuteSqlRawAsync(sql, new object[] { deliveryId, clock.GetUtcNow() }, ct);
-          return rows == 1;
-      }
+Define in `ReviewBot.Grounding/Workspace/`:
 
-      public async Task CleanupAsync(DateTimeOffset olderThan, CancellationToken ct)
-      {
-          await using var db = await factory.CreateDbContextAsync(ct);
-          await db.Deliveries.Where(d => d.ProcessedAt < olderThan).ExecuteDeleteAsync(ct);
-      }
-  }
+```csharp
+public interface IWorkspace : IAsyncDisposable
+{
+    string LocalPath { get; }
+}
 
-D. DI extension in ReviewBot.Persistence/DependencyInjection.cs:
-  public static class DependencyInjection
-  {
-      public static IServiceCollection AddReviewBotPersistence(
-          this IServiceCollection services,
-          Action<DbContextOptionsBuilder> configure)
-      {
-          services.AddDbContextFactory<ReviewBotDbContext>(configure);
-          services.AddSingleton<IDeliveryStore, EfCoreDeliveryStore>();
-          return services;
-      }
-  }
+public interface IWorkspaceFactory
+{
+    Task<IWorkspace> CreateAsync(WorkspaceRequest request, CancellationToken ct);
+}
 
-E. Migrations:
-- From the repo root run:
-    dotnet ef migrations add InitialCreate \
-      --project src/ReviewBot.Persistence \
-      --startup-project src/ReviewBot.Api \
-      --output-dir Migrations
-- The Migrations/ folder gets checked in. The Api project's reference to Microsoft.EntityFrameworkCore.Design (added in Step 1) is what makes the tool work.
-- Step 20 will run pending migrations at startup; do not do it here.
-
-F. Cleanup background service in ReviewBot.Persistence/DeliveryStoreCleanupService.cs:
-  public sealed class DeliveryStoreCleanupService(
-      IDeliveryStore store,
-      TimeProvider clock,
-      ILogger<DeliveryStoreCleanupService> logger) : BackgroundService
-  {
-      protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-      {
-          using var timer = new PeriodicTimer(TimeSpan.FromHours(1), clock);
-          while (await timer.WaitForNextTickAsync(stoppingToken))
-          {
-              try
-              {
-                  await store.CleanupAsync(clock.GetUtcNow().AddDays(-30), stoppingToken);
-              }
-              catch (Exception ex) when (ex is not OperationCanceledException)
-              {
-                  logger.LogError(ex, "Delivery cleanup failed; will retry next interval");
-              }
-          }
-      }
-  }
-Register this as a hosted service in Step 20.
-
-G. In the webhook endpoint (Step 16), call TryRecordAsync BEFORE enqueueing. If it returns false, return 200 with a "duplicate delivery" log entry and skip the enqueue. Inject IDeliveryStore into the endpoint (or the handler class behind it).
-
-Tests in ReviewBot.Persistence.Tests/EfCoreDeliveryStoreTests.cs:
-- Test fixture pattern:
-    var conn = new SqliteConnection("DataSource=:memory:");
-    await conn.OpenAsync();  // keep open for the lifetime of the test so the in-memory db persists
-    var options = new DbContextOptionsBuilder<ReviewBotDbContext>().UseSqlite(conn).Options;
-    // Build an IDbContextFactory wrapper that returns new contexts over the same options.
-    // Run dbContext.Database.EnsureCreatedAsync() once before the test body.
-- First call with a new id returns true; row count in Deliveries is 1
-- Second call with the same id returns false; row count still 1
-- Concurrent calls with the same id (Parallel.ForEachAsync, 50 tasks): exactly one returns true
-- CleanupAsync removes rows older than the cutoff, keeps newer ones
-- Use a FakeTimeProvider (Microsoft.Extensions.TimeProvider.Testing) so ProcessedAt is deterministic
-
-Tests in ReviewBot.Persistence.Tests/DeliveryStoreCleanupServiceTests.cs:
-- Substitute IDeliveryStore, FakeTimeProvider
-- Start the service, advance time by 1 hour, assert CleanupAsync was called with cutoff = now - 30 days
-- Throw from CleanupAsync once, advance another hour, assert it was called again (loop survives exceptions)
-
-Update Step 16 endpoint tests:
-- Substitute IDeliveryStore: when TryRecordAsync returns false, endpoint returns 200 and the job queue substitute is never called.
-
-Deliverable: at-least-once delivery from GitHub becomes effectively-once processing. The only provider-specific code is one branch in TryRecordAsync; Postgres support is a one-line provider swap plus one extra `if` in that method.
+public sealed record WorkspaceRequest(
+    string CloneUrl, string Sha, string InstallationToken);
 ```
 
-Completion notes:
-- Added `ReviewBot.Core/Idempotency/IDeliveryStore` as the Core-only idempotency contract, keeping EF Core out of Core.
-- Added `ReviewBot.Persistence` EF Core implementation: `DeliveryRecord`, `ReviewBotDbContext`, `EfCoreDeliveryStore`, `AddReviewBotPersistence`, `DeliveryStoreCleanupService`, and an initial SQLite migration for the `Deliveries` table and `ProcessedAt` cleanup index.
-- Added webhook idempotency to `/webhook`: accepted pull-request events call `TryRecordAsync` before enqueueing, duplicate deliveries return `200 OK`, and the queue is not called again.
-- Added persistence tests covering first insert, duplicate insert, 50-way concurrent duplicate insert, cleanup cutoff behavior, checked-in migration application, and cleanup-service hourly retry resilience. Added API endpoint coverage for duplicate deliveries.
-- Fixed the Persistence project area before adding code: removed duplicate `TargetFramework`, `Nullable`, and `ImplicitUsings` properties from the Persistence src/test projects so they inherit root build settings consistently.
-- Corrected assumption: Step 19's migration command depends on Step 20's composition-root DbContext registration. The migration is checked in and verified by a migration-application test here; startup migration/host registration remains part of Step 20.
-- Corrected assumption: SQLite with EF Core 10 cannot translate the planned `DateTimeOffset` cleanup predicate through `ExecuteDeleteAsync`. Cleanup now uses provider-specific raw SQLite `DELETE` SQL, kept inside `EfCoreDeliveryStore` next to the `INSERT OR IGNORE` provider branch.
-- Corrected assumption: `Microsoft.Extensions.TimeProvider.Testing` was not available at `10.0.8`; the Persistence test project pins the resolved `10.1.0` package for `FakeTimeProvider`.
-- Risk register unchanged; no new risks opened by the idempotency-store chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 green Core tests, 20 green LLM tests, 26 green GitHub tests, 22 green API tests, and 7 green Persistence tests.
+Implement `GitWorkspace`: shallow-clones the PR head SHA into a temp directory using `git clone --depth 1 --branch {sha}` (or equivalent). Cleanup deletes the directory on `DisposeAsync`.
 
-### Step 20: Composition root, options validation, health checks, smoke test - Completed 2026-05-23
-
-```text
-In ReviewBot.Api/Program.cs, wire everything together. Use minimal hosting.
-
-Configuration sources (in priority order):
-- appsettings.json
-- appsettings.{Environment}.json
-- Environment variables (prefix REVIEWBOT__, double underscore for nesting)
-- User secrets in Development
-
-Bind options with validation:
-- GitHubAppOptions: AppId > 0, PrivateKeyPem non-empty, BotSlug non-empty
-- WebhookOptions: Secret non-empty
-- AnthropicLlmOptions: ApiKey may be empty if not used; if used (default provider), must be non-empty (validate lazily in the factory)
-- OpenAiLlmOptions: same lazy validation
-- PersistenceOptions: ConnectionString non-empty (default `Data Source=reviewbot.db`)
-- Use IValidateOptions<T> implementations for fail-fast on startup where the field is required at startup, lazy validation where the field is only required if the provider is used
-
-Register:
-- AddReviewLlmFactory + AddAnthropicReviewLlm + AddOpenAiReviewLlm
-- AddSingleton<TimeProvider>(TimeProvider.System)
-- AddSingleton<GitHubAppJwtSigner>
-- AddHttpClient<InstallationTokenClient>
-- AddSingleton<IInstallationTokenProvider, CachingInstallationTokenProvider>
-- AddSingleton<IGitHubClientFactory, GitHubClientFactory>
-- AddSingleton<PullRequestFetcher, ReviewPoster, RepoConfigFetcher>
-- AddReviewBotPersistence(opts => opts.UseSqlite(persistenceOptions.ConnectionString))
-- AddSingleton<IReviewJobQueue, ChannelReviewJobQueue>
-- AddHostedService<ReviewWorker>
-- AddHostedService<DeliveryStoreCleanupService>
-- AddHealthChecks()
-    .AddCheck("self", () => HealthCheckResult.Healthy())
-    .AddDbContextCheck<ReviewBotDbContext>("db")
-
-Startup migration step (BEFORE app.Run()):
-  await using (var scope = app.Services.CreateAsyncScope())
-  {
-      var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ReviewBotDbContext>>();
-      await using var db = await factory.CreateDbContextAsync();
-      await db.Database.MigrateAsync();
-  }
-This guarantees the schema exists before the first webhook arrives. Do not use EnsureCreated; we want migration history.
-
-Endpoints:
-- POST /webhook (Step 16)
-- GET /healthz returns 200 if all health checks pass, 503 otherwise
-- GET / returns a simple "ReviewBot v{version}" string so platform health probes work without auth concerns
-
-appsettings.json with placeholder values for every option (including PersistenceOptions.ConnectionString).
-appsettings.Development.json with example values pointing at local stubs.
+Security note: the workspace executes arbitrary project code during build. This is opt-in (`grounding.build: true`). For multi-tenant deployments, run the worker in a container with resource limits; document this in `docs/configuration.md`.
 
 Tests:
-- A startup-smoke test in ReviewBot.Api.Tests that uses WebApplicationFactory to spin up the host with test-only options, substitute LLM (StubReviewLlm), and an in-memory SQLite connection injected so migrations run against it. Assert /healthz returns 200.
-- An end-to-end test that:
-    1. Posts a signed webhook payload for review_requested
-    2. Asserts 202
-    3. Waits (with timeout, using a TaskCompletionSource set by the substitute ReviewPoster) until the worker calls ReviewPoster.PostAsync
-    4. Asserts the posted review contains the stub LLM's summary
-- The WebApplicationFactory override should replace UseSqlite with an open `SqliteConnection("DataSource=:memory:")` that the factory keeps alive for the lifetime of the test so migrations and queries see the same database.
+- Factory creates directory, LocalPath exists
+- Dispose removes the directory
+- Clone failure throws with useful message
 
-Deliverable: the whole thing boots, migrations apply, the whole pipeline runs in-process under test, and `dotnet run` from ReviewBot.Api is sufficient to start the service locally.
-```
+### Step 30: .NET build runner
 
-Completion notes:
-- Wired the API composition root end to end: typed option binding and startup validation, GitHub App signer/token provider/cache, Octokit collaborators, LLM provider factory and both provider registrations, SQLite persistence, real channel queue, review worker, delivery cleanup service, startup EF Core migration, `/webhook`, `/healthz`, and a simple root version endpoint.
-- Added `PersistenceOptions`, option validators for GitHub App, webhook, and persistence settings, complete appsettings placeholders/examples, and the EF Core health-check package.
-- Added API composition smoke tests covering `/healthz` after migrations and a signed webhook flowing through idempotency, the real queue, the hosted worker, a stub LLM, and a substitute poster.
-- Fixed the LLM provider area before composition: Anthropic/OpenAI SDK clients now initialize lazily so the host can start with placeholder or unused provider API keys, while missing credentials still fail when that provider is actually used.
-- Fixed the webhook test queue to tolerate the now-real hosted worker reading from `IReviewJobQueue` during endpoint tests.
-- Corrected assumption: `BotSlug` remains a webhook-bound setting because event filtering uses it at the HTTP boundary; `GitHubAppOptions` only carries the app id and private key needed for app JWT signing.
-- Risk register updated to close the Step 19 deferred startup registration/migration risk; no new risks opened by the composition chunk.
-- Stop test passed: `dotnet test ReviewBot.sln -c Release` completed successfully with 35 green Core tests, 20 green LLM tests, 26 green GitHub tests, 7 green Persistence tests, and 24 green API tests.
+**`DotNetBuildRunner : IBuildRunner`** in `ReviewBot.Grounding/Languages/DotNet/`:
+- Runs `dotnet restore --no-dependencies` then `dotnet build --no-restore -c Release --no-incremental`
+- Captures stdout/stderr; respects timeout from `GroundingConfig.BuildTimeoutSeconds`
+- Returns `BuildResult(Success: exitCode == 0, Warnings: count, Errors: count, Output: truncated)`
+- Parses warning/error counts from MSBuild output (`Build succeeded. N Warning(s). N Error(s).`)
 
-### Step 21: Hardening, big PRs, retries
+Tests: use a real tiny .csproj fixture written to a temp directory; assert success/failure detection and count parsing.
 
-```text
-This step adds the production knobs that the v1 design called out as gotchas. No new architectural surface, just hardening.
+### Step 31: Python build runner
 
-Tasks:
+**`PythonBuildRunner : IBuildRunner`** in `ReviewBot.Grounding/Languages/Python/`:
+- Prefers `mypy . --no-error-summary --no-color-output` if `[tool.mypy]` config detected
+- Falls back to `python -m py_compile` on changed files (filenames passed via the `GroundingRequest`)
+- Respects timeout; returns `BuildResult`
 
-A. Big PR truncation strategy in the worker: Completed 2026-05-23
-- Before calling the LLM, total the patch lines across all files
-- If total > config.Review.MaxPatchLines * 5 (heuristic ceiling), prioritize files by smallest-patch-first, accumulate until you hit the budget, drop the rest
-- Add a "files_skipped" note to the summary if any were dropped (modify worker to pass the skipped list to a small helper that appends to the LLM-returned summary)
+Tests: fixture Python files with known errors; assert error detection.
 
-B. Retries on transient errors: Completed 2026-05-23
-- Add Microsoft.Extensions.Http.Resilience to the InstallationTokenClient and any direct HttpClient usage
-- 3 retries with exponential backoff on 5xx and HttpRequestException
-- Octokit calls: wrap in a small helper that retries on RateLimitExceededException with the suggested wait
-- LLM calls: 2 retries on transient HTTP errors (the SDK's own retry policy where configurable, otherwise a custom retry around the await)
-- Tests: assert the retry count using a counting handler
+### Step 32: Workspace integration in grounding provider
 
-C. Structured logging: Completed 2026-05-23 (partial — see notes)
-- LogContext properties on every job: delivery_id, owner, repo, pr_number, installation_id
-- LLM call duration logged at Info
-- LLM tokens (input/output) logged when available
+Extend `CompositeGroundingProvider`:
+- If `config.Grounding.Build == true` and a matching `IBuildRunner` is registered for the detected language: acquire workspace, run build, populate `BuildResult` in `GroundingContext`
+- Same for Tests with `IBuildRunner` implementing a test variant (or separate `ITestRunner` interface)
+- Workspace always disposed after the runner completes regardless of outcome
+- Timeout honored; timeout treated as build failure (not a review failure)
 
-D. Metrics with System.Diagnostics.Metrics: Completed 2026-05-23
-- Counter: reviewbot.jobs.processed (status: success|failure|skipped)
-- Histogram: reviewbot.llm.duration_ms (provider: anthropic|openai)
-- Histogram: reviewbot.review.comments_posted
-
-E. Worker concurrency: Completed 2026-05-23
-- Add a worker-concurrency option (default 1). If > 1, fan out N concurrent processing tasks reading from the queue. Document the assumption that the installation token provider is concurrency-safe (it is, because of the per-key semaphore).
-
-Tests for each of A-E in their respective test projects; for E, a test that pushes 5 jobs and asserts they are processed in parallel (use a barrier in the substitute LLM to prove overlap).
-
-Deliverable: the bot behaves under real load. Big PRs degrade gracefully, transient failures recover, and operators can see what is happening.
-```
-
-Completion notes for Step 21A:
-- Added worker-side big-PR patch budgeting in `ReviewWorker`: after ignore/max-file filtering, the worker totals patch lines and, when the total exceeds `review.max_patch_lines * 5`, keeps the smallest patches first and skips the rest before building the `ReviewRequest`.
-- Added a `files_skipped:` summary note when files are omitted by the patch budget, so posted reviews disclose incomplete coverage. The note is appended before normal output gating, so repositories with `review.summary: false` still suppress summaries as configured.
-- Added focused API worker tests for over-budget prioritization/skipping and the exact heuristic ceiling case.
-- Fixed a pre-existing config bug found while reading this area: repo YAML could set non-positive `review.max_files` or `review.max_patch_lines`, which could make PR fetching fail or the new patch budget nonsensical. `RepoConfigFetcher` now logs a warning and falls back to defaults for those invalid numeric limits, with test coverage.
-- Corrected assumption: Step 21A depends on repo-config numeric limits being positive; that was not previously enforced for per-repo YAML.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release --no-restore && dotnet test ReviewBot.sln -c Release --no-build` completed with zero warnings and all tests green: 35 Core, 20 LLM, 27 GitHub, 7 Persistence, and 26 API tests.
-
-Completion notes for Step 21B:
-- Added a shared API HTTP resilience extension using `Microsoft.Extensions.Http.Resilience` and wired it onto the typed `InstallationTokenClient` registration. The policy retries transient HTTP failures three times with exponential backoff; API tests verify a 500/500/500/201 token flow makes exactly four attempts and succeeds.
-- Added `OctokitRateLimitRetry` and wrapped the GitHub PR metadata fetch, changed-file pagination, repo config contents fetch, and review-post call. The helper retries once on Octokit's `RateLimitExceededException` using Octokit's suggested wait, honors cancellation, and logs the retry delay.
-- Added provider-side transport retries for Anthropic and OpenAI-compatible review calls. Each LLM call now retries `HttpRequestException` twice before surfacing the failure; the existing malformed-JSON retry remains separate and unchanged.
-- Added focused tests for Anthropic/OpenAI two-retry behavior and Octokit rate-limit retry behavior.
-- Fixed a project cleanup issue found before the retry code: the Anthropic and OpenAI projects still duplicated root `TargetFramework`, `ImplicitUsings`, and `Nullable` properties. Those provider projects now inherit the centralized root build settings like the rest of the solution.
-- Corrected assumption: Octokit's rate-limit wait is exposed through `RateLimitExceededException.GetRetryAfterTimeSpan()`, so the retry helper can use the SDK's own suggested delay rather than parsing headers itself.
-- Corrected assumption: the current LLM retry layer is intentionally transport-only. It retries `HttpRequestException` from provider adapters and leaves parser failures on the existing JSON-repair path.
-- Risk register unchanged; no new risks opened by the retry chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release --no-restore` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 Core tests, 22 LLM tests, 28 GitHub tests, 7 Persistence tests, and 27 API tests.
-
-Completion notes for Step 21C (partial — LLM duration logging):
-- The structured logging scope with `DeliveryId`, `Owner`, `Repo`, `PrNumber`, and `InstallationId` was already wired in the worker from Step 18.
-- LLM call duration is now logged at Information level alongside the Step 21D Stopwatch measurement (both added in the same pass).
-- LLM token logging was not added: the current `IReviewLlm.ReviewAsync` returns only `ReviewResult`, and token counts are not part of the contract. Adding them would require breaking the interface to return a richer response type. Deferred; if needed, token logging can be added inside the provider implementations (Anthropic/OpenAI) without changing the Core interface.
-- Corrected assumption: Step 21C's token logging requirement was stated as "when available", which correctly signals it is optional. Tokens are not available through the current seam.
-
-Completion notes for Step 21D (Metrics):
-- Added `ReviewBotMetrics` class to `ReviewBot.Api/Workers/`. It creates a `Meter("ReviewBot")` and three instruments: `reviewbot.jobs.processed` (Counter<long>, status tag), `reviewbot.llm.duration_ms` (Histogram<double>, provider tag), and `reviewbot.review.comments_posted` (Histogram<int>). The class implements `IDisposable` to release the meter.
-- Wired `ReviewBotMetrics` as a singleton in `Program.cs` and injected it into `ReviewWorker`.
-- Changed `ProcessAsync` from `Task` to `Task<JobProcessStatus>` (Success/Skipped enum) so the outer loop can record the correct `status` tag on `reviewbot.jobs.processed`. Exceptions leave the status as "failure" without an additional enum value.
-- The Stopwatch around `llm.ReviewAsync` records both the Information log (satisfying 21C) and the `reviewbot.llm.duration_ms` histogram. Provider tag comes from `config.Model.Provider`, which is already in scope at that point.
-- `reviewbot.review.comments_posted` is recorded after `ApplyOutputConfig` so the count reflects comments that will actually appear in the posted review.
-- Added four worker tests using `MeterListener` covering: success status, skipped status (config disabled), failure status (exception), and LLM duration/comments-posted histograms with correct provider tag and count.
-- Corrected assumption: `MeterListener` is process-global; the listener must be started before creating `ReviewBotMetrics` (before `WorkerFixture`) to ensure `InstrumentPublished` fires for the new meter's instruments. Tests that assert metrics create the listener first, then the fixture.
-- Risk register unchanged; no new risks opened by the metrics chunk.
-- Stop test passed: `dotnet build ReviewBot.sln -c Release --no-restore` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 Core tests, 22 LLM tests, 28 GitHub tests, 7 Persistence tests, and 31 API tests.
+Tests:
+- Build enabled: workspace created, runner called, result in context
+- Build disabled: workspace not created, runner not called
+- Build timeout: result has `Success=false`, review proceeds
 
 ---
-
-## Phase 7: Polish
-
-### Step 22: Documentation, sample config, App registration walkthrough - Completed 2026-05-23
-
-```text
-Create the following docs at the repo root:
-
-README.md:
-- One-paragraph overview
-- Quick start: prerequisites, env vars to set, `dotnet run`
-- Architecture diagram (ASCII or Mermaid) matching the high-level layout
-- How to assign the bot as a reviewer on a PR
-- How to configure per-repo via .github/review-bot.yml
-- How to swap LLM providers (Anthropic vs OpenAI-compatible) with concrete examples for Ollama, vLLM, OpenAI
-- Troubleshooting: signature failures, App permissions, 422 on review post
-
-docs/github-app-setup.md:
-- Step-by-step screenshots-free walkthrough of registering a GitHub App
-- Required permissions: Pull requests (read & write), Contents (read), Metadata (read)
-- Required event subscriptions: Pull request
-- Webhook URL and secret
-- Where to find App ID and how to generate a private key
-- How to install the App on a repo or org
-
-docs/configuration.md:
-- Every option, its env var name, its default
-- Per-repo YAML reference, full annotated example
-- How to run EF Core migrations locally (`dotnet ef database update --project src/ReviewBot.Persistence --startup-project src/ReviewBot.Api`)
-- How to swap SQLite for Postgres later: add Npgsql.EntityFrameworkCore.PostgreSQL, change `UseSqlite` to `UseNpgsql` in Program.cs, extend the provider branch in EfCoreDeliveryStore.TryRecordAsync with `INSERT ... ON CONFLICT DO NOTHING`, regenerate migrations against Postgres in a new migrations folder
-
-.github/review-bot.example.yml at the repo root for users to copy.
-
-CHANGELOG.md with a "0.1.0 - Initial release" entry summarizing what's in v1.
-
-LICENSE (your choice; default MIT).
-
-Update the CI workflow to also publish a Docker image on tags (multi-stage Dockerfile: build with sdk, run with aspnet runtime; expose port 8080).
-
-Verify the README's quick-start by following it on a clean machine (or a fresh container) and fixing any gaps.
-
-Deliverable: a stranger could install and run this without reading the code.
-```
-
-Completion notes:
-- Added `README.md` at the repo root with an overview, ASCII architecture diagram, quick-start env-var instructions, per-repo YAML example, LLM-provider swap examples (Anthropic, OpenAI, Ollama, vLLM), Docker run snippet, and a troubleshooting section covering the most common failure modes (signature mismatch, wrong bot slug, 422 line validation, unknown provider, high memory).
-- Added `docs/github-app-setup.md` with a numbered walkthrough: creating the App, setting repository permissions (Contents read, Pull requests read/write, Metadata read), subscribing to the Pull request event, noting the App ID, generating and exporting the private key PEM, installing on a repo or org, confirming the bot slug, and verifying webhook delivery in the GitHub App Advanced tab.
-- Added `docs/configuration.md` with a full option table for every section (GitHubApp, Webhook, Anthropic, OpenAi, Persistence, Worker), a complete annotated per-repo YAML reference, EF Core migration commands, and a step-by-step guide for swapping SQLite for PostgreSQL.
-- Added `.github/review-bot.example.yml` as a fully annotated copy-paste template for per-repo configuration.
-- Added `CHANGELOG.md` with a `0.1.0` entry summarising all v1 features.
-- Added `LICENSE` (MIT).
-- Updated `.github/workflows/ci.yml` to add a `docker` job that runs after the `build` job, triggers only on tags (`refs/tags/*`), and publishes a multi-arch image to GHCR using `docker/build-push-action` with semver tags and a SHA tag.
-- Corrected assumption: the Dockerfile already existed at `src/ReviewBot.Api/Dockerfile` from Step 1; Step 22 only needed the CI publish job, not a new Dockerfile.
-- Stop test: build is green (`dotnet build ReviewBot.sln -c Release` — zero warnings), all 124 tests pass. The CI Docker job is logic-only and requires a pushed tag and GITHUB_TOKEN to exercise in full.
-
----
-
-## Build order summary
-
-A linear path through the 22 steps:
-
-1. Solution scaffolding and CI
-2. Core domain records
-3. Unified diff parser
-4. Prompt builder
-5. LLM result parser
-6. IReviewLlm interface and stub
-7. Anthropic implementation
-8. OpenAI-compatible implementation
-9. LLM provider factory
-10. GitHub App JWT signer
-11. Installation token client and cache
-12. GitHub PR fetcher
-13. Review poster
-14. Repo config file fetcher and parser
-15. Webhook signature validator
-16. Webhook endpoint and event filter
-17. Job model and channel queue
-18. Review worker
-19. EF Core persistence and idempotency store
-20. Composition root, options, health checks, smoke test
-21. Hardening, big PRs, retries
-22. Documentation, sample config, App registration walkthrough
-
-After step 20 the service is functionally complete. Steps 21 and 22 make it production-grade.
-
-## Suggested test coverage targets
-
-- Phase 2 (pure functions): aim for 100% branch coverage. These are the building blocks everything else trusts.
-- Phase 3 (LLM): focus on the parser-retry boundary and provider selection. Mock at the lowest level you can.
-- Phase 4 (GitHub): cover the line-filter defense (Step 13) and pagination (Step 12) explicitly. Both are easy to get wrong.
-- Phase 5 (HTTP/worker): the WebApplicationFactory tests are the most valuable; they catch wiring bugs.
-- Phase 6: each hardening change ships with a test for the specific behavior it adds.
 
 ## Risk register
 
-- Closed 2026-05-22: The initial root-level API project did not match the planned `src/` layout. It has been moved and the solution/project references now target the planned structure.
-- Closed 2026-05-22: The local .NET 10 SDK generated an additional `ReviewBot.slnx`, which broke bare root `dotnet restore`/`dotnet build` by making the target ambiguous. The `.slnx` file was removed; CI and local commands now use the single `ReviewBot.sln`.
-- Open: The Dockerfile was path-corrected after the move, but it has not yet been exercised with an actual `docker build` in this phase. Validate it before relying on container output.
-- No new risks opened by Step 3; the unified diff parser is isolated to Core and covered by focused tests.
-- No new risks opened by Step 4; prompt construction is isolated to Core and covered by deterministic snapshot and behavior tests.
-- No new risks opened by Step 5; LLM result parsing is isolated to Core and covered by focused malformed-output and validation tests.
-- No new risks opened by Step 6; the LLM contract and stub are isolated to Core and covered by focused behavior tests.
-- Open: `Anthropic.SDK` 5.10.0 is an unofficial Anthropic client. Step 7 mitigates this by confining SDK usage to `AnthropicSdkClient`; revisit the adapter if an official Anthropic .NET SDK becomes available or if the package changes the Messages API surface.
-- Open: OpenAI-compatible providers such as Ollama, vLLM, and LM Studio may not all support OpenAI JSON mode exactly like api.openai.com. Step 8 mitigates this with the bindable `OpenAiLlmOptions.UseJsonMode` switch and keeps SDK-specific request construction isolated in `OpenAiSdkChatClient`.
-- No new risks opened by Step 9; provider selection is isolated behind Core-owned abstractions, unused providers are not resolved during selection, and per-call model override behavior is covered by factory and provider tests.
-- No new risks opened by Step 10; GitHub App JWT signing is dependency-free, isolated to `ReviewBot.GitHub.Auth`, and verified with generated RSA keypairs.
-- No new risks opened by Step 11; installation token acquisition is isolated to `ReviewBot.GitHub.Auth`, failures have a specific exception surface, and cache stampede behavior is covered by concurrent tests.
-- No new risks opened by Step 12; PR fetching is isolated to `ReviewBot.GitHub.Pulls`, uses the planned Octokit dependency, and has focused tests for pagination and the default max-file cap.
-- Closed 2026-05-23: Step 13's line-filter defense is implemented in `ReviewPoster` and covered by focused tests. Octokit's typed review model does not currently fit ReviewBot's `line`/`side` payload, so the raw authenticated Octokit connection is used in one isolated method.
-- No new risks opened by Step 14; repo config fetching/parsing is isolated to `ReviewBot.GitHub.Config`, malformed or absent config falls back to defaults, and provider validation is covered by focused tests.
-- No new risks opened by Step 15; webhook signature validation is isolated to `ReviewBot.Api.Webhooks` and covered by focused HMAC, malformed-header, and tamper tests.
-- No new risks opened by Step 16; the webhook endpoint now verifies raw-body signatures before parsing, filters events before queueing, and is covered by `WebApplicationFactory` tests around authenticity and queue handoff.
-- No new risks opened by Step 17; job handoff is isolated to `ReviewBot.Core.Jobs`, the bounded-channel backpressure and single-reader behavior are covered by focused tests, and production DI is ready for the Step 16 endpoint.
-- No new risks opened by Step 18; worker orchestration is isolated to `ReviewBot.Api.Workers`, uses interface seams for all GitHub/LLM collaborators, honors repo config before review execution, and has focused tests for branch logic and loop resilience.
-- Closed 2026-05-23: Step 19's deferred startup registration and migration task is complete. Step 20 registers persistence in the composition root, runs pending EF Core migrations before serving requests, and verifies boot plus `/healthz` through an in-memory SQLite smoke test.
-- No new risks opened by Step 20; composition is covered by host-level health and signed-webhook pipeline tests, and unused LLM providers can remain uncredentialed until selected by repo config.
-- Closed 2026-05-23: Repo YAML accepted non-positive `review.max_files` and `review.max_patch_lines`, which could fail PR fetching or produce an invalid big-PR budget. Step 21A now logs and falls back to defaults for invalid numeric limits.
-- No new risks opened by Step 21A; big-PR truncation is isolated to the worker, discloses skipped files in the posted summary, and is covered by focused over-budget and at-budget tests.
-- No new risks opened by Step 21B; installation-token HTTP retries, Octokit rate-limit retries, and LLM transport retries are each isolated at their network boundary and covered by focused retry-count tests.
-- No new risks opened by Step 21E; worker concurrency is gated by a `SemaphoreSlim`, the single-reader invariant is preserved (only `ExecuteAsync` reads from the queue), and parallel overlap is covered by a 5-barrier test in `ReviewWorkerTests`.
+- Open: Dockerfile has not been exercised with an actual `docker build`. Validate before relying on container output.
+- Open: `Anthropic.SDK` 5.10.0 is unofficial. Confined to `AnthropicSdkClient`; revisit if an official .NET SDK ships.
+- Open: OpenAI-compatible providers may not all support JSON mode. Mitigated by `UseJsonMode` toggle.
+- Open (Phase 9): Workspace clone executes arbitrary project code. Opt-in only (`grounding.build: true`). Recommended deployment is a resource-limited container; document in `docs/configuration.md`.
 
-## What is intentionally NOT in v1
+## What is intentionally NOT in v1/v2
 
 - No web UI for admin or stats
 - No multi-LLM ensemble or self-critique passes
 - No support for review threads (replies to existing comments)
-- No GitHub Enterprise Server (only github.com); add later by making the API base URL configurable
+- No GitHub Enterprise Server (only github.com)
 - No fine-grained per-file model selection
+- No agentic tool-use during review (model calling tools mid-review) — Tier 1/2 grounding is pre-computed
