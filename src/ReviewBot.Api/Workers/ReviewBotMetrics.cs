@@ -12,6 +12,7 @@ public sealed class ReviewBotMetrics : IDisposable
     private readonly Histogram<double> llmDurationMs;
     private readonly Histogram<int> reviewCommentsPosted;
     private readonly Histogram<double> groundingDurationMs;
+    private readonly Counter<long> incrementalReviews;
 
     public ReviewBotMetrics()
     {
@@ -33,6 +34,9 @@ public sealed class ReviewBotMetrics : IDisposable
             "reviewbot.grounding.duration_ms",
             unit: "ms",
             description: "Duration of grounding context collection");
+        incrementalReviews = meter.CreateCounter<long>(
+            "reviewbot.review.incremental_type",
+            description: "Number of reviews by incremental review type");
     }
 
     public void RecordJobProcessed(string status) =>
@@ -49,6 +53,9 @@ public sealed class ReviewBotMetrics : IDisposable
 
     public void RecordGroundingDuration(double durationMs, string result) =>
         groundingDurationMs.Record(durationMs, new KeyValuePair<string, object?>("result", result));
+
+    public void RecordIncrementalReview(string type) =>
+        incrementalReviews.Add(1, new KeyValuePair<string, object?>("type", type));
 
     public void Dispose() => meter.Dispose();
 }

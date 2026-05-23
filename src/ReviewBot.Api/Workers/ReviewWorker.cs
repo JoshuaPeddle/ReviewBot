@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Storage;
 using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
@@ -22,6 +23,7 @@ public sealed class ReviewWorker : BackgroundService
     private readonly IReviewLlmFactory llmFactory;
     private readonly IReviewPoster reviewPoster;
     private readonly IGroundingProvider groundingProvider;
+    private readonly IPrReviewStateStore prReviewStateStore;
     private readonly ReviewBotMetrics metrics;
     private readonly WorkerOptions workerOptions;
     private readonly ILogger<ReviewWorker> logger;
@@ -34,6 +36,7 @@ public sealed class ReviewWorker : BackgroundService
         IReviewLlmFactory llmFactory,
         IReviewPoster reviewPoster,
         IGroundingProvider groundingProvider,
+        IPrReviewStateStore prReviewStateStore,
         ReviewBotMetrics metrics,
         IOptions<WorkerOptions> options,
         ILogger<ReviewWorker> logger)
@@ -45,6 +48,7 @@ public sealed class ReviewWorker : BackgroundService
         this.llmFactory = llmFactory ?? throw new ArgumentNullException(nameof(llmFactory));
         this.reviewPoster = reviewPoster ?? throw new ArgumentNullException(nameof(reviewPoster));
         this.groundingProvider = groundingProvider ?? throw new ArgumentNullException(nameof(groundingProvider));
+        this.prReviewStateStore = prReviewStateStore ?? throw new ArgumentNullException(nameof(prReviewStateStore));
         this.metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
         this.workerOptions = options?.Value ?? throw new ArgumentNullException(nameof(options));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -160,10 +164,73 @@ public sealed class ReviewWorker : BackgroundService
             return JobProcessStatus.Skipped;
         }
 
-        var snapshot = await pullRequestFetcher
-            .FetchAsync(job.Owner, job.Repo, job.PrNumber, installationToken.Token, config.Review.MaxFiles, ct)
+        var repoFullName = $"{job.Owner}/{job.Repo}";
+        var lastSha = await prReviewStateStore
+            .GetLastShaAsync(job.InstallationId, repoFullName, job.PrNumber, ct)
             .ConfigureAwait(false);
-        var files = ApplyIgnoreGlobs(snapshot.Files, config.Ignore);
+
+        var metadata = await pullRequestFetcher
+            .FetchMetadataAsync(job.Owner, job.Repo, job.PrNumber, installationToken.Token, ct)
+            .ConfigureAwait(false);
+
+        IReadOnlySet<string>? allowlist = null;
+        var incrementalType = "first_review";
+
+        if (lastSha is not null && !string.Equals(lastSha, metadata.HeadSha, StringComparison.Ordinal))
+        {
+            incrementalType = "delta_review";
+            try
+            {
+                var compareResult = await pullRequestFetcher
+                    .GetChangedFilesSinceAsync(job.Owner, job.Repo, lastSha, metadata.HeadSha, installationToken.Token, ct)
+                    .ConfigureAwait(false);
+
+                if (!compareResult.IsComplete)
+                {
+                    logger.LogWarning(
+                        "Compare result for {Owner}/{Repo}#{PrNumber} is truncated ({Count} files); falling back to full file list",
+                        job.Owner,
+                        job.Repo,
+                        job.PrNumber,
+                        compareResult.Paths.Count);
+                    incrementalType = "compare_truncated_fallback";
+                }
+                else if (compareResult.Paths.Count == 0)
+                {
+                    logger.LogDebug(
+                        "No files changed since last review (SHA {LastSha}) for {Owner}/{Repo}#{PrNumber}; skipping",
+                        lastSha,
+                        job.Owner,
+                        job.Repo,
+                        job.PrNumber);
+                    metrics.RecordIncrementalReview("no_changes");
+                    metrics.RecordSkip("incremental_no_changes");
+                    await prReviewStateStore
+                        .SetLastShaAsync(job.InstallationId, repoFullName, job.PrNumber, metadata.HeadSha, ct)
+                        .ConfigureAwait(false);
+                    return JobProcessStatus.Skipped;
+                }
+                else
+                {
+                    allowlist = new HashSet<string>(compareResult.Paths, StringComparer.Ordinal);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Compare API call failed for {Owner}/{Repo}#{PrNumber}; falling back to full file list",
+                    job.Owner,
+                    job.Repo,
+                    job.PrNumber);
+                incrementalType = "compare_failed_fallback";
+            }
+        }
+
+        var rawFiles = await pullRequestFetcher
+            .FetchFilesAsync(job.Owner, job.Repo, job.PrNumber, installationToken.Token, config.Review.MaxFiles, allowlist, ct)
+            .ConfigureAwait(false);
+        var files = ApplyIgnoreGlobs(rawFiles, config.Ignore);
         files = ApplyMaxFiles(files, config.Review.MaxFiles, job);
         var patchBudgetResult = ApplyPatchBudget(files, config.Review.MaxPatchLines, job);
         files = patchBudgetResult.Files;
@@ -183,7 +250,7 @@ public sealed class ReviewWorker : BackgroundService
         var groundingRequest = new GroundingRequest(
             Owner: job.Owner,
             Repo: job.Repo,
-            HeadSha: snapshot.HeadSha,
+            HeadSha: metadata.HeadSha,
             InstallationToken: installationToken.Token,
             Config: config.Grounding);
         var groundingSw = Stopwatch.StartNew();
@@ -205,10 +272,10 @@ public sealed class ReviewWorker : BackgroundService
         }
 
         var request = new ReviewRequest(
-            snapshot.Title,
-            snapshot.Body,
-            snapshot.BaseSha,
-            snapshot.HeadSha,
+            metadata.Title,
+            metadata.Body,
+            metadata.BaseSha,
+            metadata.HeadSha,
             files,
             config,
             grounding);
@@ -228,8 +295,13 @@ public sealed class ReviewWorker : BackgroundService
         metrics.RecordCommentsPosted(result.Comments.Count);
 
         await reviewPoster
-            .PostAsync(job.Owner, job.Repo, job.PrNumber, snapshot.HeadSha, result, files, installationToken.Token, ct)
+            .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct)
             .ConfigureAwait(false);
+
+        await prReviewStateStore
+            .SetLastShaAsync(job.InstallationId, repoFullName, job.PrNumber, metadata.HeadSha, ct)
+            .ConfigureAwait(false);
+        metrics.RecordIncrementalReview(incrementalType);
 
         return JobProcessStatus.Success;
     }

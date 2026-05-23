@@ -2,10 +2,12 @@ using System.Diagnostics.Metrics;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using ReviewBot.Api.Workers;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Storage;
 using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
@@ -19,7 +21,7 @@ public class ReviewWorkerTests
     public async Task ProcessesOneJobThroughTheReviewPipeline()
     {
         await using var fixture = new WorkerFixture();
-        var snapshot = CreateSnapshot(CreateFile("src/B.cs"), CreateFile("src/A.cs"));
+        var files = new[] { CreateFile("src/B.cs"), CreateFile("src/A.cs") };
         var result = new ReviewResult(
             "Looks good.",
             [new InlineComment("src/A.cs", 2, "RIGHT", "Nice guard.", Severity.Info)]);
@@ -28,8 +30,10 @@ public class ReviewWorkerTests
 
         fixture.RepoConfigFetcher.FetchAsync("octo-org", "reviewbot", "event-head", "install-token", Arg.Any<CancellationToken>())
             .Returns(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchAsync("octo-org", "reviewbot", 42, "install-token", 50, Arg.Any<CancellationToken>())
-            .Returns(snapshot);
+        fixture.PullRequestFetcher.FetchMetadataAsync("octo-org", "reviewbot", 42, "install-token", Arg.Any<CancellationToken>())
+            .Returns(CreateMetadata());
+        fixture.PullRequestFetcher.FetchFilesAsync("octo-org", "reviewbot", 42, "install-token", 50, Arg.Any<IReadOnlySet<string>?>(), Arg.Any<CancellationToken>())
+            .Returns(files);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(call =>
             {
@@ -87,7 +91,7 @@ public class ReviewWorkerTests
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
         await fixture.PullRequestFetcher.DidNotReceiveWithAnyArgs()
-            .FetchAsync(default!, default!, default, default!, default, default);
+            .FetchMetadataAsync(default!, default!, default, default!, default);
         fixture.LlmFactory.DidNotReceiveWithAnyArgs().Create(default!);
         await fixture.ReviewPoster.DidNotReceiveWithAnyArgs()
             .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
@@ -113,7 +117,7 @@ public class ReviewWorkerTests
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
         await fixture.PullRequestFetcher.DidNotReceiveWithAnyArgs()
-            .FetchAsync(default!, default!, default, default!, default, default);
+            .FetchMetadataAsync(default!, default!, default, default!, default);
         fixture.LlmFactory.DidNotReceiveWithAnyArgs().Create(default!);
     }
 
@@ -122,18 +126,20 @@ public class ReviewWorkerTests
     {
         await using var fixture = new WorkerFixture();
         var config = ReviewConfig.Default with { Ignore = ["**/*.generated.cs", "docs/**"] };
-        var snapshot = CreateSnapshot(
+        var threeFiles = new[]
+        {
             CreateFile("src/App.cs"),
             CreateFile("src/App.generated.cs"),
-            CreateFile("docs/readme.md"));
+            CreateFile("docs/readme.md")
+        };
         ReviewRequest? capturedRequest = null;
         IReadOnlyList<FileChange>? postedFiles = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(threeFiles);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(call =>
             {
@@ -165,17 +171,19 @@ public class ReviewWorkerTests
         {
             Review = ReviewConfig.Default.Review with { MaxFiles = 2 }
         };
-        var snapshot = CreateSnapshot(
+        var threeFiles = new[]
+        {
             CreateFile("src/C.cs"),
             CreateFile("src/A.cs"),
-            CreateFile("src/B.cs"));
+            CreateFile("src/B.cs")
+        };
         ReviewRequest? capturedRequest = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchAsync("octo-org", "reviewbot", 42, "install-token", 2, Arg.Any<CancellationToken>())
-            .Returns(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync("octo-org", "reviewbot", 42, "install-token", 2, Arg.Any<IReadOnlySet<string>?>(), Arg.Any<CancellationToken>())
+            .Returns(threeFiles);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(call =>
             {
@@ -205,10 +213,12 @@ public class ReviewWorkerTests
         {
             Review = ReviewConfig.Default.Review with { MaxPatchLines = 2 }
         };
-        var snapshot = CreateSnapshot(
+        var threeFiles = new[]
+        {
             CreateFile("src/Large.cs", patchLines: 8),
             CreateFile("src/Small.cs", patchLines: 3),
-            CreateFile("src/Medium.cs", patchLines: 5));
+            CreateFile("src/Medium.cs", patchLines: 5)
+        };
         ReviewRequest? capturedRequest = null;
         ReviewResult? postedResult = null;
         IReadOnlyList<FileChange>? postedFiles = null;
@@ -216,8 +226,8 @@ public class ReviewWorkerTests
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(threeFiles);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(call =>
             {
@@ -253,17 +263,19 @@ public class ReviewWorkerTests
         {
             Review = ReviewConfig.Default.Review with { MaxPatchLines = 2 }
         };
-        var snapshot = CreateSnapshot(
+        var twoFiles = new[]
+        {
             CreateFile("src/A.cs", patchLines: 4),
-            CreateFile("src/B.cs", patchLines: 6));
+            CreateFile("src/B.cs", patchLines: 6)
+        };
         ReviewRequest? capturedRequest = null;
         ReviewResult? postedResult = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(twoFiles);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(call =>
             {
@@ -299,14 +311,13 @@ public class ReviewWorkerTests
                 Summary = false
             }
         };
-        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
         ReviewResult? postedResult = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult(
                 "Hidden summary.",
@@ -332,20 +343,21 @@ public class ReviewWorkerTests
     public async Task JobExceptionIsLoggedAndDoesNotStopSubsequentJobs()
     {
         await using var fixture = new WorkerFixture();
-        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var fetchCalls = 0;
+        var metadataCallCount = 0;
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+        fixture.PullRequestFetcher.FetchMetadataAsync(default!, default!, default, default!, default)
             .ReturnsForAnyArgs(_ =>
             {
-                fetchCalls++;
-                return fetchCalls == 1
-                    ? Task.FromException<PullRequestSnapshot>(new InvalidOperationException("fetch failed"))
-                    : Task.FromResult(snapshot);
+                metadataCallCount++;
+                return metadataCallCount == 1
+                    ? Task.FromException<PullRequestMetadata>(new InvalidOperationException("fetch failed"))
+                    : Task.FromResult(CreateMetadata());
             });
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult("Recovered.", []));
         fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
@@ -361,7 +373,7 @@ public class ReviewWorkerTests
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        fetchCalls.Should().Be(2);
+        metadataCallCount.Should().Be(2);
     }
 
     [Fact]
@@ -386,13 +398,12 @@ public class ReviewWorkerTests
         listener.Start();
 
         await using var fixture = new WorkerFixture();
-        var snapshot = CreateSnapshot(CreateFile("src/A.cs"));
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/A.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult("Good.", []));
         fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
@@ -486,8 +497,8 @@ public class ReviewWorkerTests
                     ? Task.FromException<ReviewConfig>(new InvalidOperationException("config fetch failed"))
                     : Task.FromResult(ReviewConfig.Default);
             });
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(CreateSnapshot(CreateFile("src/A.cs")));
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/A.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult("Ok.", []));
         fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
@@ -536,13 +547,12 @@ public class ReviewWorkerTests
         listener.Start();
 
         await using var fixture = new WorkerFixture();
-        var snapshot = CreateSnapshot(CreateFile("src/A.cs"));
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/A.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult(
                 "Looks good.",
@@ -579,8 +589,8 @@ public class ReviewWorkerTests
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(CreateSnapshot(CreateFile("src/A.cs")));
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/A.cs")]);
 
         // The Barrier.SignalAndWait blocks until all `concurrency` jobs reach this point simultaneously,
         // proving they are running in parallel rather than sequentially.
@@ -617,14 +627,13 @@ public class ReviewWorkerTests
     public async Task GroundingProviderCalledWithCorrectOwnerRepoAndSha()
     {
         await using var fixture = new WorkerFixture();
-        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         GroundingRequest? capturedGroundingRequest = null;
 
         fixture.RepoConfigFetcher.FetchAsync("octo-org", "reviewbot", "event-head", "install-token", Arg.Any<CancellationToken>())
             .Returns(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchAsync("octo-org", "reviewbot", 42, "install-token", 50, Arg.Any<CancellationToken>())
-            .Returns(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync("octo-org", "reviewbot", 42, "install-token", 50, Arg.Any<IReadOnlySet<string>?>(), Arg.Any<CancellationToken>())
+            .Returns([CreateFile("src/App.cs")]);
         fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
             .Returns(call =>
             {
@@ -655,7 +664,6 @@ public class ReviewWorkerTests
     public async Task GroundingContextPassedToLlmViaReviewRequest()
     {
         await using var fixture = new WorkerFixture();
-        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var expectedGrounding = new GroundingContext(
             new LanguageMetadata("dotnet", "10.0", null, []),
@@ -665,8 +673,8 @@ public class ReviewWorkerTests
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
             .Returns(expectedGrounding);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
@@ -693,22 +701,21 @@ public class ReviewWorkerTests
     public async Task EmptyDiffSkipsGroundingAndLlmAndPost()
     {
         await using var fixture = new WorkerFixture();
-        var emptySnapshot = new PullRequestSnapshot("No changes", "", "base", "head", []);
-        var prFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var filesFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs(_ =>
             {
-                prFetched.SetResult();
-                return emptySnapshot;
+                filesFetched.SetResult();
+                return Array.Empty<FileChange>();
             });
 
         await fixture.StartAsync();
         await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
 
-        await prFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await filesFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
         await fixture.GroundingProvider.DidNotReceiveWithAnyArgs()
@@ -723,22 +730,21 @@ public class ReviewWorkerTests
     {
         await using var fixture = new WorkerFixture();
         var config = ReviewConfig.Default with { Ignore = ["**"] };
-        var snapshot = CreateSnapshot(CreateFile("src/App.cs"), CreateFile("docs/readme.md"));
-        var prFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var filesFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs(_ =>
             {
-                prFetched.SetResult();
-                return snapshot;
+                filesFetched.SetResult();
+                return new[] { CreateFile("src/App.cs"), CreateFile("docs/readme.md") };
             });
 
         await fixture.StartAsync();
         await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
 
-        await prFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await filesFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
         await fixture.GroundingProvider.DidNotReceiveWithAnyArgs()
@@ -758,24 +764,25 @@ public class ReviewWorkerTests
         {
             Review = ReviewConfig.Default.Review with { MaxPatchLines = 1 }
         };
-        var snapshot = CreateSnapshot(
-            CreateFile("src/A.cs", patchLines: 6),
-            CreateFile("src/B.cs", patchLines: 6));
-        var prFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var filesFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs(_ =>
             {
-                prFetched.SetResult();
-                return snapshot;
+                filesFetched.SetResult();
+                return new[]
+                {
+                    CreateFile("src/A.cs", patchLines: 6),
+                    CreateFile("src/B.cs", patchLines: 6)
+                };
             });
 
         await fixture.StartAsync();
         await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
 
-        await prFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await filesFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
         await fixture.GroundingProvider.DidNotReceiveWithAnyArgs()
@@ -793,14 +800,13 @@ public class ReviewWorkerTests
         {
             Review = ReviewConfig.Default.Review with { MinConfidence = Confidence.Medium }
         };
-        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
         ReviewResult? postedResult = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult(
                 "Mixed confidence.",
@@ -836,14 +842,13 @@ public class ReviewWorkerTests
         {
             Review = ReviewConfig.Default.Review with { MinConfidence = Confidence.High }
         };
-        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
         ReviewResult? postedResult = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult(
                 "High threshold.",
@@ -873,13 +878,12 @@ public class ReviewWorkerTests
     public async Task GroundingReturningEmptyContextDoesNotFailTheJob()
     {
         await using var fixture = new WorkerFixture();
-        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
-            .ReturnsForAnyArgs(snapshot);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
             .Returns(new GroundingContext(null, null, null));
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
@@ -899,6 +903,232 @@ public class ReviewWorkerTests
             .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
     }
 
+    [Fact]
+    public async Task FirstReviewStoresHeadShaAfterPosting()
+    {
+        await using var fixture = new WorkerFixture();
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/A.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("ok", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        await fixture.PrReviewStateStore.Received(1)
+            .SetLastShaAsync(98765, "octo-org/reviewbot", 42, "snapshot-head", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task DeltaReviewComparesFromLastShaAndFetchesOnlyChangedFiles()
+    {
+        await using var fixture = new WorkerFixture();
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        IReadOnlySet<string>? capturedAllowlist = null;
+        ReviewRequest? capturedRequest = null;
+
+        fixture.PrReviewStateStore.GetLastShaAsync(98765, "octo-org/reviewbot", 42, Arg.Any<CancellationToken>())
+            .Returns("old-sha");
+        fixture.PullRequestFetcher.FetchMetadataAsync("octo-org", "reviewbot", 42, "install-token", Arg.Any<CancellationToken>())
+            .Returns(new PullRequestMetadata("PR title", "PR body", "base-sha", "new-sha"));
+        fixture.PullRequestFetcher.GetChangedFilesSinceAsync("octo-org", "reviewbot", "old-sha", "new-sha", "install-token", Arg.Any<CancellationToken>())
+            .Returns(new ChangedFilesResult(["src/Changed.cs"], IsComplete: true));
+        fixture.PullRequestFetcher.FetchFilesAsync("octo-org", "reviewbot", 42, "install-token", 50, Arg.Any<IReadOnlySet<string>?>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedAllowlist = call.ArgAt<IReadOnlySet<string>?>(5);
+                return [CreateFile("src/Changed.cs")];
+            });
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedRequest = call.Arg<ReviewRequest>();
+                return new ReviewResult("delta review ok", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        capturedAllowlist.Should().BeEquivalentTo(new[] { "src/Changed.cs" });
+        capturedRequest!.Files.Select(f => f.Path).Should().Equal("src/Changed.cs");
+        capturedRequest.HeadSha.Should().Be("new-sha");
+        await fixture.PrReviewStateStore.Received(1)
+            .SetLastShaAsync(98765, "octo-org/reviewbot", 42, "new-sha", Arg.Any<CancellationToken>());
+        await fixture.PullRequestFetcher.Received(1)
+            .GetChangedFilesSinceAsync("octo-org", "reviewbot", "old-sha", "new-sha", "install-token", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task DeltaReviewWithNoChangedFilesSkipsLlmAndUpdatesShа()
+    {
+        await using var fixture = new WorkerFixture();
+        var compareReturned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.PrReviewStateStore.GetLastShaAsync(98765, "octo-org/reviewbot", 42, Arg.Any<CancellationToken>())
+            .Returns("old-sha");
+        fixture.PullRequestFetcher.FetchMetadataAsync("octo-org", "reviewbot", 42, "install-token", Arg.Any<CancellationToken>())
+            .Returns(new PullRequestMetadata("PR title", "PR body", "base-sha", "new-sha"));
+        fixture.PullRequestFetcher.GetChangedFilesSinceAsync("octo-org", "reviewbot", "old-sha", "new-sha", "install-token", Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                compareReturned.SetResult();
+                return new ChangedFilesResult([], IsComplete: true);
+            });
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await compareReturned.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        fixture.LlmFactory.DidNotReceiveWithAnyArgs().Create(default!);
+        await fixture.ReviewPoster.DidNotReceiveWithAnyArgs()
+            .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
+        await fixture.PrReviewStateStore.Received(1)
+            .SetLastShaAsync(98765, "octo-org/reviewbot", 42, "new-sha", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CompareApiThrowingFallsBackToFullFileListAndProceedsWithReview()
+    {
+        await using var fixture = new WorkerFixture();
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.PrReviewStateStore.GetLastShaAsync(98765, "octo-org/reviewbot", 42, Arg.Any<CancellationToken>())
+            .Returns("old-sha");
+        fixture.PullRequestFetcher.FetchMetadataAsync("octo-org", "reviewbot", 42, "install-token", Arg.Any<CancellationToken>())
+            .Returns(new PullRequestMetadata("PR title", "PR body", "base-sha", "new-sha"));
+        fixture.PullRequestFetcher.GetChangedFilesSinceAsync(default!, default!, default!, default!, default!, default)
+            .ThrowsAsyncForAnyArgs(new InvalidOperationException("GitHub compare API failed"));
+        fixture.PullRequestFetcher.FetchFilesAsync("octo-org", "reviewbot", 42, "install-token", 50, Arg.Is<IReadOnlySet<string>?>(x => x == null), Arg.Any<CancellationToken>())
+            .Returns([CreateFile("src/A.cs")]);
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("fallback review ok", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await fixture.ReviewPoster.ReceivedWithAnyArgs(1)
+            .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task CompareApiTruncatedFallsBackToFullFileListAndProceedsWithReview()
+    {
+        await using var fixture = new WorkerFixture();
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        IReadOnlySet<string>? capturedAllowlist = null;
+
+        fixture.PrReviewStateStore.GetLastShaAsync(98765, "octo-org/reviewbot", 42, Arg.Any<CancellationToken>())
+            .Returns("old-sha");
+        fixture.PullRequestFetcher.FetchMetadataAsync("octo-org", "reviewbot", 42, "install-token", Arg.Any<CancellationToken>())
+            .Returns(new PullRequestMetadata("PR title", "PR body", "base-sha", "new-sha"));
+        // Simulate GitHub's 300-file cap: IsComplete = false
+        var truncatedPaths = Enumerable.Range(1, 300).Select(i => $"src/File{i}.cs").ToList();
+        fixture.PullRequestFetcher.GetChangedFilesSinceAsync(default!, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(new ChangedFilesResult(truncatedPaths, IsComplete: false));
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                capturedAllowlist = call.ArgAt<IReadOnlySet<string>?>(5);
+                return [CreateFile("src/A.cs")];
+            });
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("truncated fallback ok", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        // Must use null allowlist (full file list) when compare is truncated
+        capturedAllowlist.Should().BeNull();
+        await fixture.ReviewPoster.ReceivedWithAnyArgs(1)
+            .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task DeltaReviewAllowlistFetchesFileBeyondFirstPageWindow()
+    {
+        // This test verifies that when an allowlist is used, FetchFilesAsync receives
+        // the allowlist so it can page past the first window to find the delta file.
+        await using var fixture = new WorkerFixture();
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        IReadOnlySet<string>? capturedAllowlist = null;
+
+        fixture.PrReviewStateStore.GetLastShaAsync(98765, "octo-org/reviewbot", 42, Arg.Any<CancellationToken>())
+            .Returns("old-sha");
+        fixture.PullRequestFetcher.FetchMetadataAsync("octo-org", "reviewbot", 42, "install-token", Arg.Any<CancellationToken>())
+            .Returns(new PullRequestMetadata("PR title", "PR body", "base-sha", "new-sha"));
+        // Delta file is "deep" in the PR (would be past first page in a non-allowlist fetch)
+        fixture.PullRequestFetcher.GetChangedFilesSinceAsync(default!, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(new ChangedFilesResult(["src/Deep/PageTwoFile.cs"], IsComplete: true));
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                capturedAllowlist = call.ArgAt<IReadOnlySet<string>?>(5);
+                return [CreateFile("src/Deep/PageTwoFile.cs")];
+            });
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("deep file reviewed", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        capturedAllowlist.Should().BeEquivalentTo(new[] { "src/Deep/PageTwoFile.cs" });
+        await fixture.ReviewPoster.ReceivedWithAnyArgs(1)
+            .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
+    }
+
     private static ReviewJob CreateJob(string deliveryId = "delivery-123", string reason = "review_requested")
     {
         return new ReviewJob(
@@ -911,15 +1141,8 @@ public class ReviewWorkerTests
             Reason: reason);
     }
 
-    private static PullRequestSnapshot CreateSnapshot(params FileChange[] files)
-    {
-        return new PullRequestSnapshot(
-            Title: "Improve parser",
-            Body: "Adds coverage.",
-            BaseSha: "base-sha",
-            HeadSha: "snapshot-head",
-            Files: files);
-    }
+    private static PullRequestMetadata CreateMetadata() =>
+        new PullRequestMetadata("Improve parser", "Adds coverage.", "base-sha", "snapshot-head");
 
     private static FileChange CreateFile(string path)
     {
@@ -965,6 +1188,7 @@ public class ReviewWorkerTests
             Llm = Substitute.For<IReviewLlm>();
             ReviewPoster = Substitute.For<IReviewPoster>();
             GroundingProvider = Substitute.For<IGroundingProvider>();
+            PrReviewStateStore = Substitute.For<IPrReviewStateStore>();
             Metrics = new ReviewBotMetrics();
 
             TokenProvider.GetTokenAsync(98765, Arg.Any<CancellationToken>())
@@ -972,6 +1196,12 @@ public class ReviewWorkerTests
             LlmFactory.Create(Arg.Any<ModelConfig>()).Returns(Llm);
             GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
                 .Returns(new GroundingContext(null, null, null));
+            // Default: no prior review recorded (first review)
+            PrReviewStateStore.GetLastShaAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+                .Returns((string?)null);
+            // Default metadata returned by FetchMetadataAsync
+            PullRequestFetcher.FetchMetadataAsync(default!, default!, default, default!, default)
+                .ReturnsForAnyArgs(CreateMetadata());
 
             worker = new ReviewWorker(
                 Queue,
@@ -981,6 +1211,7 @@ public class ReviewWorkerTests
                 LlmFactory,
                 ReviewPoster,
                 GroundingProvider,
+                PrReviewStateStore,
                 Metrics,
                 Microsoft.Extensions.Options.Options.Create(new WorkerOptions { Concurrency = concurrency }),
                 NullLogger<ReviewWorker>.Instance);
@@ -1001,6 +1232,8 @@ public class ReviewWorkerTests
         public IReviewPoster ReviewPoster { get; }
 
         public IGroundingProvider GroundingProvider { get; }
+
+        public IPrReviewStateStore PrReviewStateStore { get; }
 
         public ReviewBotMetrics Metrics { get; }
 

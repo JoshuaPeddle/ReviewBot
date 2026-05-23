@@ -64,13 +64,10 @@ public class CompositionRootTests
             .Returns(new InstallationToken("install-token", DateTimeOffset.UtcNow.AddHours(1)));
         repoConfigFetcher.FetchAsync("octo-org", "reviewbot", "head-sha-abc", "install-token", Arg.Any<CancellationToken>())
             .Returns(ReviewConfig.Default);
-        pullRequestFetcher.FetchAsync("octo-org", "reviewbot", 42, "install-token", 50, Arg.Any<CancellationToken>())
-            .Returns(new PullRequestSnapshot(
-                "Improve parser",
-                "Adds coverage.",
-                "base-sha",
-                "head-sha-abc",
-                [CreateFile("src/App.cs")]));
+        pullRequestFetcher.FetchMetadataAsync("octo-org", "reviewbot", 42, "install-token", Arg.Any<CancellationToken>())
+            .Returns(new PullRequestMetadata("Improve parser", "Adds coverage.", "base-sha", "head-sha-abc"));
+        pullRequestFetcher.FetchFilesAsync("octo-org", "reviewbot", 42, "install-token", 50, Arg.Any<IReadOnlySet<string>?>(), Arg.Any<CancellationToken>())
+            .Returns([CreateFile("src/App.cs")]);
         llmFactory.Create(Arg.Any<ModelConfig>())
             .Returns(new StubReviewLlm(stubResult));
         reviewPoster.PostAsync(
