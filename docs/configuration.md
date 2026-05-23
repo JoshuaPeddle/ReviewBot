@@ -141,7 +141,75 @@ focus:
 instructions: |
   This is a Go service. Flag unsafe pointer casts and context misuse.
   Do not comment on formatting — it is enforced by the CI linter.
+
+grounding:
+  # Tier 1: read project config files via the GitHub Contents API and inject
+  # verified language/toolchain facts into the review prompt. Adds one extra
+  # GitHub API call per review; no cloning required.
+  # Default: true
+  enabled: true
+
+  # Tier 2: clone the PR branch and run a build or type-check command.
+  # Proves that changed files compile; the result is included in the prompt.
+  # Adds clone + build time to review latency — typically 30–120 s for .NET,
+  # less for Python type-checking. Read the security note below before enabling.
+  # Default: false
+  build: false
+
+  # Override the build command. null = auto-detect from language detector
+  # (.NET → dotnet build; Python → mypy when configured, else compileall).
+  # Default: null (auto-detect)
+  # build_command: "dotnet build --no-restore -c Release"
+
+  # Timeout in seconds for the build command. Reviews proceed (without build
+  # grounding) if the timeout expires.
+  # Default: 120
+  build_timeout_seconds: 120
+
+  # Tier 3 (not yet implemented — reserved for future use).
+  # Default: false
+  tests: false
+  # test_command: "dotnet test --no-build"
+  # test_timeout_seconds: 300
 ```
+
+---
+
+## Tier 2 build grounding — security and deployment
+
+Setting `grounding.build: true` causes ReviewBot to clone the PR branch into a temporary directory on the worker host and run a build or type-check command against it. This is intentionally opt-in because **it executes arbitrary project code** on the host running ReviewBot.
+
+**Threat model:** a malicious contributor could craft a PR that runs code at build time — via MSBuild targets, Python `setup.py` hooks, or similar mechanisms — if `build: true` is enabled for that repository.
+
+**Mitigations before enabling:**
+
+1. **Run the worker in a resource-limited container.** Docker Compose example:
+
+   ```yaml
+   services:
+     reviewbot:
+       image: ghcr.io/your-org/reviewbot:latest
+       deploy:
+         resources:
+           limits:
+             cpus: "1"
+             memory: 2G
+       security_opt:
+         - no-new-privileges:true
+       read_only: true
+       tmpfs:
+         - /tmp          # workspace clones land here; wiped on container restart
+       cap_drop:
+         - ALL
+   ```
+
+2. **Use a dedicated worker host** that is not shared with other sensitive services. The cloned workspace is deleted after each review, but a container with `tmpfs` for `/tmp` avoids leaving artifacts on the host filesystem.
+
+3. **Enable only for trusted repositories.** Because `grounding.build: true` is set per repository via `.github/review-bot.yml`, you control which repos opt in. Avoid enabling it for repos that accept untrusted external PRs unless you have container isolation in place.
+
+4. **Set a reasonable `build_timeout_seconds`.** The default is 120 s. A runaway build is cancelled and the review proceeds without build grounding — ReviewBot is never blocked by a slow or infinite build.
+
+ReviewBot scrubs the installation token from all git error output before surfacing it in logs. The workspace temp directory is always deleted in a `finally` block, including on clone failure.
 
 ---
 

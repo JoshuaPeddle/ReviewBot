@@ -2,7 +2,7 @@
 
 ## Current state (v1, 2026-05-23)
 
-Phases 1–8 complete (22 steps + steps 23–32), Phase 9 Steps 29–32 complete. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 220 tests passing (215 baseline + 5 new from Step 32), Docker image published on tags. Tier 1 grounding live: .NET and Python repos grounded with verified language version from project config files. Tier 2 build grounding fully wired: workspace clone + build runner integrated into `CompositeGroundingProvider`; `BuildResult` flows into `GroundingContext` and then into the prompt when `grounding.build: true` in repo config.
+Phases 1–8 complete (22 steps + steps 23–32), Phase 9 complete (Steps 29–32 + documentation). The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 220 tests passing (215 baseline + 5 new from Step 32), Docker image published on tags. Tier 1 grounding live: .NET and Python repos grounded with verified language version from project config files. Tier 2 build grounding fully wired: workspace clone + build runner integrated into `CompositeGroundingProvider`; `BuildResult` flows into `GroundingContext` and then into the prompt when `grounding.build: true` in repo config. `docs/configuration.md` updated with the full `grounding:` YAML reference and Tier 2 security/deployment guidance.
 
 Step 23 added: `ReviewBot.Grounding` class library with grounding abstractions (`GroundingContext`, `LanguageMetadata`, `BuildResult`, `TestResult`, `IGroundingProvider`, `GroundingRequest`, `ILanguageDetector`, `IRepoContentReader`); `GroundingConfig` record added to `ReviewBot.Core.Domain`; `ReviewConfig` extended with `Grounding` property; `RepoConfigFetcher` updated to parse `grounding:` YAML block with partial merge; example config updated; 5 new tests (3 in `ReviewBot.Grounding.Tests`, 2 in `ReviewBot.GitHub.Tests`).
 
@@ -339,7 +339,7 @@ Tests:
 - Open: Dockerfile has not been exercised with an actual `docker build`. Validate before relying on container output.
 - Open: `Anthropic.SDK` 5.10.0 is unofficial. Confined to `AnthropicSdkClient`; revisit if an official .NET SDK ships.
 - Open: OpenAI-compatible providers may not all support JSON mode. Mitigated by `UseJsonMode` toggle.
-- Open (Phase 9): Workspace clone executes arbitrary project code. Opt-in only (`grounding.build: true`). Recommended deployment is a resource-limited container; document in `docs/configuration.md`.
+- Closed (Phase 9): Workspace clone security guidance documented in `docs/configuration.md` — threat model, container isolation example, and mitigations for enabling `grounding.build: true`.
 - Open: `DeliveryStoreCleanupServiceTests.ContinuesLoopWhenCleanupFails` is flaky under parallel test execution (timing-dependent; passes reliably in isolation). Pre-existing; not related to Phase 8.
 
 ## What is intentionally NOT in v1/v2
