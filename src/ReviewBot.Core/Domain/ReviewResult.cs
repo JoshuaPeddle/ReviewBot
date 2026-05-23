@@ -1,8 +1,23 @@
 namespace ReviewBot.Core.Domain;
 
-public sealed record ReviewResult(
-    string Summary,
-    IReadOnlyList<InlineComment> Comments);
+public sealed record ReviewResult
+{
+    public ReviewResult(
+        string Summary,
+        IReadOnlyList<InlineComment> Comments,
+        IReadOnlyList<ContextRequest>? ContextRequests = null)
+    {
+        this.Summary = Summary;
+        this.Comments = Comments;
+        this.ContextRequests = ContextRequests ?? Array.Empty<ContextRequest>();
+    }
+
+    public string Summary { get; init; }
+
+    public IReadOnlyList<InlineComment> Comments { get; init; }
+
+    public IReadOnlyList<ContextRequest> ContextRequests { get; init; }
+}
 
 public sealed record InlineComment(
     string Path,

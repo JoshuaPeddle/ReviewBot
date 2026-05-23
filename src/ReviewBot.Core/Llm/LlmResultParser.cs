@@ -59,6 +59,7 @@ public static class LlmResultParser
 
         var summary = summaryElement.GetString()!;
         var comments = new List<InlineComment>();
+        var contextRequests = ParseContextRequests(root, logger);
 
         foreach (var commentElement in commentsElement.EnumerateArray())
         {
@@ -78,8 +79,60 @@ public static class LlmResultParser
 
         return new ParseResult(
             Success: true,
-            Value: new ReviewResult(summary, comments),
+            Value: new ReviewResult(summary, comments, contextRequests),
             Error: null);
+    }
+
+    private static IReadOnlyList<ContextRequest> ParseContextRequests(JsonElement root, ILogger? logger)
+    {
+        if (!TryGetProperty(root, "context_requests", out var requestsElement))
+        {
+            return Array.Empty<ContextRequest>();
+        }
+
+        if (requestsElement.ValueKind != JsonValueKind.Array)
+        {
+            logger?.LogWarning("Dropped invalid context_requests field because it was not an array.");
+            return Array.Empty<ContextRequest>();
+        }
+
+        var requests = new List<ContextRequest>();
+        foreach (var requestElement in requestsElement.EnumerateArray())
+        {
+            if (TryParseContextRequest(requestElement, out var request, out var error))
+            {
+                requests.Add(request);
+                continue;
+            }
+
+            logger?.LogWarning("Dropped invalid LLM context request: {Reason}", error);
+        }
+
+        return requests;
+    }
+
+    private static bool TryParseContextRequest(JsonElement element, out ContextRequest request, out string error)
+    {
+        request = null!;
+
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            error = "Context request must be an object.";
+            return false;
+        }
+
+        if (!TryGetString(element, "path", out var path))
+        {
+            error = "Context request path must be a string.";
+            return false;
+        }
+
+        var reason = TryGetString(element, "reason", out var parsedReason)
+            ? parsedReason
+            : null;
+        request = new ContextRequest(path, reason);
+        error = string.Empty;
+        return true;
     }
 
     private static bool TryParseComment(JsonElement element, out InlineComment comment, out string error)

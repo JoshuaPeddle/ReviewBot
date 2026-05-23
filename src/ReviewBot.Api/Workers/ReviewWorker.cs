@@ -453,7 +453,7 @@ public sealed class ReviewWorker : BackgroundService
             ? note
             : $"{result.Summary.TrimEnd()}\n\n{note}";
 
-        return new ReviewResult(summary, result.Comments);
+        return new ReviewResult(summary, result.Comments, result.ContextRequests);
     }
 
     private async Task<IReadOnlyList<InlineComment>> ApplySelfCritiqueAsync(
@@ -542,7 +542,7 @@ public sealed class ReviewWorker : BackgroundService
 
         return summary == result.Summary && ReferenceEquals(comments, result.Comments)
             ? result
-            : new ReviewResult(summary, comments);
+            : new ReviewResult(summary, comments, result.ContextRequests);
     }
 
     private sealed record PatchBudgetResult(

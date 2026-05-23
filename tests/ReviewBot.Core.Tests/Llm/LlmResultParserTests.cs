@@ -239,6 +239,76 @@ public class LlmResultParserTests
     }
 
     [Fact]
+    public void ContextRequestsAreParsedWhenPresent()
+    {
+        const string rawResponse = """
+            {
+              "summary": "Need more context.",
+              "comments": [],
+              "context_requests": [
+                {
+                  "path": "src/Contracts/IReviewStore.cs",
+                  "reason": "Verify the interface contract."
+                },
+                {
+                  "path": "src/Workers/ReviewWorker.cs"
+                }
+              ]
+            }
+            """;
+
+        var result = LlmResultParser.Parse(rawResponse);
+
+        result.Success.Should().BeTrue();
+        result.Value!.ContextRequests.Should().Equal(
+            new ContextRequest("src/Contracts/IReviewStore.cs", "Verify the interface contract."),
+            new ContextRequest("src/Workers/ReviewWorker.cs", null));
+    }
+
+    [Fact]
+    public void MissingContextRequestsDefaultsToEmptyList()
+    {
+        const string rawResponse = """
+            {
+              "summary": "No context needed.",
+              "comments": []
+            }
+            """;
+
+        var result = LlmResultParser.Parse(rawResponse);
+
+        result.Success.Should().BeTrue();
+        result.Value!.ContextRequests.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void InvalidContextRequestsAreDropped()
+    {
+        const string rawResponse = """
+            {
+              "summary": "Mixed context.",
+              "comments": [],
+              "context_requests": [
+                {
+                  "path": "src/Valid.cs",
+                  "reason": "Relevant type."
+                },
+                {
+                  "reason": "Missing path."
+                },
+                "not an object"
+              ]
+            }
+            """;
+
+        var result = LlmResultParser.Parse(rawResponse);
+
+        result.Success.Should().BeTrue();
+        result.Value!.ContextRequests.Should().Equal(
+            new ContextRequest("src/Valid.cs", "Relevant type."));
+    }
+
+    [Fact]
     public void UnknownConfidenceValueDefaultsToHigh()
     {
         const string rawResponse = """

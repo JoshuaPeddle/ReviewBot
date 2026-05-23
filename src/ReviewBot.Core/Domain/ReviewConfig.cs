@@ -68,7 +68,9 @@ public sealed record ReviewOutputConfig(
     int MaxPatchLines,
     TriggerConfig Trigger,
     Confidence MinConfidence = Confidence.Low,
-    bool SelfCritique = false);
+    bool SelfCritique = false,
+    bool AgenticContext = false,
+    int MaxContextRequests = 5);
 
 public sealed record TriggerConfig(
     bool OnReviewRequest,

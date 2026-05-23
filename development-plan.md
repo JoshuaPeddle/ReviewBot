@@ -2,7 +2,7 @@
 
 ## Current state (v2, 2026-05-23)
 
-Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, and Phase 14 Steps 41–42. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Build green, 290 tests passing, 1 skipped Ollama E2E test. Docker image published on tags.
+Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, Phase 14 Steps 41–42, and Phase 15 Step 43. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Phase 15's core context-request schema, parser, and enriched follow-up prompt builder are implemented; worker/GitHub fetching remains Step 44. Focused Core and Api tests pass; the full suite still reproduces the known persistence cleanup flake under parallel solution execution but the persistence project passes on immediate rerun. Docker image published on tags.
 
 Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 build runners (`DotNetBuildRunner`, `PythonBuildRunner`) are registered in `Program.cs`. `CompositeGroundingProvider` starts the workspace clone concurrently with Tier 1 `ExtractMetadataAsync`; on metadata failure the pre-started workspace is disposed; on clone failure `Build` is null and the review proceeds. `ReviewWorker` has a fast-exit when `files.Count == 0` after filtering (no grounding, no LLM call, no review post). Skip-reason counter (`reviewbot.jobs.skipped`) and grounding duration histogram (`reviewbot.grounding.duration_ms`) are live in `ReviewBotMetrics`.
 
@@ -488,7 +488,7 @@ if (config.Review.SelfCritique && critiqueCandidates.Length > 0)
 
 **The approach.** The initial review response may include a `context_requests` field listing files the model wants to read. The worker fetches those files via the GitHub Contents API and makes a single follow-up LLM call with the enriched context. The follow-up call produces the final comment set. Bounded to `max_context_requests` files (default 5) to prevent runaway API usage. Disabled by default.
 
-### Step 43: Context request schema, parser, and prompt changes
+### Step 43: Context request schema, parser, and prompt changes ✓ Complete
 
 **`ReviewBot.Core/Domain/ContextRequest.cs`:**
 
@@ -554,13 +554,26 @@ Assembles the follow-up prompt: original diff + initial summary + initial commen
 - `BuildContextEnrichedRequest`: prompt contains fetched file content in fenced block.
 - `BuildContextEnrichedRequest`: prompt includes the initial summary and comments so the second pass can retain or retract them intentionally.
 
+**Implemented in Step 43:**
+- Added `ContextRequest` and extended `ReviewResult` with a non-null `ContextRequests` list while preserving existing two-argument and named-argument construction sites.
+- Added `ReviewOutputConfig.AgenticContext` (default `false`) and `MaxContextRequests` (default `5`) in the core domain so prompt construction can be gated before Step 44's repo-config and worker wiring.
+- `LlmResultParser` now parses optional `context_requests`, accepts entries with required `path` and optional `reason`, defaults missing arrays to empty, and drops malformed context request entries without failing an otherwise valid review response.
+- `PromptBuilder.Build` now includes context-request instructions and schema only when `AgenticContext` is enabled.
+- Added `PromptBuilder.BuildContextEnrichedRequest`, which builds the second-pass prompt from the original diff, initial summary/comments, and fetched file contents, and disables recursive `context_requests` in the final-pass schema.
+- Fixed adjacent result-shaping helpers in `ReviewWorker` to preserve `ReviewResult.ContextRequests` when appending skipped-file notes or applying output filters.
+- Added focused parser and prompt-builder tests for context-request parsing, disabled/enabled schema behavior, fetched file inclusion, and initial review continuity in the enriched prompt.
+
+**Corrected implementation assumptions discovered during Step 43:**
+- The prompt gate cannot be implemented cleanly without core-domain config fields. `AgenticContext` and `MaxContextRequests` were added in Step 43; YAML mapping, `max_context_file_bytes`, validation, fetching, and worker execution remain Step 44.
+- `ReviewResult` needed to preserve source compatibility for existing tests and call sites that use `new ReviewResult(Summary: ..., Comments: ...)`, so the explicit constructor uses those parameter names.
+
+**Stop test:** `dotnet test tests/ReviewBot.Core.Tests/ReviewBot.Core.Tests.csproj` passes: 63 passing, 0 failed. Additional verification: `dotnet test tests/ReviewBot.Api.Tests/ReviewBot.Api.Tests.csproj --no-restore` passes: 52 passing, 0 failed. `dotnet test --no-restore` passed all projects except the known `DeliveryStoreCleanupServiceTests.ContinuesLoopWhenCleanupFails` flake; `dotnet test tests/ReviewBot.Persistence.Tests/ReviewBot.Persistence.Tests.csproj --no-restore` passed immediately afterward.
+
 ### Step 44: Worker integration
 
-**`ReviewBot.Core/Domain/ReviewConfig.cs`:** Add to `ReviewOutputConfig`:
+**`ReviewBot.Core/Domain/ReviewConfig.cs`:** `AgenticContext` and `MaxContextRequests` were added in Step 43 for prompt gating. Step 44 should add the remaining file-size cap:
 
 ```csharp
-bool AgenticContext = false,
-int MaxContextRequests = 5,
 int MaxContextFileBytes = 50_000
 ```
 
@@ -819,7 +832,7 @@ builder.Services
 - **Closed (Phase 14 Step 41)**: Self-critique retained-index validation needs the proposed comment count. `SelfCritiqueParser.Parse` now takes `proposedCommentCount`, rejects out-of-range and duplicate indices, and Step 42 worker integration passes `critiqueCandidates.Length`.
 - **Open (future Anthropic E2E)**: The current Anthropic SDK adapter has no configurable base URL. HTTP-mocked E2E scenarios should select the OpenAI-compatible provider through `.github/review-bot.yml`, as Step 40 does, or add Anthropic base URL injection before testing Anthropic over WireMock.
 - **Closed (Phase 14 Step 42)**: `IReviewLlm.CompleteRawAsync` is implemented by Anthropic, OpenAI-compatible, and stub LLMs; worker self-critique uses it only behind `review.self_critique`.
-- **Open (Phase 15)**: Agentic context gives the model influence over which repository files are fetched. Path validation, ignore-glob enforcement, file-size caps, binary rejection, and secret-looking path denial must ship with the feature.
+- **Open (Phase 15 Step 44)**: Agentic context gives the model influence over which repository files are fetched once worker integration lands. Path validation, ignore-glob enforcement, file-size caps, binary rejection, and secret-looking path denial must ship with Step 44 before any fetched content is sent to the LLM.
 - **Open (Phase 16)**: Local build/test execution requires SDKs on the worker and executes project code. Keep local-test E2E scenarios behind `[Trait("Category", "RequiresSdk")]` and a CI flag; default Tier 3 E2E should use mocked GitHub Checks/statuses.
 
 ## What is intentionally excluded

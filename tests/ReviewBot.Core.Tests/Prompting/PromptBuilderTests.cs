@@ -205,6 +205,94 @@ Changed Files:
     }
 
     [Fact]
+    public void AgenticContextEnabledAddsContextRequestInstructionsAndSchema()
+    {
+        var request = CreateRequest(config: ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                AgenticContext = true,
+                MaxContextRequests = 3
+            }
+        });
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.SystemPrompt.Should().Contain("You may request up to 3 additional files to review.");
+        payload.SystemPrompt.Should().Contain("Include a context_requests array");
+        payload.SystemPrompt.Should().Contain("\"context_requests\": [");
+        payload.SystemPrompt.Should().Contain("\"path\": \"string, repo-relative path\"");
+        payload.SystemPrompt.Should().Contain("\"reason\": \"optional string\"");
+    }
+
+    [Fact]
+    public void AgenticContextDisabledOmitsContextRequestSchema()
+    {
+        var request = CreateRequest(config: ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { AgenticContext = false }
+        });
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.SystemPrompt.Should().NotContain("context_requests");
+        payload.SystemPrompt.Should().NotContain("additional files to review");
+    }
+
+    [Fact]
+    public void ContextEnrichedRequestContainsFetchedFiles()
+    {
+        var request = CreateRequest(files:
+        [
+            CreateFile(path: "src/Review.cs", patch: "@@ -1 +1 @@\n- old\n+ new")
+        ]);
+        var initialResult = new ReviewResult("Initial summary.", []);
+
+        var payload = PromptBuilder.BuildContextEnrichedRequest(
+            request,
+            initialResult,
+            [("src/Contracts/IReviewStore.cs", "public interface IReviewStore\n{\n    Task SaveAsync();\n}")]);
+
+        payload.SystemPrompt.Should().Contain("This is the final review pass after additional context was fetched.");
+        payload.SystemPrompt.Should().NotContain("context_requests");
+        payload.UserPrompt.Should().Contain("## Additional context");
+        payload.UserPrompt.Should().Contain("### src/Contracts/IReviewStore.cs");
+        payload.UserPrompt.Should().Contain("""
+```
+public interface IReviewStore
+{
+    Task SaveAsync();
+}
+```
+""");
+    }
+
+    [Fact]
+    public void ContextEnrichedRequestContainsInitialSummaryAndComments()
+    {
+        var request = CreateRequest();
+        var initialResult = new ReviewResult(
+            "Initial summary.",
+            [
+                new InlineComment(
+                    Path: "src/Review.cs",
+                    Line: 12,
+                    Side: "RIGHT",
+                    Body: "Check this contract.",
+                    Severity: Severity.Warning,
+                    Confidence: Confidence.Medium)
+            ]);
+
+        var payload = PromptBuilder.BuildContextEnrichedRequest(
+            request,
+            initialResult,
+            [("src/Contracts/IReviewStore.cs", "public interface IReviewStore {}")]);
+
+        payload.UserPrompt.Should().Contain("Initial review summary:\nInitial summary.");
+        payload.UserPrompt.Should().Contain("Initial review comments:\n0. src/Review.cs:12 [warning, medium] Check this contract.");
+    }
+
+    [Fact]
     public void NoGroundingProducesNoGroundingSection()
     {
         var request = CreateRequest();
