@@ -222,7 +222,7 @@ Completion notes:
 - Risk register unchanged; no new risks opened or closed by this pure Core chunk.
 - Stop test passed: `dotnet test tests/ReviewBot.Core.Tests/ReviewBot.Core.Tests.csproj -c Release` completed successfully with 20 green Core tests. Full-solution verification is recorded in the final work summary.
 
-### Step 5: LLM result parser
+### Step 5: LLM result parser - Completed 2026-05-22
 
 ```text
 LLMs return JSON of variable cleanliness: sometimes wrapped in markdown fences, sometimes with trailing prose, sometimes with extra fields. Build a tolerant parser.
@@ -256,6 +256,14 @@ Tests in ReviewBot.Core.Tests/Llm/LlmResultParserTests.cs:
 
 Deliverable: a robust parser with strong test coverage; downstream code can trust ReviewResult invariants.
 ```
+
+Completion notes:
+- Added `ReviewBot.Core/Llm/LlmResultParser` and `ParseResult`. The parser strips leading fences, extracts the first complete JSON object with a string-aware brace counter, parses permissive JSON, validates the required root fields, drops invalid individual comments, defaults optional `severity` and `side`, and caps returned comments at 100.
+- Added `Microsoft.Extensions.Logging.Abstractions` to `ReviewBot.Core` for the optional invalid-comment logging hook without pulling in a concrete logger.
+- Added `ReviewBot.Core.Tests/Llm/LlmResultParserTests` covering clean JSON, fenced JSON, leading prose, missing summary, dropped invalid comments, unknown severity fallback, malformed JSON, and the 100-comment cap.
+- Corrected assumption: `ReviewResult` record equality is not structural for the `IReadOnlyList<InlineComment>` property; tests that compare whole results should use structural equivalence unless the domain model later changes to a value-equality collection type.
+- Risk register unchanged; no new risks opened or closed by this pure Core chunk.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 28 green Core tests. The non-Core test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
 ---
 
@@ -1006,6 +1014,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - Open: The Dockerfile was path-corrected after the move, but it has not yet been exercised with an actual `docker build` in this phase. Validate it before relying on container output.
 - No new risks opened by Step 3; the unified diff parser is isolated to Core and covered by focused tests.
 - No new risks opened by Step 4; prompt construction is isolated to Core and covered by deterministic snapshot and behavior tests.
+- No new risks opened by Step 5; LLM result parsing is isolated to Core and covered by focused malformed-output and validation tests.
 
 ## What is intentionally NOT in v1
 
