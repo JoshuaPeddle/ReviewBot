@@ -221,6 +221,148 @@ public class PullRequestFetcherTests
         githubClient.Credentials.AuthenticationType.Should().Be(AuthenticationType.Oauth);
     }
 
+    [Fact]
+    public async Task FetchMetadataAsyncReturnsTitleBodyAndShasWithoutFetchingFiles()
+    {
+        var pullRequests = Substitute.For<IPullRequestsClient>();
+        var clientFactory = CreateClientFactory(pullRequests);
+        pullRequests.Get("octo", "repo", 42).Returns(CreatePullRequest());
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var metadata = await fetcher.FetchMetadataAsync("octo", "repo", 42, "ghs_token", CancellationToken.None);
+
+        metadata.Title.Should().Be("Add review bot");
+        metadata.Body.Should().Be("PR body");
+        metadata.BaseSha.Should().Be("base-sha");
+        metadata.HeadSha.Should().Be("head-sha");
+        await pullRequests.DidNotReceive().Files(
+            Arg.Any<string>(),
+            Arg.Any<string>(),
+            Arg.Any<int>(),
+            Arg.Any<ApiOptions>());
+    }
+
+    [Fact]
+    public async Task FetchFilesAsyncWithNullAllowlistBehavesLikePagedFetch()
+    {
+        var pullRequests = Substitute.For<IPullRequestsClient>();
+        var clientFactory = CreateClientFactory(pullRequests);
+        pullRequests.Files("octo", "repo", 42, Arg.Any<ApiOptions>()).Returns([
+            CreateFile("src/a.cs", "modified", 1, 0, "@@ -1 +1 @@\n+new\n"),
+            CreateFile("src/b.cs", "added", 1, 0, "@@ -0,0 +1 @@\n+one\n"),
+        ]);
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var files = await fetcher.FetchFilesAsync("octo", "repo", 42, "ghs_token", maxFiles: 10, pathAllowlist: null, CancellationToken.None);
+
+        files.Should().HaveCount(2);
+        files.Select(f => f.Path).Should().BeEquivalentTo(["src/a.cs", "src/b.cs"]);
+    }
+
+    [Fact]
+    public async Task FetchFilesAsyncWithAllowlistPagesUntilAllowlistedPathsFound()
+    {
+        var pullRequests = Substitute.For<IPullRequestsClient>();
+        var clientFactory = CreateClientFactory(pullRequests);
+        // Page 1: 30 files, none in allowlist
+        pullRequests
+            .Files("octo", "repo", 42, Arg.Is<ApiOptions>(o => o.StartPage == 1))
+            .Returns(CreateFiles(1, 30));
+        // Page 2: the allowlisted file is here (beyond first maxFiles=5 window)
+        pullRequests
+            .Files("octo", "repo", 42, Arg.Is<ApiOptions>(o => o.StartPage == 2))
+            .Returns([CreateFile("delta/target.cs", "modified", 1, 0, "@@ -1 +1 @@\n+fix\n")]);
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var allowlist = new HashSet<string>(StringComparer.Ordinal) { "delta/target.cs" };
+        var files = await fetcher.FetchFilesAsync("octo", "repo", 42, "ghs_token", maxFiles: 5, pathAllowlist: allowlist, CancellationToken.None);
+
+        // The allowlisted file was on page 2, which is beyond maxFiles=5 of the first page
+        files.Should().ContainSingle();
+        files[0].Path.Should().Be("delta/target.cs");
+        // Both pages were fetched to find the allowlisted file
+        await pullRequests.Received(1).Files("octo", "repo", 42, Arg.Is<ApiOptions>(o => o.StartPage == 1));
+        await pullRequests.Received(1).Files("octo", "repo", 42, Arg.Is<ApiOptions>(o => o.StartPage == 2));
+    }
+
+    [Fact]
+    public async Task FetchFilesAsyncWithAllowlistAppliesMaxFilesCapOnResult()
+    {
+        var pullRequests = Substitute.For<IPullRequestsClient>();
+        var clientFactory = CreateClientFactory(pullRequests);
+        pullRequests
+            .Files("octo", "repo", 42, Arg.Any<ApiOptions>())
+            .Returns([
+                CreateFile("a.cs", "modified", 1, 0, "@@ -1 +1 @@\n+a\n"),
+                CreateFile("b.cs", "modified", 1, 0, "@@ -1 +1 @@\n+b\n"),
+                CreateFile("c.cs", "modified", 1, 0, "@@ -1 +1 @@\n+c\n"),
+            ]);
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var allowlist = new HashSet<string>(StringComparer.Ordinal) { "a.cs", "b.cs", "c.cs" };
+        var files = await fetcher.FetchFilesAsync("octo", "repo", 42, "ghs_token", maxFiles: 2, pathAllowlist: allowlist, CancellationToken.None);
+
+        files.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task GetChangedFilesSinceAsyncReturnsFilePathsFromCompareResult()
+    {
+        var (clientFactory, commits) = CreateClientFactoryWithCommits();
+        var compareResult = CreateCompareResult(
+            CreateCommitFile("src/a.cs"),
+            CreateCommitFile("src/b.cs"));
+        commits.Compare("octo", "repo", "base-sha", "head-sha").Returns(Task.FromResult(compareResult));
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var result = await fetcher.GetChangedFilesSinceAsync("octo", "repo", "base-sha", "head-sha", "ghs_token", CancellationToken.None);
+
+        result.Paths.Should().BeEquivalentTo(["src/a.cs", "src/b.cs"]);
+        result.IsComplete.Should().BeTrue();
+        await commits.Received(1).Compare("octo", "repo", "base-sha", "head-sha");
+    }
+
+    [Fact]
+    public async Task GetChangedFilesSinceAsyncMarksExactly300FilesAsIncomplete()
+    {
+        var (clientFactory, commits) = CreateClientFactoryWithCommits();
+        var files = Enumerable.Range(0, 300).Select(i => CreateCommitFile($"src/file-{i}.cs")).ToArray();
+        commits.Compare("octo", "repo", "base-sha", "head-sha").Returns(Task.FromResult(CreateCompareResult(files)));
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var result = await fetcher.GetChangedFilesSinceAsync("octo", "repo", "base-sha", "head-sha", "ghs_token", CancellationToken.None);
+
+        result.Paths.Should().HaveCount(300);
+        result.IsComplete.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task GetChangedFilesSinceAsyncMarksFewerThan300FilesAsComplete()
+    {
+        var (clientFactory, commits) = CreateClientFactoryWithCommits();
+        var files = Enumerable.Range(0, 42).Select(i => CreateCommitFile($"src/file-{i}.cs")).ToArray();
+        commits.Compare("octo", "repo", "base-sha", "head-sha").Returns(Task.FromResult(CreateCompareResult(files)));
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var result = await fetcher.GetChangedFilesSinceAsync("octo", "repo", "base-sha", "head-sha", "ghs_token", CancellationToken.None);
+
+        result.Paths.Should().HaveCount(42);
+        result.IsComplete.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task GetChangedFilesSinceAsyncThrowsNotFoundExceptionWhenGitHubReturns404()
+    {
+        var (clientFactory, commits) = CreateClientFactoryWithCommits();
+        commits.Compare("octo", "repo", "old-sha", "new-sha")
+            .Returns<CompareResult>(_ => throw new NotFoundException("Not Found", System.Net.HttpStatusCode.NotFound));
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var act = () => fetcher.GetChangedFilesSinceAsync("octo", "repo", "old-sha", "new-sha", "ghs_token", CancellationToken.None);
+
+        await act.Should().ThrowAsync<NotFoundException>();
+    }
+
     private static IGitHubClientFactory CreateClientFactory(IPullRequestsClient pullRequests)
     {
         var gitHubClient = Substitute.For<IGitHubClient>();
@@ -230,6 +372,21 @@ public class PullRequestFetcherTests
         clientFactory.CreateForInstallation("ghs_token").Returns(gitHubClient);
 
         return clientFactory;
+    }
+
+    private static (IGitHubClientFactory ClientFactory, IRepositoryCommitsClient Commits) CreateClientFactoryWithCommits()
+    {
+        var commits = Substitute.For<IRepositoryCommitsClient>();
+        var repository = Substitute.For<IRepositoriesClient>();
+        repository.Commit.Returns(commits);
+
+        var gitHubClient = Substitute.For<IGitHubClient>();
+        gitHubClient.Repository.Returns(repository);
+
+        var clientFactory = Substitute.For<IGitHubClientFactory>();
+        clientFactory.CreateForInstallation("ghs_token").Returns(gitHubClient);
+
+        return (clientFactory, commits);
     }
 
     private static PullRequest CreatePullRequest() => new(
@@ -325,4 +482,32 @@ public class PullRequestFetcherTests
 
         return new RateLimitExceededException(response);
     }
+
+    private static GitHubCommitFile CreateCommitFile(string filename) => new(
+        filename,
+        additions: 1,
+        deletions: 0,
+        changes: 1,
+        status: "modified",
+        blobUrl: $"https://github.com/octo/repo/blob/sha/{filename}",
+        contentsUrl: $"https://api.github.com/repos/octo/repo/contents/{filename}",
+        rawUrl: $"https://raw.githubusercontent.com/octo/repo/sha/{filename}",
+        sha: "file-sha",
+        patch: null,
+        previousFileName: null);
+
+    private static CompareResult CreateCompareResult(params GitHubCommitFile[] files) => new(
+        url: "https://api.github.com/repos/octo/repo/compare/base...head",
+        htmlUrl: "https://github.com/octo/repo/compare/base...head",
+        permalinkUrl: "https://github.com/octo/repo/compare/base...head",
+        diffUrl: "https://github.com/octo/repo/compare/base...head.diff",
+        patchUrl: "https://github.com/octo/repo/compare/base...head.patch",
+        baseCommit: null!,
+        mergeBaseCommit: null!,
+        status: "ahead",
+        aheadBy: files.Length,
+        behindBy: 0,
+        totalCommits: files.Length,
+        commits: [],
+        files: files);
 }

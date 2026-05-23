@@ -18,4 +18,28 @@ public interface IPullRequestFetcher
         string installationToken,
         int maxFiles,
         CancellationToken ct);
+
+    Task<PullRequestMetadata> FetchMetadataAsync(
+        string owner,
+        string repo,
+        int prNumber,
+        string installationToken,
+        CancellationToken ct);
+
+    Task<IReadOnlyList<FileChange>> FetchFilesAsync(
+        string owner,
+        string repo,
+        int prNumber,
+        string installationToken,
+        int maxFiles,
+        IReadOnlySet<string>? pathAllowlist,
+        CancellationToken ct);
+
+    Task<ChangedFilesResult> GetChangedFilesSinceAsync(
+        string owner,
+        string repo,
+        string baseSha,
+        string headSha,
+        string installationToken,
+        CancellationToken ct);
 }
