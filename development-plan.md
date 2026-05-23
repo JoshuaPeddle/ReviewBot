@@ -1051,7 +1051,7 @@ D. Metrics with System.Diagnostics.Metrics: Completed 2026-05-23
 - Histogram: reviewbot.llm.duration_ms (provider: anthropic|openai)
 - Histogram: reviewbot.review.comments_posted
 
-E. Worker concurrency:
+E. Worker concurrency: Completed 2026-05-23
 - Add a worker-concurrency option (default 1). If > 1, fan out N concurrent processing tasks reading from the queue. Document the assumption that the installation token provider is concurrency-safe (it is, because of the per-key semaphore).
 
 Tests for each of A-E in their respective test projects; for E, a test that pushes 5 jobs and asserts they are processed in parallel (use a barrier in the substitute LLM to prove overlap).
@@ -1205,6 +1205,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - Closed 2026-05-23: Repo YAML accepted non-positive `review.max_files` and `review.max_patch_lines`, which could fail PR fetching or produce an invalid big-PR budget. Step 21A now logs and falls back to defaults for invalid numeric limits.
 - No new risks opened by Step 21A; big-PR truncation is isolated to the worker, discloses skipped files in the posted summary, and is covered by focused over-budget and at-budget tests.
 - No new risks opened by Step 21B; installation-token HTTP retries, Octokit rate-limit retries, and LLM transport retries are each isolated at their network boundary and covered by focused retry-count tests.
+- No new risks opened by Step 21E; worker concurrency is gated by a `SemaphoreSlim`, the single-reader invariant is preserved (only `ExecuteAsync` reads from the queue), and parallel overlap is covered by a 5-barrier test in `ReviewWorkerTests`.
 
 ## What is intentionally NOT in v1
 

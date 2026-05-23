@@ -566,6 +566,52 @@ public class ReviewWorkerTests
             .Which.Should().Be(1);
     }
 
+    [Fact]
+    public async Task ConcurrencyOptionFansOutJobsInParallel()
+    {
+        const int concurrency = 5;
+        await using var fixture = new WorkerFixture(concurrency: concurrency);
+
+        var barrier = new Barrier(concurrency);
+        var completedCount = 0;
+        var allPosted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(CreateSnapshot(CreateFile("src/A.cs")));
+
+        // The Barrier.SignalAndWait blocks until all `concurrency` jobs reach this point simultaneously,
+        // proving they are running in parallel rather than sequentially.
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                barrier.SignalAndWait(TimeSpan.FromSeconds(5));
+                return Task.FromResult(new ReviewResult("OK.", []));
+            });
+
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                if (Interlocked.Increment(ref completedCount) == concurrency)
+                {
+                    allPosted.SetResult();
+                }
+
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        for (var i = 0; i < concurrency; i++)
+        {
+            await fixture.Queue.EnqueueAsync(CreateJob($"delivery-{i}"), CancellationToken.None);
+        }
+
+        await allPosted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        completedCount.Should().Be(concurrency);
+    }
+
     private static ReviewJob CreateJob(string deliveryId = "delivery-123", string reason = "review_requested")
     {
         return new ReviewJob(
@@ -622,7 +668,7 @@ public class ReviewWorkerTests
     {
         private readonly ReviewWorker worker;
 
-        public WorkerFixture()
+        public WorkerFixture(int concurrency = 1)
         {
             Queue = new ChannelReviewJobQueue();
             TokenProvider = Substitute.For<IInstallationTokenProvider>();
@@ -645,6 +691,7 @@ public class ReviewWorkerTests
                 LlmFactory,
                 ReviewPoster,
                 Metrics,
+                Microsoft.Extensions.Options.Options.Create(new WorkerOptions { Concurrency = concurrency }),
                 NullLogger<ReviewWorker>.Instance);
         }
 

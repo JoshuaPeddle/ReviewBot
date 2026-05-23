@@ -41,6 +41,11 @@ builder.Services.AddOptions<PersistenceOptions>()
     .Bind(builder.Configuration.GetSection(PersistenceOptions.SectionName))
     .ValidateOnStart();
 
+builder.Services.AddSingleton<IValidateOptions<WorkerOptions>, WorkerOptionsValidator>();
+builder.Services.AddOptions<WorkerOptions>()
+    .Bind(builder.Configuration.GetSection(WorkerOptions.SectionName))
+    .ValidateOnStart();
+
 builder.Services.AddReviewLlmFactory();
 builder.Services.AddAnthropicReviewLlm(options =>
     builder.Configuration.GetSection(AnthropicLlmOptions.SectionName).Bind(options));

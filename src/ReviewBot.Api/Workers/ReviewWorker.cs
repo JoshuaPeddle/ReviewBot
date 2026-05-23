@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Microsoft.Extensions.FileSystemGlobbing;
+using Microsoft.Extensions.Options;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
@@ -20,6 +21,7 @@ public sealed class ReviewWorker : BackgroundService
     private readonly IReviewLlmFactory llmFactory;
     private readonly IReviewPoster reviewPoster;
     private readonly ReviewBotMetrics metrics;
+    private readonly WorkerOptions workerOptions;
     private readonly ILogger<ReviewWorker> logger;
 
     public ReviewWorker(
@@ -30,6 +32,7 @@ public sealed class ReviewWorker : BackgroundService
         IReviewLlmFactory llmFactory,
         IReviewPoster reviewPoster,
         ReviewBotMetrics metrics,
+        IOptions<WorkerOptions> options,
         ILogger<ReviewWorker> logger)
     {
         this.queue = queue ?? throw new ArgumentNullException(nameof(queue));
@@ -39,51 +42,77 @@ public sealed class ReviewWorker : BackgroundService
         this.llmFactory = llmFactory ?? throw new ArgumentNullException(nameof(llmFactory));
         this.reviewPoster = reviewPoster ?? throw new ArgumentNullException(nameof(reviewPoster));
         this.metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
+        this.workerOptions = options?.Value ?? throw new ArgumentNullException(nameof(options));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // The installation-token provider uses per-installation semaphore gates; it is concurrency-safe.
+        using var semaphore = new SemaphoreSlim(workerOptions.Concurrency, workerOptions.Concurrency);
+        var inFlightTasks = new List<Task>();
+
         try
         {
             await foreach (var job in queue.DequeueAllAsync(stoppingToken).ConfigureAwait(false))
             {
-                using var scope = logger.BeginScope(new Dictionary<string, object?>(StringComparer.Ordinal)
-                {
-                    ["DeliveryId"] = job.DeliveryId,
-                    ["Owner"] = job.Owner,
-                    ["Repo"] = job.Repo,
-                    ["PrNumber"] = job.PrNumber,
-                    ["InstallationId"] = job.InstallationId,
-                });
-
-                var metricStatus = "failure";
-                try
-                {
-                    var status = await ProcessAsync(job, stoppingToken).ConfigureAwait(false);
-                    metricStatus = status == JobProcessStatus.Skipped ? "skipped" : "success";
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(
-                        ex,
-                        "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} failed; continuing with the next job",
-                        job.DeliveryId,
-                        job.Owner,
-                        job.Repo,
-                        job.PrNumber);
-                }
-
-                metrics.RecordJobProcessed(metricStatus);
+                await semaphore.WaitAsync(stoppingToken).ConfigureAwait(false);
+                inFlightTasks.RemoveAll(t => t.IsCompleted);
+                inFlightTasks.Add(RunJobAsync(job, semaphore, stoppingToken));
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             logger.LogInformation("Review worker stopped");
+        }
+
+        if (inFlightTasks.Count > 0)
+        {
+            await Task.WhenAll(inFlightTasks).ConfigureAwait(false);
+        }
+    }
+
+    private async Task RunJobAsync(ReviewJob job, SemaphoreSlim semaphore, CancellationToken ct)
+    {
+        // Yield so the dispatch loop continues dequeuing the next job before this one begins.
+        await Task.Yield();
+        try
+        {
+            using var scope = logger.BeginScope(new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["DeliveryId"] = job.DeliveryId,
+                ["Owner"] = job.Owner,
+                ["Repo"] = job.Repo,
+                ["PrNumber"] = job.PrNumber,
+                ["InstallationId"] = job.InstallationId,
+            });
+
+            var metricStatus = "failure";
+            try
+            {
+                var status = await ProcessAsync(job, ct).ConfigureAwait(false);
+                metricStatus = status == JobProcessStatus.Skipped ? "skipped" : "success";
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(
+                    ex,
+                    "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} failed; continuing with the next job",
+                    job.DeliveryId,
+                    job.Owner,
+                    job.Repo,
+                    job.PrNumber);
+            }
+
+            metrics.RecordJobProcessed(metricStatus);
+        }
+        finally
+        {
+            semaphore.Release();
         }
     }
 
