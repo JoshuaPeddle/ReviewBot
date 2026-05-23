@@ -139,8 +139,22 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         var review = new ReviewOutputConfig(
             fileConfig.Review?.InlineComments ?? defaults.Review.InlineComments,
             fileConfig.Review?.Summary ?? defaults.Review.Summary,
-            fileConfig.Review?.MaxFiles ?? defaults.Review.MaxFiles,
-            fileConfig.Review?.MaxPatchLines ?? defaults.Review.MaxPatchLines,
+            MergePositiveInt(
+                fileConfig.Review?.MaxFiles,
+                defaults.Review.MaxFiles,
+                "review.max_files",
+                owner,
+                repo,
+                sha,
+                path),
+            MergePositiveInt(
+                fileConfig.Review?.MaxPatchLines,
+                defaults.Review.MaxPatchLines,
+                "review.max_patch_lines",
+                owner,
+                repo,
+                sha,
+                path),
             trigger);
 
         return new ReviewConfig(
@@ -174,6 +188,37 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
             sha,
             ReviewConfig.Default.Model.Provider);
         return ReviewConfig.Default.Model.Provider;
+    }
+
+    private int MergePositiveInt(
+        int? value,
+        int defaultValue,
+        string fieldName,
+        string owner,
+        string repo,
+        string sha,
+        string path)
+    {
+        if (value is null)
+        {
+            return defaultValue;
+        }
+
+        if (value > 0)
+        {
+            return value.Value;
+        }
+
+        logger.LogWarning(
+            "Invalid ReviewBot config value {FieldName}={Value} in {Path} for {Owner}/{Repo} at {Sha}; using default {DefaultValue}",
+            fieldName,
+            value,
+            path,
+            owner,
+            repo,
+            sha,
+            defaultValue);
+        return defaultValue;
     }
 
     private static string MergeString(string? value, string defaultValue) =>

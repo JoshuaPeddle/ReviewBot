@@ -1029,7 +1029,7 @@ This step adds the production knobs that the v1 design called out as gotchas. No
 
 Tasks:
 
-A. Big PR truncation strategy in the worker:
+A. Big PR truncation strategy in the worker: Completed 2026-05-23
 - Before calling the LLM, total the patch lines across all files
 - If total > config.Review.MaxPatchLines * 5 (heuristic ceiling), prioritize files by smallest-patch-first, accumulate until you hit the budget, drop the rest
 - Add a "files_skipped" note to the summary if any were dropped (modify worker to pass the skipped list to a small helper that appends to the LLM-returned summary)
@@ -1058,6 +1058,14 @@ Tests for each of A-E in their respective test projects; for E, a test that push
 
 Deliverable: the bot behaves under real load. Big PRs degrade gracefully, transient failures recover, and operators can see what is happening.
 ```
+
+Completion notes for Step 21A:
+- Added worker-side big-PR patch budgeting in `ReviewWorker`: after ignore/max-file filtering, the worker totals patch lines and, when the total exceeds `review.max_patch_lines * 5`, keeps the smallest patches first and skips the rest before building the `ReviewRequest`.
+- Added a `files_skipped:` summary note when files are omitted by the patch budget, so posted reviews disclose incomplete coverage. The note is appended before normal output gating, so repositories with `review.summary: false` still suppress summaries as configured.
+- Added focused API worker tests for over-budget prioritization/skipping and the exact heuristic ceiling case.
+- Fixed a pre-existing config bug found while reading this area: repo YAML could set non-positive `review.max_files` or `review.max_patch_lines`, which could make PR fetching fail or the new patch budget nonsensical. `RepoConfigFetcher` now logs a warning and falls back to defaults for those invalid numeric limits, with test coverage.
+- Corrected assumption: Step 21A depends on repo-config numeric limits being positive; that was not previously enforced for per-repo YAML.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release --no-restore && dotnet test ReviewBot.sln -c Release --no-build` completed with zero warnings and all tests green: 35 Core, 20 LLM, 27 GitHub, 7 Persistence, and 26 API tests.
 
 ---
 
@@ -1166,6 +1174,8 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 18; worker orchestration is isolated to `ReviewBot.Api.Workers`, uses interface seams for all GitHub/LLM collaborators, honors repo config before review execution, and has focused tests for branch logic and loop resilience.
 - Closed 2026-05-23: Step 19's deferred startup registration and migration task is complete. Step 20 registers persistence in the composition root, runs pending EF Core migrations before serving requests, and verifies boot plus `/healthz` through an in-memory SQLite smoke test.
 - No new risks opened by Step 20; composition is covered by host-level health and signed-webhook pipeline tests, and unused LLM providers can remain uncredentialed until selected by repo config.
+- Closed 2026-05-23: Repo YAML accepted non-positive `review.max_files` and `review.max_patch_lines`, which could fail PR fetching or produce an invalid big-PR budget. Step 21A now logs and falls back to defaults for invalid numeric limits.
+- No new risks opened by Step 21A; big-PR truncation is isolated to the worker, discloses skipped files in the posted summary, and is covered by focused over-budget and at-budget tests.
 
 ## What is intentionally NOT in v1
 

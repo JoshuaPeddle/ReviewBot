@@ -196,6 +196,96 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task BigPrPatchBudgetPrioritizesSmallestFilesAndPostsSkippedNote()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { MaxPatchLines = 2 }
+        };
+        var snapshot = CreateSnapshot(
+            CreateFile("src/Large.cs", patchLines: 8),
+            CreateFile("src/Small.cs", patchLines: 3),
+            CreateFile("src/Medium.cs", patchLines: 5));
+        ReviewRequest? capturedRequest = null;
+        ReviewResult? postedResult = null;
+        IReadOnlyList<FileChange>? postedFiles = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(snapshot);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedRequest = call.Arg<ReviewRequest>();
+                return new ReviewResult("Reviewed the selected files.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                postedFiles = call.ArgAt<IReadOnlyList<FileChange>>(5);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        capturedRequest!.Files.Select(file => file.Path).Should().Equal("src/Small.cs", "src/Medium.cs");
+        postedFiles!.Select(file => file.Path).Should().Equal("src/Small.cs", "src/Medium.cs");
+        postedResult!.Summary.Should().Contain("Reviewed the selected files.");
+        postedResult.Summary.Should().Contain("files_skipped:");
+        postedResult.Summary.Should().Contain("`src/Large.cs`");
+    }
+
+    [Fact]
+    public async Task BigPrPatchBudgetKeepsAllFilesWhenTotalIsAtHeuristicCeiling()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { MaxPatchLines = 2 }
+        };
+        var snapshot = CreateSnapshot(
+            CreateFile("src/A.cs", patchLines: 4),
+            CreateFile("src/B.cs", patchLines: 6));
+        ReviewRequest? capturedRequest = null;
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(snapshot);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedRequest = call.Arg<ReviewRequest>();
+                return new ReviewResult("Within budget.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        capturedRequest!.Files.Select(file => file.Path).Should().Equal("src/A.cs", "src/B.cs");
+        postedResult!.Summary.Should().NotContain("files_skipped:");
+    }
+
+    [Fact]
     public async Task OutputConfigDropsInlineCommentsAndSummaryBeforePosting()
     {
         await using var fixture = new WorkerFixture();
@@ -296,10 +386,29 @@ public class ReviewWorkerTests
 
     private static FileChange CreateFile(string path)
     {
+        return CreateFile(
+            path,
+            patch: "@@ -1,2 +1,2 @@\n line\n+added",
+            commentableLines: new HashSet<int> { 1, 2 });
+    }
+
+    private static FileChange CreateFile(string path, int patchLines)
+    {
+        var patch = string.Join('\n', Enumerable.Range(1, patchLines).Select(line => $"+line {line}"));
+        var commentableLines = Enumerable.Range(1, Math.Max(1, patchLines)).ToHashSet();
+
+        return CreateFile(path, patch, commentableLines);
+    }
+
+    private static FileChange CreateFile(
+        string path,
+        string patch,
+        IReadOnlySet<int> commentableLines)
+    {
         return new FileChange(
             path,
-            "@@ -1,2 +1,2 @@\n line\n+added",
-            new HashSet<int> { 1, 2 },
+            patch,
+            commentableLines,
             AdditionsCount: 1,
             DeletionsCount: 0,
             FileChangeStatus.Modified);

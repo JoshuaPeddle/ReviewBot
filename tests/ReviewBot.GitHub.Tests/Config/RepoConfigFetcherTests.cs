@@ -158,6 +158,31 @@ public class RepoConfigFetcherTests
             entry.Level == LogLevel.Warning && entry.Message.Contains("Unknown ReviewBot model provider", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task FetchAsyncFallsBackToDefaultsWhenNumericLimitsAreInvalid()
+    {
+        const string yaml = """
+            review:
+              max_files: 0
+              max_patch_lines: -1
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var logger = new CapturingLogger<RepoConfigFetcher>();
+        var fetcher = CreateFetcher(contents, logger);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Review.MaxFiles.Should().Be(ReviewConfig.Default.Review.MaxFiles);
+        config.Review.MaxPatchLines.Should().Be(ReviewConfig.Default.Review.MaxPatchLines);
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_files=0", StringComparison.Ordinal));
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_patch_lines=-1", StringComparison.Ordinal));
+    }
+
     private static RepoConfigFetcher CreateFetcher(
         IRepositoryContentsClient contents,
         ILogger<RepoConfigFetcher>? logger = null)

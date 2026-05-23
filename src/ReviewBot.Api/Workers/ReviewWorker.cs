@@ -122,6 +122,8 @@ public sealed class ReviewWorker : BackgroundService
             .ConfigureAwait(false);
         var files = ApplyIgnoreGlobs(snapshot.Files, config.Ignore);
         files = ApplyMaxFiles(files, config.Review.MaxFiles, job);
+        var patchBudgetResult = ApplyPatchBudget(files, config.Review.MaxPatchLines, job);
+        files = patchBudgetResult.Files;
 
         var request = new ReviewRequest(
             snapshot.Title,
@@ -132,6 +134,7 @@ public sealed class ReviewWorker : BackgroundService
             config);
         var llm = llmFactory.Create(config.Model);
         var result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+        result = AppendFilesSkippedNote(result, patchBudgetResult.SkippedPaths);
         result = ApplyOutputConfig(result, config);
 
         await reviewPoster
@@ -184,6 +187,105 @@ public sealed class ReviewWorker : BackgroundService
             .ToArray();
     }
 
+    private PatchBudgetResult ApplyPatchBudget(
+        IReadOnlyList<FileChange> files,
+        int maxPatchLines,
+        ReviewJob job)
+    {
+        if (files.Count == 0)
+        {
+            return new PatchBudgetResult(files, []);
+        }
+
+        var budget = (long)maxPatchLines * 5;
+        var fileLineCounts = files
+            .Select(file => new FilePatchLineCount(file, CountPatchLines(file.Patch)))
+            .ToArray();
+        var totalPatchLines = fileLineCounts.Sum(file => file.LineCount);
+
+        if (totalPatchLines <= budget)
+        {
+            return new PatchBudgetResult(files, []);
+        }
+
+        var selected = new List<FileChange>();
+        var selectedPaths = new HashSet<string>(StringComparer.Ordinal);
+        var accumulatedLines = 0L;
+
+        foreach (var fileLineCount in fileLineCounts
+            .OrderBy(file => file.LineCount)
+            .ThenBy(file => file.File.Path, StringComparer.Ordinal))
+        {
+            if (accumulatedLines + fileLineCount.LineCount > budget)
+            {
+                continue;
+            }
+
+            selected.Add(fileLineCount.File);
+            selectedPaths.Add(fileLineCount.File.Path);
+            accumulatedLines += fileLineCount.LineCount;
+        }
+
+        var skippedPaths = files
+            .Where(file => !selectedPaths.Contains(file.Path))
+            .Select(file => file.Path)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        logger.LogWarning(
+            "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} has {TotalPatchLines} patch lines; keeping {KeptFileCount} files within budget {PatchLineBudget} and skipping {SkippedFileCount} files",
+            job.DeliveryId,
+            job.Owner,
+            job.Repo,
+            job.PrNumber,
+            totalPatchLines,
+            selected.Count,
+            budget,
+            skippedPaths.Length);
+
+        return new PatchBudgetResult(selected.ToArray(), skippedPaths);
+    }
+
+    private static long CountPatchLines(string patch)
+    {
+        if (patch.Length == 0)
+        {
+            return 0;
+        }
+
+        var normalizedPatch = patch.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n');
+        var count = 1L;
+        foreach (var character in normalizedPatch)
+        {
+            if (character == '\n')
+            {
+                count++;
+            }
+        }
+
+        return normalizedPatch.EndsWith('\n') ? count - 1 : count;
+    }
+
+    private static ReviewResult AppendFilesSkippedNote(
+        ReviewResult result,
+        IReadOnlyList<string> skippedPaths)
+    {
+        if (skippedPaths.Count == 0)
+        {
+            return result;
+        }
+
+        var note = "files_skipped: The following files were omitted from automated review because the pull request exceeded the configured patch budget: "
+            + string.Join(", ", skippedPaths.Select(path => $"`{path}`"))
+            + ".";
+        var summary = string.IsNullOrWhiteSpace(result.Summary)
+            ? note
+            : $"{result.Summary.TrimEnd()}\n\n{note}";
+
+        return new ReviewResult(summary, result.Comments);
+    }
+
     private static ReviewResult ApplyOutputConfig(ReviewResult result, ReviewConfig config)
     {
         var summary = config.Review.Summary ? result.Summary : string.Empty;
@@ -193,4 +295,12 @@ public sealed class ReviewWorker : BackgroundService
             ? result
             : new ReviewResult(summary, comments);
     }
+
+    private sealed record PatchBudgetResult(
+        IReadOnlyList<FileChange> Files,
+        IReadOnlyList<string> SkippedPaths);
+
+    private sealed record FilePatchLineCount(
+        FileChange File,
+        long LineCount);
 }
