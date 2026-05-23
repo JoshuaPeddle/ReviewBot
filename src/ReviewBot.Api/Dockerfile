@@ -1,4 +1,4 @@
-﻿FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
 USER $APP_UID
 WORKDIR /app
 EXPOSE 8080
@@ -8,6 +8,7 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
 COPY ["Directory.Build.props", "."]
+COPY ["Directory.Packages.props", "."]
 COPY ["src/ReviewBot.Api/ReviewBot.Api.csproj", "src/ReviewBot.Api/"]
 COPY ["src/ReviewBot.Core/ReviewBot.Core.csproj", "src/ReviewBot.Core/"]
 COPY ["src/ReviewBot.GitHub/ReviewBot.GitHub.csproj", "src/ReviewBot.GitHub/"]
