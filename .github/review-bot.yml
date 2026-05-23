@@ -17,7 +17,7 @@ model:
 
   # Model name passed to the provider API.
   # Default: claude-opus-4-7 (anthropic) / gpt-5.1 (openai)
-  name: granite4.1:8b-q4_K_M
+  name: qwen3.5:9b-q4_K_M
 
 review:
   # Post inline comments on individual diff lines.
