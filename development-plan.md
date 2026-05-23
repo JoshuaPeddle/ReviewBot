@@ -337,7 +337,7 @@ Completion notes:
 - Risk register updated with the unofficial SDK dependency risk and its current mitigation.
 - Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests and 5 green LLM tests. The Api/GitHub/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
-### Step 8: OpenAI-compatible implementation
+### Step 8: OpenAI-compatible implementation - Completed 2026-05-23
 
 ```text
 In ReviewBot.Llm.OpenAi, add the official `OpenAI` NuGet package (version 2.x). Create `OpenAiReviewLlm : IReviewLlm`.
@@ -363,6 +363,15 @@ Tests in ReviewBot.Llm.Tests/OpenAi/OpenAiReviewLlmTests.cs:
 
 Deliverable: OpenAI-compatible implementation with custom endpoint support, same contract and error behavior as Anthropic.
 ```
+
+Completion notes:
+- Added the official `OpenAI` 2.10.0 SDK package to `ReviewBot.Llm.OpenAi`.
+- Added `OpenAiReviewLlm` behind `IReviewLlm`. It builds prompts with `PromptBuilder`, calls an OpenAI-compatible chat completion through an internal `IOpenAiChatClient` adapter, parses with `LlmResultParser`, retries once on invalid JSON, and throws `LlmResponseException` after persistent malformed output.
+- Added `OpenAiLlmOptions`, `OpenAiSdkChatClient`, `OpenAiChatRequest`, and `AddOpenAiReviewLlm`. `ApiKey`, `ModelName`, `BaseUrl`, `MaxTokens`, `Temperature`, and `UseJsonMode` are mutable options properties so they can be bound from configuration later; custom endpoints are passed via `OpenAIClientOptions.Endpoint`.
+- Added `ReviewBot.Llm.Tests/OpenAi/OpenAiReviewLlmTests` covering happy path parsing, retry-once recovery, persistent malformed output, cancellation-token propagation, DI registration, configured completion options, and custom endpoint option construction.
+- Corrected assumption: the OpenAI SDK exposes `ChatClient.Endpoint`, but it is marked with diagnostic `OPENAI001` as evaluation-only. The implementation avoids that property and verifies custom endpoint wiring through the stable `OpenAIClientOptions.Endpoint` configuration object instead.
+- Risk register updated with the JSON-mode compatibility risk for OpenAI-compatible local/proxy providers and the existing `UseJsonMode` mitigation.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests and 12 green LLM tests. The Api/GitHub/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
 ### Step 9: LLM provider factory
 
@@ -1033,6 +1042,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 5; LLM result parsing is isolated to Core and covered by focused malformed-output and validation tests.
 - No new risks opened by Step 6; the LLM contract and stub are isolated to Core and covered by focused behavior tests.
 - Open: `Anthropic.SDK` 5.10.0 is an unofficial Anthropic client. Step 7 mitigates this by confining SDK usage to `AnthropicSdkClient`; revisit the adapter if an official Anthropic .NET SDK becomes available or if the package changes the Messages API surface.
+- Open: OpenAI-compatible providers such as Ollama, vLLM, and LM Studio may not all support OpenAI JSON mode exactly like api.openai.com. Step 8 mitigates this with the bindable `OpenAiLlmOptions.UseJsonMode` switch and keeps SDK-specific request construction isolated in `OpenAiSdkChatClient`.
 
 ## What is intentionally NOT in v1
 
