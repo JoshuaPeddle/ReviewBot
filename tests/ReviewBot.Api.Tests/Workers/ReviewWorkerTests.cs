@@ -9,6 +9,7 @@ using ReviewBot.Core.Llm;
 using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
+using ReviewBot.Grounding;
 
 namespace ReviewBot.Api.Tests.Workers;
 
@@ -612,6 +613,112 @@ public class ReviewWorkerTests
         completedCount.Should().Be(concurrency);
     }
 
+    [Fact]
+    public async Task GroundingProviderCalledWithCorrectOwnerRepoAndSha()
+    {
+        await using var fixture = new WorkerFixture();
+        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        GroundingRequest? capturedGroundingRequest = null;
+
+        fixture.RepoConfigFetcher.FetchAsync("octo-org", "reviewbot", "event-head", "install-token", Arg.Any<CancellationToken>())
+            .Returns(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchAsync("octo-org", "reviewbot", 42, "install-token", 50, Arg.Any<CancellationToken>())
+            .Returns(snapshot);
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedGroundingRequest = call.Arg<GroundingRequest>();
+                return new GroundingContext(null, null, null);
+            });
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("ok", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        capturedGroundingRequest.Should().NotBeNull();
+        capturedGroundingRequest!.Owner.Should().Be("octo-org");
+        capturedGroundingRequest.Repo.Should().Be("reviewbot");
+        capturedGroundingRequest.HeadSha.Should().Be("snapshot-head");
+        capturedGroundingRequest.InstallationToken.Should().Be("install-token");
+    }
+
+    [Fact]
+    public async Task GroundingContextPassedToLlmViaReviewRequest()
+    {
+        await using var fixture = new WorkerFixture();
+        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var expectedGrounding = new GroundingContext(
+            new LanguageMetadata("dotnet", "10.0", null, []),
+            Build: null,
+            Tests: null);
+        ReviewRequest? capturedRequest = null;
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(snapshot);
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+            .Returns(expectedGrounding);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedRequest = call.Arg<ReviewRequest>();
+                return new ReviewResult("grounded", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        capturedRequest!.Grounding.Should().BeSameAs(expectedGrounding);
+    }
+
+    [Fact]
+    public async Task GroundingReturningEmptyContextDoesNotFailTheJob()
+    {
+        await using var fixture = new WorkerFixture();
+        var snapshot = CreateSnapshot(CreateFile("src/App.cs"));
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchAsync(default!, default!, default, default!, default, default)
+            .ReturnsForAnyArgs(snapshot);
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new GroundingContext(null, null, null));
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("no grounding, still reviewed", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await fixture.ReviewPoster.ReceivedWithAnyArgs(1)
+            .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
+    }
+
     private static ReviewJob CreateJob(string deliveryId = "delivery-123", string reason = "review_requested")
     {
         return new ReviewJob(
@@ -677,11 +784,14 @@ public class ReviewWorkerTests
             LlmFactory = Substitute.For<IReviewLlmFactory>();
             Llm = Substitute.For<IReviewLlm>();
             ReviewPoster = Substitute.For<IReviewPoster>();
+            GroundingProvider = Substitute.For<IGroundingProvider>();
             Metrics = new ReviewBotMetrics();
 
             TokenProvider.GetTokenAsync(98765, Arg.Any<CancellationToken>())
                 .Returns(new InstallationToken("install-token", DateTimeOffset.UtcNow.AddHours(1)));
             LlmFactory.Create(Arg.Any<ModelConfig>()).Returns(Llm);
+            GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+                .Returns(new GroundingContext(null, null, null));
 
             worker = new ReviewWorker(
                 Queue,
@@ -690,6 +800,7 @@ public class ReviewWorkerTests
                 RepoConfigFetcher,
                 LlmFactory,
                 ReviewPoster,
+                GroundingProvider,
                 Metrics,
                 Microsoft.Extensions.Options.Options.Create(new WorkerOptions { Concurrency = concurrency }),
                 NullLogger<ReviewWorker>.Instance);
@@ -708,6 +819,8 @@ public class ReviewWorkerTests
         public IReviewLlm Llm { get; }
 
         public IReviewPoster ReviewPoster { get; }
+
+        public IGroundingProvider GroundingProvider { get; }
 
         public ReviewBotMetrics Metrics { get; }
 

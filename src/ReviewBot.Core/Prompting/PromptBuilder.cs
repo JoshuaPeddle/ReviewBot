@@ -5,12 +5,12 @@ namespace ReviewBot.Core.Prompting;
 
 public static class PromptBuilder
 {
-    public static PromptPayload Build(ReviewRequest request, GroundingContext? grounding = null)
+    public static PromptPayload Build(ReviewRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
 
         return new PromptPayload(
-            SystemPrompt: BuildSystemPrompt(request.Config, grounding),
+            SystemPrompt: BuildSystemPrompt(request.Config, request.Grounding),
             UserPrompt: BuildUserPrompt(request));
     }
 

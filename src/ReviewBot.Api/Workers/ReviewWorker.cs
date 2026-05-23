@@ -7,6 +7,7 @@ using ReviewBot.Core.Llm;
 using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
+using ReviewBot.Grounding;
 
 namespace ReviewBot.Api.Workers;
 
@@ -20,6 +21,7 @@ public sealed class ReviewWorker : BackgroundService
     private readonly IRepoConfigFetcher repoConfigFetcher;
     private readonly IReviewLlmFactory llmFactory;
     private readonly IReviewPoster reviewPoster;
+    private readonly IGroundingProvider groundingProvider;
     private readonly ReviewBotMetrics metrics;
     private readonly WorkerOptions workerOptions;
     private readonly ILogger<ReviewWorker> logger;
@@ -31,6 +33,7 @@ public sealed class ReviewWorker : BackgroundService
         IRepoConfigFetcher repoConfigFetcher,
         IReviewLlmFactory llmFactory,
         IReviewPoster reviewPoster,
+        IGroundingProvider groundingProvider,
         ReviewBotMetrics metrics,
         IOptions<WorkerOptions> options,
         ILogger<ReviewWorker> logger)
@@ -41,6 +44,7 @@ public sealed class ReviewWorker : BackgroundService
         this.repoConfigFetcher = repoConfigFetcher ?? throw new ArgumentNullException(nameof(repoConfigFetcher));
         this.llmFactory = llmFactory ?? throw new ArgumentNullException(nameof(llmFactory));
         this.reviewPoster = reviewPoster ?? throw new ArgumentNullException(nameof(reviewPoster));
+        this.groundingProvider = groundingProvider ?? throw new ArgumentNullException(nameof(groundingProvider));
         this.metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
         this.workerOptions = options?.Value ?? throw new ArgumentNullException(nameof(options));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -162,13 +166,32 @@ public sealed class ReviewWorker : BackgroundService
         var patchBudgetResult = ApplyPatchBudget(files, config.Review.MaxPatchLines, job);
         files = patchBudgetResult.Files;
 
+        var groundingRequest = new GroundingRequest(
+            Owner: job.Owner,
+            Repo: job.Repo,
+            HeadSha: snapshot.HeadSha,
+            InstallationToken: installationToken.Token,
+            Config: config.Grounding);
+        var grounding = await groundingProvider.GetContextAsync(groundingRequest, ct).ConfigureAwait(false);
+
+        if (grounding.Language is { } language)
+        {
+            logger.LogDebug(
+                "Grounding detected {LanguageId} {LanguageVersion} for {Owner}/{Repo}",
+                language.LanguageId,
+                language.LanguageVersion,
+                job.Owner,
+                job.Repo);
+        }
+
         var request = new ReviewRequest(
             snapshot.Title,
             snapshot.Body,
             snapshot.BaseSha,
             snapshot.HeadSha,
             files,
-            config);
+            config,
+            grounding);
 
         var llm = llmFactory.Create(config.Model);
         var sw = Stopwatch.StartNew();

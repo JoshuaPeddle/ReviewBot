@@ -23,6 +23,7 @@
     <ItemGroup>
       <ProjectReference Include="..\ReviewBot.Core\ReviewBot.Core.csproj" />
       <ProjectReference Include="..\ReviewBot.GitHub\ReviewBot.GitHub.csproj" />
+      <ProjectReference Include="..\ReviewBot.Grounding\ReviewBot.Grounding.csproj" />
       <ProjectReference Include="..\ReviewBot.Llm.Anthropic\ReviewBot.Llm.Anthropic.csproj" />
       <ProjectReference Include="..\ReviewBot.Llm.OpenAi\ReviewBot.Llm.OpenAi.csproj" />
       <ProjectReference Include="..\ReviewBot.Persistence\ReviewBot.Persistence.csproj" />

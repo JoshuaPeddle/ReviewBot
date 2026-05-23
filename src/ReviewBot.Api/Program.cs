@@ -11,6 +11,9 @@ using ReviewBot.Core.Llm;
 using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
+using ReviewBot.Grounding;
+using ReviewBot.Grounding.Languages.DotNet;
+using ReviewBot.Grounding.Languages.Python;
 using ReviewBot.Llm.Anthropic;
 using ReviewBot.Llm.OpenAi;
 using ReviewBot.Persistence;
@@ -76,6 +79,9 @@ var persistenceOptions = builder.Configuration
     .Get<PersistenceOptions>() ?? new PersistenceOptions();
 builder.Services.AddReviewBotPersistence(options => options.UseSqlite(persistenceOptions.ConnectionString));
 builder.Services.AddChannelReviewJobQueue();
+builder.Services.AddGrounding()
+    .AddLanguageDetector<DotNetLanguageDetector>()
+    .AddLanguageDetector<PythonLanguageDetector>();
 builder.Services.AddSingleton<ReviewBotMetrics>();
 builder.Services.AddHostedService<ReviewWorker>();
 builder.Services.AddHostedService<DeliveryStoreCleanupService>();

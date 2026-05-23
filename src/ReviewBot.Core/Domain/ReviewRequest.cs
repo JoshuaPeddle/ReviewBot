@@ -6,4 +6,5 @@ public sealed record ReviewRequest(
     string BaseSha,
     string HeadSha,
     IReadOnlyList<FileChange> Files,
-    ReviewConfig Config);
+    ReviewConfig Config,
+    GroundingContext? Grounding = null);
