@@ -683,7 +683,7 @@ Tests in ReviewBot.Api.Tests/Webhooks/WebhookEndpointTests.cs using WebApplicati
 Deliverable: a fast, well-tested HTTP boundary that does not block, hands work to a queue, and is paranoid about authenticity.
 ```
 
-### Step 17: Job model and channel queue
+### Step 17: Job model and channel queue - Completed 2026-05-23
 
 ```text
 In ReviewBot.Core/Jobs/, define:
@@ -717,6 +717,15 @@ Now go back to the Step 16 endpoint and wire the real ChannelReviewJobQueue for 
 
 Deliverable: the HTTP boundary truly hands off; nothing blocks the request thread.
 ```
+
+Completion notes:
+- Added `ReviewBot.Core/Jobs/ReviewJob`, `IReviewJobQueue`, `ChannelReviewJobQueue`, and `AddChannelReviewJobQueue`. The queue uses a bounded channel with production capacity 1000, wait-on-full backpressure, multiple writers, and a single active reader.
+- Added `ReviewBot.Core.Tests/Jobs/ChannelReviewJobQueueTests` covering FIFO ordering, cancellation from `DequeueAllAsync`, enqueue backpressure when capacity is reached, explicit rejection of a second active reader, and DI registration.
+- Fixed the Core project area before adding code: removed duplicate `TargetFramework`, `Nullable`, and `ImplicitUsings` properties from `ReviewBot.Core.csproj` and `ReviewBot.Core.Tests.csproj` because those are already inherited from root `Directory.Build.props`.
+- Corrected assumption: `SingleReader = true` is a channel optimization hint, not an enforcement mechanism, so `ChannelReviewJobQueue` now rejects a second active reader explicitly. The queue also has an optional capacity constructor so the blocking behavior can be tested without filling 1000 items.
+- Corrected assumption: Step 17's "go back to Step 16 endpoint" wiring cannot be completed yet because Step 16's endpoint has not been implemented. The production DI extension is ready for that endpoint to call in the next chunk.
+- Risk register unchanged; no new risks opened by the queue chunk.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 35 green Core tests, 25 green GitHub tests, 20 green LLM tests, and 9 green API tests. The Persistence test assembly still contains no tests and VSTest reports that as informational while returning success.
 
 ### Step 18: Review worker
 
@@ -1111,6 +1120,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - Closed 2026-05-23: Step 13's line-filter defense is implemented in `ReviewPoster` and covered by focused tests. Octokit's typed review model does not currently fit ReviewBot's `line`/`side` payload, so the raw authenticated Octokit connection is used in one isolated method.
 - No new risks opened by Step 14; repo config fetching/parsing is isolated to `ReviewBot.GitHub.Config`, malformed or absent config falls back to defaults, and provider validation is covered by focused tests.
 - No new risks opened by Step 15; webhook signature validation is isolated to `ReviewBot.Api.Webhooks` and covered by focused HMAC, malformed-header, and tamper tests.
+- No new risks opened by Step 17; job handoff is isolated to `ReviewBot.Core.Jobs`, the bounded-channel backpressure and single-reader behavior are covered by focused tests, and production DI is ready for the Step 16 endpoint.
 
 ## What is intentionally NOT in v1
 
