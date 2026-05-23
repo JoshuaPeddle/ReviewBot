@@ -537,7 +537,7 @@ Completion notes:
 - Risk register updated to record that Step 12's pagination risk is covered by focused tests; no new open risks were introduced.
 - Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests, 20 green LLM tests, and 13 green GitHub tests. The Api/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
-### Step 13: Review poster
+### Step 13: Review poster - Completed 2026-05-23
 
 ```text
 In ReviewBot.GitHub/Pulls/, create `ReviewPoster`.
@@ -568,6 +568,14 @@ Tests in ReviewBot.GitHub.Tests/Pulls/ReviewPosterTests.cs:
 
 Deliverable: posting is defensive about line validity (matches the gotcha called out in the architecture), and quiet when there is nothing to say.
 ```
+
+Completion notes:
+- Added `ReviewBot.GitHub/Pulls/ReviewPoster`, which builds a path-to-commentable-lines lookup from fetched `FileChange` data, drops comments for unknown paths or non-commentable RIGHT-side lines with Information logs, posts summary-only or summary-plus-inline review payloads, and skips GitHub entirely when both summary and valid inline comments are empty.
+- Added `ReviewPostException` for GitHub 422 validation failures. It preserves the original `ApiValidationException` and reports accepted/dropped comment counts so invalid review payloads are easier to diagnose.
+- Added `ReviewBot.GitHub.Tests/Pulls/ReviewPosterTests` covering line filtering, unknown-path filtering, no-op behavior, payload shape, default body behavior, and 422 wrapping.
+- Corrected assumption: Octokit's typed `PullRequestReviewCreate` model still exposes draft comments by diff `position`, while ReviewBot needs GitHub's modern `line`/`side` review-comment payload. The poster therefore uses Octokit's authenticated raw `IConnection.Post` with a small dictionary payload rather than the typed model.
+- Risk register updated to record that the line/side payload compatibility risk is now isolated and covered by tests.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests, 20 green LLM tests, and 19 green GitHub tests. The Api/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
 ### Step 14: Repo config file fetcher and parser
 
@@ -1083,6 +1091,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - No new risks opened by Step 10; GitHub App JWT signing is dependency-free, isolated to `ReviewBot.GitHub.Auth`, and verified with generated RSA keypairs.
 - No new risks opened by Step 11; installation token acquisition is isolated to `ReviewBot.GitHub.Auth`, failures have a specific exception surface, and cache stampede behavior is covered by concurrent tests.
 - No new risks opened by Step 12; PR fetching is isolated to `ReviewBot.GitHub.Pulls`, uses the planned Octokit dependency, and has focused tests for pagination and the default max-file cap.
+- Closed 2026-05-23: Step 13's line-filter defense is implemented in `ReviewPoster` and covered by focused tests. Octokit's typed review model does not currently fit ReviewBot's `line`/`side` payload, so the raw authenticated Octokit connection is used in one isolated method.
 
 ## What is intentionally NOT in v1
 
