@@ -2,7 +2,7 @@
 
 ## Current state (v1, 2026-05-23)
 
-Phases 1–8 complete (22 steps + steps 23–28). The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 191 tests passing, Docker image published on tags. Tier 1 grounding live: .NET and Python repos grounded with verified language version from project config files.
+Phases 1–8 complete (22 steps + steps 23–28), Phase 9 Step 29 complete. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 200 tests passing, Docker image published on tags. Tier 1 grounding live: .NET and Python repos grounded with verified language version from project config files. Workspace abstraction and git clone implementation ready for Tier 2 build grounding.
 
 Step 23 added: `ReviewBot.Grounding` class library with grounding abstractions (`GroundingContext`, `LanguageMetadata`, `BuildResult`, `TestResult`, `IGroundingProvider`, `GroundingRequest`, `ILanguageDetector`, `IRepoContentReader`); `GroundingConfig` record added to `ReviewBot.Core.Domain`; `ReviewConfig` extended with `Grounding` property; `RepoConfigFetcher` updated to parse `grounding:` YAML block with partial merge; example config updated; 5 new tests (3 in `ReviewBot.Grounding.Tests`, 2 in `ReviewBot.GitHub.Tests`).
 
@@ -273,33 +273,18 @@ Deliverable: end-to-end Tier 1 grounding live. Model grounded in real language v
 
 This phase adds the workspace subsystem that clones the PR branch and runs build/type-check commands. All Tier 1 abstractions extend cleanly with no breaking changes.
 
-### Step 29: Workspace abstraction and git clone implementation
+### Step 29: Workspace abstraction and git clone implementation ✅
 
-Define in `ReviewBot.Grounding/Workspace/`:
+`IWorkspace`, `IWorkspaceFactory`, `WorkspaceRequest` interfaces/record defined in `ReviewBot.Grounding/Workspace/`. `GitWorkspace` (internal) wraps a temp dir and deletes it on `DisposeAsync`. `GitWorkspaceFactory` (public) creates a shallow clone via: `git init`, `git remote add origin <url>`, `git fetch --depth 1 origin <sha>`, `git checkout FETCH_HEAD`. HTTPS clone URLs have the installation token injected as `x-access-token:<token>@…`; non-HTTPS URLs (local paths used in tests) pass through unchanged. `GIT_TERMINAL_PROMPT=0` prevents git from hanging for credentials. Token is scrubbed from git error output before surfacing in exceptions. Temp dir is always cleaned up on clone failure. 9 tests in `ReviewBot.Grounding.Tests/Workspace/`.
 
-```csharp
-public interface IWorkspace : IAsyncDisposable
-{
-    string LocalPath { get; }
-}
-
-public interface IWorkspaceFactory
-{
-    Task<IWorkspace> CreateAsync(WorkspaceRequest request, CancellationToken ct);
-}
-
-public sealed record WorkspaceRequest(
-    string CloneUrl, string Sha, string InstallationToken);
-```
-
-Implement `GitWorkspace`: shallow-clones the PR head SHA into a temp directory using `git clone --depth 1 --branch {sha}` (or equivalent). Cleanup deletes the directory on `DisposeAsync`.
+Implementation correction: the plan said `git clone --depth 1 --branch {sha}` — this is invalid; git does not accept arbitrary SHAs as `--branch` arguments. The correct approach is `git init + remote add + fetch --depth 1 origin <sha> + checkout FETCH_HEAD`, which GitHub supports for arbitrary SHAs.
 
 Security note: the workspace executes arbitrary project code during build. This is opt-in (`grounding.build: true`). For multi-tenant deployments, run the worker in a container with resource limits; document this in `docs/configuration.md`.
 
 Tests:
-- Factory creates directory, LocalPath exists
-- Dispose removes the directory
-- Clone failure throws with useful message
+- ✅ Factory creates directory, LocalPath exists
+- ✅ Dispose removes the directory
+- ✅ Clone failure throws with useful message (InvalidOperationException containing "git" and "failed")
 
 ### Step 30: .NET build runner
 
