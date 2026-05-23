@@ -133,7 +133,7 @@ Completion notes:
 
 ## Phase 2: Core logic (pure functions)
 
-### Step 3: Unified diff parser
+### Step 3: Unified diff parser - Completed 2026-05-22
 
 ```text
 GitHub returns each changed file's diff as a unified-diff "patch" string. To post inline review comments via the GitHub API you must target a line number that exists in the diff hunks of that file on the new side (RIGHT). Posting any other line returns 422.
@@ -162,7 +162,14 @@ Use FluentAssertions throughout. No I/O, no async.
 Deliverable: parser with 100% branch coverage on the parsing logic, all tests green.
 ```
 
-### Step 4: Prompt builder
+Completion notes:
+- Added `ReviewBot.Core/Diff/UnifiedDiffParser` as a pure parser for GitHub unified-diff patch strings. It returns RIGHT-side commentable line numbers from hunk additions and context lines, ignores old-side deletions and `\ No newline at end of file` markers, supports omitted hunk counts, and throws `FormatException` for malformed hunk headers.
+- Added `ReviewBot.Core.Tests/Diff/UnifiedDiffParserTests` covering all specified cases plus malformed hunk headers and no-newline markers. Core tests now include 14 passing tests.
+- Corrected assumption: the public parser method accepts `string?` rather than `string` so the documented null-input behavior is represented in the type system.
+- Risk register unchanged; no new risks opened or closed by this pure Core chunk.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with the new parser tests green. The non-Core test assemblies still contain no tests and VSTest reports that as informational while returning success, matching the prior phase notes.
+
+### Step 4: Prompt builder - Completed 2026-05-22
 
 ```text
 In ReviewBot.Core/Prompting/, create `PromptBuilder` (static class) with:
@@ -206,6 +213,14 @@ Tests in ReviewBot.Core.Tests/Prompting/PromptBuilderTests.cs:
 
 Deliverable: builder produces a deterministic, schema-explicit prompt; tests cover ordering, truncation, focus areas, and instructions.
 ```
+
+Completion notes:
+- Added `ReviewBot.Core/Prompting/PromptBuilder` and `PromptPayload`. The builder emits a senior-reviewer system prompt with the configured focus areas, optional custom instructions, the strict JSON response schema, and comment-line safety guidance.
+- Added deterministic user prompt generation with PR title/body, per-file `diff` fences, ordinal path ordering, null-byte stripping, and per-file patch truncation based on `ReviewConfig.Review.MaxPatchLines`.
+- Added `ReviewBot.Core.Tests/Prompting/PromptBuilderTests` covering focus/schema text, custom instructions, path ordering, truncation markers, null-byte sanitization, and a full inline raw-string snapshot.
+- Corrected assumption: patch strings may end with a trailing newline; truncation now avoids counting that terminator as an extra omitted blank line.
+- Risk register unchanged; no new risks opened or closed by this pure Core chunk.
+- Stop test passed: `dotnet test tests/ReviewBot.Core.Tests/ReviewBot.Core.Tests.csproj -c Release` completed successfully with 20 green Core tests. Full-solution verification is recorded in the final work summary.
 
 ### Step 5: LLM result parser
 
@@ -989,6 +1004,8 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - Closed 2026-05-22: The initial root-level API project did not match the planned `src/` layout. It has been moved and the solution/project references now target the planned structure.
 - Closed 2026-05-22: The local .NET 10 SDK generated an additional `ReviewBot.slnx`, which broke bare root `dotnet restore`/`dotnet build` by making the target ambiguous. The `.slnx` file was removed; CI and local commands now use the single `ReviewBot.sln`.
 - Open: The Dockerfile was path-corrected after the move, but it has not yet been exercised with an actual `docker build` in this phase. Validate it before relying on container output.
+- No new risks opened by Step 3; the unified diff parser is isolated to Core and covered by focused tests.
+- No new risks opened by Step 4; prompt construction is isolated to Core and covered by deterministic snapshot and behavior tests.
 
 ## What is intentionally NOT in v1
 
