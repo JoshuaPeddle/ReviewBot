@@ -3,7 +3,9 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Octokit" />
     <ProjectReference Include="..\ReviewBot.Core\ReviewBot.Core.csproj" />
+    <ProjectReference Include="..\ReviewBot.GitHub\ReviewBot.GitHub.csproj" />
   </ItemGroup>
 
 </Project>

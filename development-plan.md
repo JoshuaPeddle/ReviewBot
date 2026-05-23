@@ -2,9 +2,11 @@
 
 ## Current state (v1, 2026-05-23)
 
-Phases 1–7 complete (22 steps), Step 23 complete. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 131 tests passing, Docker image published on tags.
+Phases 1–7 complete (22 steps), Steps 23–24 complete. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. Build green, 148 tests passing, Docker image published on tags.
 
 Step 23 added: `ReviewBot.Grounding` class library with grounding abstractions (`GroundingContext`, `LanguageMetadata`, `BuildResult`, `TestResult`, `IGroundingProvider`, `GroundingRequest`, `ILanguageDetector`, `IRepoContentReader`); `GroundingConfig` record added to `ReviewBot.Core.Domain`; `ReviewConfig` extended with `Grounding` property; `RepoConfigFetcher` updated to parse `grounding:` YAML block with partial merge; example config updated; 5 new tests (3 in `ReviewBot.Grounding.Tests`, 2 in `ReviewBot.GitHub.Tests`).
+
+Step 24 added: `GitHubRepoContentReader : IRepoContentReader` (uses `IGitHubClientFactory`; `ListRootFilesAsync` calls `client.Git.Tree.Get`, returns blob names; `TryReadFileAsync` calls `Repository.Content.GetAllContentsByRef`, null on 404, decodes base64); `CompositeGroundingProvider : IGroundingProvider` (first-match detector wins, silent fall-through on any exception, disabled config returns empty context immediately); `GroundingServiceCollectionExtensions.AddGrounding()` with fluent `GroundingBuilder.AddLanguageDetector<T>()`; `AssemblyInfo.cs` with `InternalsVisibleTo("ReviewBot.Grounding.Tests")` to expose internal test constructor; `Microsoft.Extensions.Logging` added to central package manifest. Design note: `CompositeGroundingProvider` uses a dual constructor pattern — public ctor takes `IGitHubClientFactory` (creates `GitHubRepoContentReader` per request via a factory lambda); internal ctor takes `IRepoContentReader` directly for test injection.
 
 ---
 
