@@ -419,7 +419,7 @@ Completion notes:
 
 ## Phase 4: GitHub integration
 
-### Step 10: GitHub App JWT signer
+### Step 10: GitHub App JWT signer - Completed 2026-05-23
 
 ```text
 In ReviewBot.GitHub/Auth/, create `GitHubAppJwtSigner`.
@@ -443,6 +443,14 @@ Tests in ReviewBot.GitHub.Tests/Auth/GitHubAppJwtSignerTests.cs:
 
 Deliverable: deterministic JWT minting verified end-to-end with a real keypair, no external dependency.
 ```
+
+Completion notes:
+- Added `ReviewBot.GitHub/Auth/GitHubAppOptions` and `GitHubAppJwtSigner`. The signer mints RS256 GitHub App JWTs with `iat = now - 60s`, `exp = now + 9 minutes`, and `iss = AppId`, imports PKCS#1 or PKCS#8 RSA PEM keys, and caches the parsed RSA key for reuse.
+- Added `ReviewBot.GitHub.Tests/Auth/GitHubAppJwtSignerTests` with in-test RSA keypair generation, public-key signature verification, claim assertions against a fixed clock, max-lifetime validation, and coverage for both PKCS#8 and PKCS#1 PEM inputs.
+- Fixed the GitHub project area before adding code: removed duplicate `TargetFramework`, `Nullable`, and `ImplicitUsings` properties from `ReviewBot.GitHub.csproj` because those are already inherited from the root `Directory.Build.props`.
+- Corrected assumption: no JWT package was needed for this chunk. Manual compact-JWT construction with `System.Security.Cryptography.RSA.SignData` keeps the signer dependency-free while still producing a standard RS256 token.
+- Risk register unchanged; no new risks opened by the signer chunk.
+- Stop test passed: `dotnet build ReviewBot.sln -c Release` completed with zero warnings, and `dotnet test ReviewBot.sln -c Release --no-build` completed successfully with 30 green Core tests, 20 green LLM tests, and 2 green GitHub tests. The Api/Persistence test assemblies still contain no tests and VSTest reports that as informational while returning success.
 
 ### Step 11: Installation token client and cache
 
@@ -1053,6 +1061,7 @@ After step 20 the service is functionally complete. Steps 21 and 22 make it prod
 - Open: `Anthropic.SDK` 5.10.0 is an unofficial Anthropic client. Step 7 mitigates this by confining SDK usage to `AnthropicSdkClient`; revisit the adapter if an official Anthropic .NET SDK becomes available or if the package changes the Messages API surface.
 - Open: OpenAI-compatible providers such as Ollama, vLLM, and LM Studio may not all support OpenAI JSON mode exactly like api.openai.com. Step 8 mitigates this with the bindable `OpenAiLlmOptions.UseJsonMode` switch and keeps SDK-specific request construction isolated in `OpenAiSdkChatClient`.
 - No new risks opened by Step 9; provider selection is isolated behind Core-owned abstractions, unused providers are not resolved during selection, and per-call model override behavior is covered by factory and provider tests.
+- No new risks opened by Step 10; GitHub App JWT signing is dependency-free, isolated to `ReviewBot.GitHub.Auth`, and verified with generated RSA keypairs.
 
 ## What is intentionally NOT in v1
 
