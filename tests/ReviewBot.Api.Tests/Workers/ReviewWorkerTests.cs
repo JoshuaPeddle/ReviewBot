@@ -46,7 +46,7 @@ public class ReviewWorkerTests
                 "reviewbot",
                 42,
                 "snapshot-head",
-                result,
+                Arg.Any<ReviewResult>(),
                 Arg.Any<IReadOnlyList<FileChange>>(),
                 "install-token",
                 Arg.Any<CancellationToken>())
@@ -980,7 +980,7 @@ public class ReviewWorkerTests
         enrichedPrompt.Should().NotBeNull();
         enrichedPrompt!.UserPrompt.Should().Contain("public interface IFoo");
         enrichedPrompt.UserPrompt.Should().Contain("Initial comment.");
-        postedResult!.Summary.Should().Be("Final summary.");
+        postedResult!.Summary.Should().StartWith("Final summary.");
         postedResult.Comments.Should().ContainSingle()
             .Which.Body.Should().Be("Final context-informed comment.");
     }

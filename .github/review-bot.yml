@@ -40,6 +40,12 @@ review:
   # Default: 1500
   max_patch_lines: 1500
 
+  # Minimum confidence level for inline comments to be posted. Comments below this
+  # threshold are silently dropped before posting. "low" posts everything; "high" posts
+  # only comments the model is certain about.
+  # One of: low, medium, high. Default: low
+  #min_confidence: medium
+
   trigger:
     # Review when the bot is explicitly added as a reviewer on the PR.
     # Default: true
@@ -71,11 +77,13 @@ focus:
 # Use this for project-specific conventions, languages, or frameworks.
 # Default: "" (no extra instructions)
 instructions: |
-  This is a TypeScript monorepo using React and Node. Focus on:
-  - Uncaught promise rejections and missing error boundaries
-  - SQL injection via raw query strings
-  - Missing input validation at API boundaries
-  Do not comment on code style or formatting — ESLint + Prettier handle that in CI.
+  This is a C# / .NET 10 codebase (ASP.NET Core, EF Core SQLite, xUnit).
+  - Treat `using var` and `using` blocks as guaranteeing Dispose() in all code paths.
+  - Only flag security issues at real trust boundaries (HTTP request fields, external API
+    responses, user-uploaded content). Do not flag internal parameters passed between
+    layers of the same service as injection or path traversal risks.
+  - Do not comment on code style or formatting — .NET analyzers and EditorConfig enforce
+    style in CI.
 
 # Language grounding — inject verified project metadata into the review prompt so the
 # model cannot reason from stale training-data assumptions (e.g. treating .NET 10 as

@@ -1,4 +1,5 @@
 using System.Text;
+using ReviewBot.Core.Diff;
 using ReviewBot.Core.Domain;
 
 namespace ReviewBot.Core.Prompting;
@@ -74,6 +75,10 @@ Assign a confidence level to each comment based on how certain you are:
 - "high": you have seen the code in question and are certain this is a real issue
 - "medium": likely an issue but depends on context outside the diff
 - "low": speculative or stylistic; you would not block a merge on this alone
+
+When an existing code comment explains why a design choice was made, do not flag it as a bug unless you can identify a factual error in the stated reasoning.
+Only flag security issues at real trust boundaries — user-supplied HTTP fields, external API responses, untrusted file content. Do not flag internal method parameters passed between layers of the same codebase as injection or path traversal risks.
+Each non-deleted diff line is prefixed with its exact new-file line number (format: `+  NNN: code` for added, `   NNN: code` for context). Use that number directly as the `line` field — do not count lines yourself.
 """);
 
         if (config.Review.AgenticContext)
@@ -100,7 +105,7 @@ Schema:
   "comments": [
     {
       "path": "string, must match one of the changed files",
-      "line": "integer, must be a commentable line on the new side",
+      "line": "integer, use the NNN from the diff line annotation prefix",
       "severity": "info|warning|error",
       "confidence": "high|medium|low",
       "body": "string, markdown allowed; for fixes use GitHub suggestion blocks"
@@ -232,7 +237,7 @@ Omit a comment entirely rather than pick a guessed line, and keep total comments
             prompt.Append(file.DeletionsCount);
             prompt.Append(") ===\n");
             prompt.Append("```diff\n");
-            prompt.Append(SanitizeAndTruncatePatch(file.Patch, request.Config.Review.MaxPatchLines));
+            prompt.Append(AnnotateAndTruncatePatch(file.Patch, request.Config.Review.MaxPatchLines));
             prompt.Append("\n```\n\n");
         }
 
@@ -296,26 +301,16 @@ Omit a comment entirely rather than pick a guessed line, and keep total comments
             .Replace('\r', '\n');
     }
 
-    private static string SanitizeAndTruncatePatch(string patch, int maxPatchLines)
+    private static string AnnotateAndTruncatePatch(string patch, int maxPatchLines)
     {
-        var sanitizedPatch = patch.Replace("\0", string.Empty, StringComparison.Ordinal);
-        var normalizedPatch = sanitizedPatch.Replace("\r\n", "\n", StringComparison.Ordinal)
-            .Replace('\r', '\n');
-        var patchForCounting = normalizedPatch.EndsWith('\n')
-            ? normalizedPatch[..^1]
-            : normalizedPatch;
-        var lines = patchForCounting.Split('\n');
+        var lines = UnifiedDiffParser.AnnotateWithLineNumbers(patch);
 
         if (lines.Length <= maxPatchLines)
-        {
             return string.Join('\n', lines);
-        }
 
-        var retainedLineCount = Math.Max(0, maxPatchLines);
-        var omittedLineCount = lines.Length - retainedLineCount;
-        var retainedLines = lines.Take(retainedLineCount);
-
-        return string.Join('\n', retainedLines.Append($"... (truncated, {omittedLineCount} more lines)"));
+        var omittedCount = lines.Length - maxPatchLines;
+        return string.Join('\n',
+            lines.Take(maxPatchLines).Append($"... (truncated, {omittedCount} more lines)"));
     }
 }
 

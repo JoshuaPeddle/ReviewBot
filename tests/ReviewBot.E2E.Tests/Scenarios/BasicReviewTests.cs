@@ -30,7 +30,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
 
         using var response = await sender.SendPullRequestAsync(
-            FixtureLoader.ReadText("webhook-pr-review-requested.json"),
+            FixtureLoader.ReadText("webhook-pr-opened.json"),
             deliveryId: "delivery-e2e-posts-two-comments");
 
         response.StatusCode.Should().Be(HttpStatusCode.Accepted);
@@ -56,7 +56,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
 
         using var response = await sender.SendPullRequestAsync(
-            FixtureLoader.ReadText("webhook-pr-review-requested.json"),
+            FixtureLoader.ReadText("webhook-pr-opened.json"),
             deliveryId: "delivery-e2e-self-critique");
 
         response.StatusCode.Should().Be(HttpStatusCode.Accepted);
@@ -93,7 +93,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
 
         using var response = await sender.SendPullRequestAsync(
-            FixtureLoader.ReadText("webhook-pr-review-requested.json"),
+            FixtureLoader.ReadText("webhook-pr-opened.json"),
             deliveryId: "delivery-e2e-agentic-context");
 
         response.StatusCode.Should().Be(HttpStatusCode.Accepted);
@@ -126,7 +126,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
             llmReviewJson: FixtureLoader.ReadText("llm-response-two-comments.json"));
         using var client = harness.CreateClient();
         var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
-        var payload = FixtureLoader.ReadText("webhook-pr-review-requested.json");
+        var payload = FixtureLoader.ReadText("webhook-pr-opened.json");
 
         using var firstResponse = await sender.SendPullRequestAsync(payload, deliveryId: "delivery-e2e-duplicate");
         firstResponse.StatusCode.Should().Be(HttpStatusCode.Accepted);
@@ -152,7 +152,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
 
         using var response = await sender.SendPullRequestAsync(
-            FixtureLoader.ReadText("webhook-pr-review-requested.json"),
+            FixtureLoader.ReadText("webhook-pr-opened.json"),
             deliveryId: "delivery-e2e-empty-diff");
 
         response.StatusCode.Should().Be(HttpStatusCode.Accepted);
@@ -172,7 +172,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
 
         using var response = await sender.SendPullRequestAsync(
-            FixtureLoader.ReadText("webhook-pr-review-requested.json"),
+            FixtureLoader.ReadText("webhook-pr-opened.json"),
             deliveryId: "delivery-e2e-all-ignored");
 
         response.StatusCode.Should().Be(HttpStatusCode.Accepted);

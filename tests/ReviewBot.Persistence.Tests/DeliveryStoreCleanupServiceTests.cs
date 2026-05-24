@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
@@ -61,6 +62,7 @@ public class DeliveryStoreCleanupServiceTests
         await clock.WaitForTimerAsync().WaitAsync(TimeSpan.FromSeconds(5));
         clock.Advance(TimeSpan.FromHours(1));
         await firstAttempt.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await clock.WaitForTimerAsync().WaitAsync(TimeSpan.FromSeconds(5));
         clock.Advance(TimeSpan.FromHours(1));
         await secondAttempt.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
@@ -73,13 +75,13 @@ public class DeliveryStoreCleanupServiceTests
 
     private sealed class TrackingFakeTimeProvider(DateTimeOffset startDateTime) : FakeTimeProvider(startDateTime)
     {
-        private readonly TaskCompletionSource _timerRegistered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly Channel<bool> _timers = Channel.CreateUnbounded<bool>();
 
-        public Task WaitForTimerAsync() => _timerRegistered.Task;
+        public async Task WaitForTimerAsync() => await _timers.Reader.ReadAsync();
 
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {
-            _timerRegistered.TrySetResult();
+            _timers.Writer.TryWrite(true);
             return base.CreateTimer(callback, state, dueTime, period);
         }
     }

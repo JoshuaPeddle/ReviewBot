@@ -280,7 +280,7 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
                 var patch = file.Patch ?? string.Empty;
                 var commentableLines = UnifiedDiffParser.GetCommentableLines(patch);
 
-                if (file.Patch is null && commentableLines.Count == 0)
+                if (string.IsNullOrEmpty(file.Patch) && commentableLines.Count == 0)
                 {
                     continue;
                 }
@@ -357,7 +357,7 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
                 var patch = file.Patch ?? string.Empty;
                 var commentableLines = UnifiedDiffParser.GetCommentableLines(patch);
 
-                if (file.Patch is null && commentableLines.Count == 0)
+                if (string.IsNullOrEmpty(file.Patch) && commentableLines.Count == 0)
                 {
                     continue;
                 }

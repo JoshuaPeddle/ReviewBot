@@ -39,11 +39,22 @@ public static class WebhookEndpoint
         }
 
         var eventName = request.Headers["X-GitHub-Event"].ToString();
-        if (!string.Equals(eventName, "pull_request", StringComparison.Ordinal))
+        return eventName switch
         {
-            return Results.NoContent();
-        }
+            "pull_request" => await HandlePullRequestAsync(body, deliveryId, queue, deliveryStore, logger, ct),
+            "issue_comment" => await HandleIssueCommentAsync(body, deliveryId, queue, deliveryStore, logger, ct),
+            _ => Results.NoContent()
+        };
+    }
 
+    private static async Task<IResult> HandlePullRequestAsync(
+        byte[] body,
+        string deliveryId,
+        IReviewJobQueue queue,
+        IDeliveryStore deliveryStore,
+        ILogger<WebhookEndpointMarker> logger,
+        CancellationToken ct)
+    {
         PullRequestEvent? payload;
         try
         {
@@ -61,7 +72,7 @@ public static class WebhookEndpoint
             return Results.BadRequest();
         }
 
-        if (!ShouldEnqueue(payload, options.Value.BotSlug))
+        if (!ShouldEnqueue(payload))
         {
             return Results.NoContent();
         }
@@ -93,6 +104,62 @@ public static class WebhookEndpoint
         return Results.Accepted();
     }
 
+    private static async Task<IResult> HandleIssueCommentAsync(
+        byte[] body,
+        string deliveryId,
+        IReviewJobQueue queue,
+        IDeliveryStore deliveryStore,
+        ILogger<WebhookEndpointMarker> logger,
+        CancellationToken ct)
+    {
+        IssueCommentEvent? payload;
+        try
+        {
+            payload = JsonSerializer.Deserialize<IssueCommentEvent>(body, JsonOptions);
+        }
+        catch (JsonException ex)
+        {
+            logger.LogWarning(ex, "Rejected issue_comment delivery {DeliveryId}: malformed JSON", deliveryId);
+            return Results.BadRequest();
+        }
+
+        if (payload is null || !HasRequiredCommentFields(payload))
+        {
+            logger.LogWarning("Rejected issue_comment delivery {DeliveryId}: missing required fields", deliveryId);
+            return Results.BadRequest();
+        }
+
+        if (!ShouldEnqueueComment(payload))
+        {
+            return Results.NoContent();
+        }
+
+        if (!await deliveryStore.TryRecordAsync(deliveryId, ct).ConfigureAwait(false))
+        {
+            logger.LogInformation("Skipped duplicate webhook delivery {DeliveryId}", deliveryId);
+            return Results.Ok();
+        }
+
+        var job = new ReviewJob(
+            DeliveryId: deliveryId,
+            InstallationId: payload.Installation.Id,
+            Owner: payload.Repository.Owner.Login,
+            Repo: payload.Repository.Name,
+            PrNumber: payload.Issue.Number,
+            HeadSha: null,
+            Reason: "review_comment");
+
+        await queue.EnqueueAsync(job, ct);
+        logger.LogInformation(
+            "Accepted webhook delivery {DeliveryId} for {Owner}/{Repo}#{PrNumber} because of review_comment",
+            job.DeliveryId,
+            job.Owner,
+            job.Repo,
+            job.PrNumber);
+
+        return Results.Accepted();
+    }
+
     private static async Task<byte[]> ReadBodyAsync(HttpRequest request, CancellationToken ct)
     {
         using var buffer = new MemoryStream();
@@ -100,25 +167,26 @@ public static class WebhookEndpoint
         return buffer.ToArray();
     }
 
-    private static bool ShouldEnqueue(PullRequestEvent payload, string botSlug)
-    {
-        if (string.Equals(payload.Action, "synchronize", StringComparison.Ordinal))
-        {
-            return true;
-        }
+    private static bool ShouldEnqueue(PullRequestEvent payload) =>
+        payload.Action is "opened" or "reopened" or "synchronize";
 
-        return string.Equals(payload.Action, "review_requested", StringComparison.Ordinal) &&
-               string.Equals(payload.RequestedReviewer?.Login, botSlug, StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool ShouldEnqueueComment(IssueCommentEvent payload) =>
+        string.Equals(payload.Action, "created", StringComparison.Ordinal) &&
+        payload.Issue.PullRequest is not null &&
+        string.Equals(payload.Comment.Body.Trim(), "/review", StringComparison.OrdinalIgnoreCase);
 
-    private static bool HasRequiredFields(PullRequestEvent payload)
-    {
-        return payload.Installation.Id > 0 &&
-               payload.PullRequest.Number > 0 &&
-               !string.IsNullOrWhiteSpace(payload.PullRequest.Head.Sha) &&
-               !string.IsNullOrWhiteSpace(payload.Repository.Name) &&
-               !string.IsNullOrWhiteSpace(payload.Repository.Owner.Login);
-    }
+    private static bool HasRequiredFields(PullRequestEvent payload) =>
+        payload.Installation.Id > 0 &&
+        payload.PullRequest.Number > 0 &&
+        !string.IsNullOrWhiteSpace(payload.PullRequest.Head.Sha) &&
+        !string.IsNullOrWhiteSpace(payload.Repository.Name) &&
+        !string.IsNullOrWhiteSpace(payload.Repository.Owner.Login);
+
+    private static bool HasRequiredCommentFields(IssueCommentEvent payload) =>
+        payload.Installation.Id > 0 &&
+        payload.Issue.Number > 0 &&
+        !string.IsNullOrWhiteSpace(payload.Repository.Name) &&
+        !string.IsNullOrWhiteSpace(payload.Repository.Owner.Login);
 
     private sealed class WebhookEndpointMarker;
 }

@@ -72,6 +72,59 @@ public static class UnifiedDiffParser
             CultureInfo.InvariantCulture);
     }
 
+    public static string[] AnnotateWithLineNumbers(string? patch)
+    {
+        if (string.IsNullOrWhiteSpace(patch))
+            return [];
+
+        var normalized = patch
+            .Replace("\0", string.Empty, StringComparison.Ordinal)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n');
+        var toParse = normalized.EndsWith('\n') ? normalized[..^1] : normalized;
+        var rawLines = toParse.Split('\n');
+        var result = new string[rawLines.Length];
+        int? nextNewLine = null;
+
+        for (var i = 0; i < rawLines.Length; i++)
+        {
+            var line = rawLines[i];
+
+            if (line.StartsWith("@@", StringComparison.Ordinal))
+            {
+                nextNewLine = ParseNewStartLine(line);
+                result[i] = line;
+                continue;
+            }
+
+            if (line.Length == 0 || line.StartsWith('\\') || nextNewLine is null)
+            {
+                result[i] = line;
+                continue;
+            }
+
+            switch (line[0])
+            {
+                case '+':
+                    result[i] = $"+{nextNewLine.Value,5}: {line[1..]}";
+                    nextNewLine++;
+                    break;
+                case ' ':
+                    result[i] = $" {nextNewLine.Value,5}: {line[1..]}";
+                    nextNewLine++;
+                    break;
+                case '-':
+                    result[i] = $"-       {line[1..]}";
+                    break;
+                default:
+                    result[i] = line;
+                    break;
+            }
+        }
+
+        return result;
+    }
+
     private static IEnumerable<string> SplitLines(string value)
     {
         var normalized = value.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');

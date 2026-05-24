@@ -153,7 +153,7 @@ public sealed class OpenAiReviewLlmTests
     [Fact]
     public void SdkClientOptionsUseConfiguredCustomEndpoint()
     {
-        var options = OpenAiSdkChatClient.CreateClientOptions(new Uri("http://localhost:11434/v1"));
+        var options = OpenAiSdkChatClient.CreateClientOptions(new Uri("http://localhost:11434/v1"), 60);
 
         options.Should().NotBeNull();
         options!.Endpoint.Should().Be(new Uri("http://localhost:11434/v1"));

@@ -6,5 +6,5 @@ public sealed record ReviewJob(
     string Owner,
     string Repo,
     int PrNumber,
-    string HeadSha,
+    string? HeadSha,
     string Reason);
