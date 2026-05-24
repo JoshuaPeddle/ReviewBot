@@ -40,6 +40,18 @@ public class CompositionRootTests
     }
 
     [Fact]
+    public async Task TestRunnersForDotNetAndPythonAreRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        var runners = scope.ServiceProvider.GetServices<ITestRunner>().ToList();
+
+        runners.Select(r => r.LanguageId).Should().Contain("dotnet");
+        runners.Select(r => r.LanguageId).Should().Contain("python");
+    }
+
+    [Fact]
     public async Task CheckRunFetcherIsRegisteredInDiContainer()
     {
         await using var factory = new ReviewBotApplicationFactory();

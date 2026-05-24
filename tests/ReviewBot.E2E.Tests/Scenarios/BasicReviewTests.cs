@@ -117,6 +117,37 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
     }
 
     [Fact]
+    public async Task ReviewRequestedWithGitHubChecksGroundingIncludesChecksInPrompt()
+    {
+        await harness.ResetAsync();
+        ConfigureSuccessfulReview(
+            repoConfig: FixtureLoader.ReadText("repo-config-checks.yml"),
+            prFiles: FixtureLoader.ReadText("pr-files-dotnet.json"),
+            llmReviewJson: FixtureLoader.ReadText("llm-response-two-comments.json"));
+        StubGitHubChecks(HeadSha);
+        using var client = harness.CreateClient();
+        var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
+
+        using var response = await sender.SendPullRequestAsync(
+            FixtureLoader.ReadText("webhook-pr-opened.json"),
+            deliveryId: "delivery-e2e-checks-grounding");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        await WorkerSyncHelper.WaitForRequestAsync(
+            harness.GitHubMock,
+            IsReviewPostPath);
+
+        var llmRequest = harness.LlmMock.LogEntries
+            .Where(entry => entry.RequestMessage is { Path: "/v1/chat/completions" })
+            .Select(entry => entry.RequestMessage!.Body)
+            .Single();
+        llmRequest.Should().Contain("## Project context");
+        llmRequest.Should().Contain("C# (.NET 10.0)");
+        llmRequest.Should().Contain("Checks: FAILED");
+        llmRequest.Should().Contain("check unit tests: failure");
+    }
+
+    [Fact]
     public async Task ReviewRequestedIsIdempotentForDuplicateDelivery()
     {
         await harness.ResetAsync();
@@ -374,6 +405,75 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
                 .WithStatusCode(200)
                 .WithHeader("Content-Type", "application/json")
                 .WithBody(RepositoryContentResponse(path, content)));
+    }
+
+    private void StubGitHubChecks(string headSha)
+    {
+        harness.GitHubMock
+            .Given(Request.Create()
+                .WithPath($"/repos/{Owner}/{Repo}/commits/{headSha}/check-runs")
+                .UsingGet())
+            .RespondWith(Response.Create()
+                .WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody($$"""
+                {
+                  "total_count": 2,
+                  "check_runs": [
+                    {
+                      "id": 101,
+                      "head_sha": "{{headSha}}",
+                      "external_id": "build",
+                      "url": "https://api.github.com/repos/owner/repo/check-runs/101",
+                      "html_url": "https://github.com/owner/repo/actions/runs/101",
+                      "details_url": "https://github.com/owner/repo/actions/runs/101",
+                      "status": "completed",
+                      "conclusion": "success",
+                      "started_at": "2026-05-23T12:00:00Z",
+                      "completed_at": "2026-05-23T12:02:00Z",
+                      "output": null,
+                      "name": "build",
+                      "check_suite": null,
+                      "app": null,
+                      "pull_requests": []
+                    },
+                    {
+                      "id": 102,
+                      "head_sha": "{{headSha}}",
+                      "external_id": "unit-tests",
+                      "url": "https://api.github.com/repos/owner/repo/check-runs/102",
+                      "html_url": "https://github.com/owner/repo/actions/runs/102",
+                      "details_url": "https://github.com/owner/repo/actions/runs/102",
+                      "status": "completed",
+                      "conclusion": "failure",
+                      "started_at": "2026-05-23T12:00:00Z",
+                      "completed_at": "2026-05-23T12:03:00Z",
+                      "output": null,
+                      "name": "unit tests",
+                      "check_suite": null,
+                      "app": null,
+                      "pull_requests": []
+                    }
+                  ]
+                }
+                """));
+
+        harness.GitHubMock
+            .Given(Request.Create()
+                .WithPath($"/repos/{Owner}/{Repo}/commits/{headSha}/status")
+                .UsingGet())
+            .RespondWith(Response.Create()
+                .WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody($$"""
+                {
+                  "state": "success",
+                  "sha": "{{headSha}}",
+                  "total_count": 0,
+                  "statuses": [],
+                  "repository": null
+                }
+                """));
     }
 
     private void StubOpenAiReview(string reviewJson)

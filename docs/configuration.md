@@ -193,15 +193,20 @@ grounding:
   # Default: false
   tests: false
 
-  # Tier 3 local execution (not yet implemented for any language runner).
-  # When enabled, ReviewBot will run local tests after a successful local build.
+  # Tier 3 local execution for supported language runners (.NET and Python).
+  # When enabled, ReviewBot runs local tests after a successful local build:
+  # .NET -> dotnet test --no-build --no-restore -c Release
+  # Python -> python3 -m pytest --tb=no -q --no-header when pytest config exists
   # This executes project code and should use the same security posture as build.
   # Setting local_tests: true implies tests: true.
   # Default: false
   local_tests: false
 
-  # Applies only to future local test runners, not GitHub Checks/status fetching.
-  # test_command: "dotnet test --no-build"
+  # Parsed for future command override support. Built-in local test runners
+  # currently use the language-specific commands listed above.
+  # test_command: "dotnet test"
+
+  # Applies only to local test runners, not GitHub Checks/status fetching.
   # test_timeout_seconds: 300
 ```
 
@@ -209,7 +214,7 @@ grounding:
 
 ## Tier 2 build and local-test grounding — security and deployment
 
-Setting `grounding.build: true` causes ReviewBot to clone the PR branch into a temporary directory on the worker host and run a build or type-check command against it. Future local test runners behind `grounding.local_tests: true` will execute test commands after a successful local build. These options are intentionally opt-in because **they execute arbitrary project code** on the host running ReviewBot.
+Setting `grounding.build: true` causes ReviewBot to clone the PR branch into a temporary directory on the worker host and run a build or type-check command against it. Local test runners behind `grounding.local_tests: true` execute test commands after a successful local build. These options are intentionally opt-in because **they execute arbitrary project code** on the host running ReviewBot.
 
 **Threat model:** a malicious contributor could craft a PR that runs code at build time — via MSBuild targets, Python `setup.py` hooks, or similar mechanisms — if `build: true` is enabled for that repository.
 

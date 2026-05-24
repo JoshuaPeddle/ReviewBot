@@ -2,7 +2,7 @@
 
 ## Current state (v2, 2026-05-23)
 
-Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, Phase 14 Steps 41–42, Phase 15 Steps 43–44, and Phase 16 Steps 45–47. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Phase 15 agentic context is wired end-to-end behind `review.agentic_context`: the primary LLM can request bounded repository files, the worker validates and filters paths, GitHub Contents fetches text files with a byte cap, and one final LLM pass produces the posted result. Phase 16 checks grounding now reads completed GitHub Checks and commit statuses behind `grounding.tests`, carries them through grounding, and exposes them in the review prompt without cloning or executing code. `DotNetTestRunner` is implemented, running `dotnet test --no-build --no-restore -c Release`, parsing the VSTest aggregate summary line, and returning timed-out or cancelled results safely. `PythonTestRunner` is implemented, detects pytest configuration before running `python3 -m pytest --tb=no -q --no-header`, parses pytest summary counts, and handles timeouts/cancellation safely. Local test runner registration in `Program.cs` remains Step 48. Step 47 targeted stop test passes; current full-suite verification is blocked by the pre-existing `DeliveryStoreCleanupServiceTests` timing flake under parallel full-solution execution. Docker image published on tags.
+Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, Phase 14 Steps 41–42, Phase 15 Steps 43–44, and Phase 16 Steps 45–48. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Phase 15 agentic context is wired end-to-end behind `review.agentic_context`: the primary LLM can request bounded repository files, the worker validates and filters paths, GitHub Contents fetches text files with a byte cap, and one final LLM pass produces the posted result. Phase 16 checks grounding now reads completed GitHub Checks and commit statuses behind `grounding.tests`, carries them through grounding, and exposes them in the review prompt without cloning or executing code. `DotNetTestRunner` is implemented and registered, running `dotnet test --no-build --no-restore -c Release`, parsing the VSTest aggregate summary line, and returning timed-out or cancelled results safely. `PythonTestRunner` is implemented and registered, detects pytest configuration before running `python3 -m pytest --tb=no -q --no-header`, parses pytest summary counts, and handles timeouts/cancellation safely. Step 48 stop test passes: `dotnet test --no-restore` completed with 345 passing, 0 failed, and 1 skipped Ollama E2E test. Docker image published on tags.
 
 Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 build runners (`DotNetBuildRunner`, `PythonBuildRunner`) are registered in `Program.cs`. `CompositeGroundingProvider` starts the workspace clone concurrently with Tier 1 `ExtractMetadataAsync`; on metadata failure the pre-started workspace is disposed; on clone failure `Build` is null and the review proceeds. `ReviewWorker` has a fast-exit when `files.Count == 0` after filtering (no grounding, no LLM call, no review post). Skip-reason counter (`reviewbot.jobs.skipped`) and grounding duration histogram (`reviewbot.grounding.duration_ms`) are live in `ReviewBotMetrics`.
 
@@ -850,32 +850,19 @@ Timeout from `GroundingConfig.TestTimeoutSeconds`. External cancellation propaga
 
 **Stop test:** `dotnet test tests/ReviewBot.Grounding.Tests/ReviewBot.Grounding.Tests.csproj --no-restore` passes: 111 passing, 0 failed. Full-suite verification was attempted twice with `dotnet test --no-restore`; both runs failed only in the pre-existing `ReviewBot.Persistence.Tests.DeliveryStoreCleanupServiceTests.RunsCleanupEachHourWithThirtyDayCutoff` timing flake, while the persistence project passed immediately on targeted rerun (`14 passing, 0 failed`) after the first full-suite attempt.
 
-### Step 48: Program.cs wiring and E2E scenario
+### Step 48: Program.cs wiring and E2E scenario ✓ Complete
 
-**`ReviewBot.Api/Program.cs`:**
+**Implemented in Step 48:**
+- Registered `DotNetTestRunner` and `PythonTestRunner` in `ReviewBot.Api/Program.cs` through the existing `AddTestRunner<T>()` grounding builder. `ICheckRunFetcher` was already registered from Step 45, so no duplicate composition change was needed.
+- Added an API composition-root test proving `IEnumerable<ITestRunner>` contains both `dotnet` and `python`, mirroring the existing build-runner registration test.
+- Updated `docs/configuration.md` so `grounding.local_tests` no longer says local runners are future work. The docs now list the built-in .NET and Python commands, keep the security warning tied to local code execution, and clarify that `test_timeout_seconds` affects local runners only.
+- Added `repo-config-checks.yml` and an E2E scenario that stubs Tier 1 .NET grounding plus GitHub Checks/status endpoints. The captured OpenAI-compatible LLM request body must contain `## Project context`, `C# (.NET 10.0)`, `Checks: FAILED`, and the failed check name before the review is posted.
 
-```csharp
-builder.Services
-    .AddSingleton<ICheckRunFetcher, CheckRunFetcher>();
+**Corrected implementation assumptions discovered during Step 48:**
+- `ICheckRunFetcher` was already registered in `Program.cs` by Step 45; Step 48 only needed local test-runner DI wiring.
+- `grounding.test_command` is parsed from repo YAML but the current .NET and Python test runners still use their fixed language-specific commands. Docs now avoid claiming command overrides are honored; this remains an open follow-up/risk.
 
-builder.Services
-    .AddGrounding()
-    .AddLanguageDetector<DotNetLanguageDetector>()
-    .AddLanguageDetector<PythonLanguageDetector>()
-    .AddBuildRunner<DotNetBuildRunner>()
-    .AddBuildRunner<PythonBuildRunner>()
-    .AddTestRunner<DotNetTestRunner>()
-    .AddTestRunner<PythonTestRunner>();
-```
-
-**`docs/configuration.md`:** Update grounding docs:
-- `grounding.tests: true` reads GitHub Checks/statuses for the PR head SHA and does not execute project code.
-- `grounding.local_tests: true` runs the local language test runner after a successful build and should use the same security guidance as `grounding.build`.
-- `grounding.test_command` and `grounding.test_timeout_seconds` apply only to local tests.
-
-**E2E scenario** (extends Phase 13 harness, grounding test path):
-- Stub GitHub Contents API to return `directory-build-props.xml` (net10.0); stub root tree to include `Directory.Build.props`; stub GitHub Checks API with one successful and one failed check. Local build/test grounding is not exercised in E2E (requires SDKs and executes code in CI).
-- Assert captured LLM request body contains `## Project context` with `C# (.NET 10.0)` and `Checks: FAILED`.
+**Stop test:** `dotnet test --no-restore` passes: 345 passing, 0 failed, 1 skipped Ollama E2E test. Targeted suites also passed during implementation: API (63) and E2E (12).
 
 ---
 
@@ -896,7 +883,9 @@ builder.Services
 - **Closed (Phase 14 Step 42)**: `IReviewLlm.CompleteRawAsync` is implemented by Anthropic, OpenAI-compatible, and stub LLMs; worker self-critique uses it only behind `review.self_critique`.
 - **Closed (Phase 15 Step 44)**: Agentic context gives the model influence over which repository files are fetched. Step 44 shipped worker-side path validation, ignore-glob enforcement, duplicate/cap handling, secret-looking path denial, and fetcher-side file-size, binary, malformed base64, invalid UTF-8, and 404 rejection before fetched content is sent to the LLM.
 - **Open (Phase 16)**: Local build/test execution requires SDKs on the worker and executes project code. Keep local-test E2E scenarios behind `[Trait("Category", "RequiresSdk")]` and a CI flag; default Tier 3 E2E should use mocked GitHub Checks/statuses.
-- **Closed (Phase 16 Step 45)**: GitHub Checks/status grounding must not execute repository code. Step 45 reads only GitHub API check/status results behind `grounding.tests`; local execution is separated behind `grounding.local_tests` and has no registered language runners yet.
+- **Open (Phase 16 Step 48)**: `grounding.test_command` is parsed from repo YAML but is not honored by `DotNetTestRunner` or `PythonTestRunner`; both built-in runners currently use their fixed language-specific commands. Either implement command overrides with safe argument parsing or remove/deprecate the config key before documenting it as supported behavior.
+- **Closed (Phase 16 Step 45)**: GitHub Checks/status grounding must not execute repository code. Step 45 reads only GitHub API check/status results behind `grounding.tests`; local execution is separated behind `grounding.local_tests`.
+- **Closed (Phase 16 Step 48)**: Local test runners were implemented but not registered in production DI. `Program.cs` now registers both `DotNetTestRunner` and `PythonTestRunner`, with composition-root coverage.
 - **Open (Phase 16 Step 45)**: Branch-protection "required" check context discovery is not implemented. The check fetcher currently treats any completed failing check/status as failed and any completed successful check/status as passed.
 
 ## What is intentionally excluded

@@ -81,8 +81,9 @@ public class DeliveryStoreCleanupServiceTests
 
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {
+            var timer = base.CreateTimer(callback, state, dueTime, period);
             _timers.Writer.TryWrite(true);
-            return base.CreateTimer(callback, state, dueTime, period);
+            return timer;
         }
     }
 }

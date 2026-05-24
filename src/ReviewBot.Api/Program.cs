@@ -85,7 +85,9 @@ builder.Services.AddGrounding()
     .AddLanguageDetector<DotNetLanguageDetector>()
     .AddLanguageDetector<PythonLanguageDetector>()
     .AddBuildRunner<DotNetBuildRunner>()
-    .AddBuildRunner<PythonBuildRunner>();
+    .AddBuildRunner<PythonBuildRunner>()
+    .AddTestRunner<DotNetTestRunner>()
+    .AddTestRunner<PythonTestRunner>();
 builder.Services.AddSingleton<ReviewBotMetrics>();
 builder.Services.AddHostedService<ReviewWorker>();
 builder.Services.AddHostedService<DeliveryStoreCleanupService>();
