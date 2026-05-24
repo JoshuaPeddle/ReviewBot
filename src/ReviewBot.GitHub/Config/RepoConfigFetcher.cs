@@ -185,7 +185,9 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
                 owner,
                 repo,
                 sha,
-                path));
+                path),
+            fileConfig.Review?.RequestChangesOnError ?? defaults.Review.RequestChangesOnError,
+            fileConfig.Review?.ApproveIfClean ?? defaults.Review.ApproveIfClean);
 
         var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
 
@@ -390,6 +392,10 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public int? MaxContextRequests { get; set; }
 
         public int? MaxContextFileBytes { get; set; }
+
+        public bool? RequestChangesOnError { get; set; }
+
+        public bool? ApproveIfClean { get; set; }
     }
 
     private sealed class TriggerConfigFile

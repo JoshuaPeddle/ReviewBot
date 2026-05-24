@@ -47,6 +47,8 @@ public class RepoConfigFetcherTests
               agentic_context: true
               max_context_requests: 3
               max_context_file_bytes: 12345
+              request_changes_on_error: true
+              approve_if_clean: true
               trigger:
                 on_review_request: false
                 on_push: true
@@ -76,7 +78,9 @@ public class RepoConfigFetcherTests
             Trigger: new TriggerConfig(OnReviewRequest: false, OnPush: true),
             AgenticContext: true,
             MaxContextRequests: 3,
-            MaxContextFileBytes: 12345));
+            MaxContextFileBytes: 12345,
+            RequestChangesOnError: true,
+            ApproveIfClean: true));
         config.Review.AgenticContext.Should().BeTrue();
         config.Review.MaxContextRequests.Should().Be(3);
         config.Review.MaxContextFileBytes.Should().Be(12345);
@@ -335,6 +339,26 @@ public class RepoConfigFetcherTests
         config.Review.AgenticContext.Should().BeTrue();
         config.Review.MaxContextRequests.Should().Be(4);
         config.Review.MaxContextFileBytes.Should().Be(64_000);
+    }
+
+    [Fact]
+    public async Task FetchAsyncMapsReviewStateFlags()
+    {
+        const string yaml = """
+            review:
+              request_changes_on_error: true
+              approve_if_clean: true
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Review.RequestChangesOnError.Should().BeTrue();
+        config.Review.ApproveIfClean.Should().BeTrue();
     }
 
     [Fact]

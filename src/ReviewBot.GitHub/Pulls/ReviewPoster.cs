@@ -31,7 +31,8 @@ public sealed class ReviewPoster : IReviewPoster
         ReviewResult result,
         IReadOnlyList<FileChange> files,
         string installationToken,
-        CancellationToken ct)
+        CancellationToken ct,
+        PullRequestReviewEvent reviewEvent = PullRequestReviewEvent.Comment)
     {
         ValidateInputs(owner, repo, prNumber, commitSha, result, files, installationToken);
         ct.ThrowIfCancellationRequested();
@@ -74,7 +75,7 @@ public sealed class ReviewPoster : IReviewPoster
         }
 
         var summary = result.Summary.Trim();
-        if (acceptedComments.Count == 0 && summary.Length == 0)
+        if (reviewEvent == PullRequestReviewEvent.Comment && acceptedComments.Count == 0 && summary.Length == 0)
         {
             logger.LogWarning(
                 "Skipping review post for PR {Owner}/{Repo}#{PrNumber} because there is no summary or valid inline comment",
@@ -84,7 +85,7 @@ public sealed class ReviewPoster : IReviewPoster
             return;
         }
 
-        var payload = BuildPayload(commitSha, summary, acceptedComments);
+        var payload = BuildPayload(commitSha, summary, acceptedComments, reviewEvent);
         var client = clientFactory.CreateForInstallation(installationToken);
         var reviewUri = BuildReviewUri(owner, repo, prNumber);
 
@@ -124,12 +125,13 @@ public sealed class ReviewPoster : IReviewPoster
     private static Dictionary<string, object> BuildPayload(
         string commitSha,
         string summary,
-        IReadOnlyList<InlineComment> comments) =>
+        IReadOnlyList<InlineComment> comments,
+        PullRequestReviewEvent reviewEvent) =>
         new(StringComparer.Ordinal)
         {
             ["commit_id"] = commitSha,
             ["body"] = summary.Length == 0 ? DefaultBody : summary,
-            ["event"] = "COMMENT",
+            ["event"] = ToGitHubReviewEventValue(reviewEvent),
             ["comments"] = comments
                 .Select(comment => new Dictionary<string, object>(StringComparer.Ordinal)
                 {
@@ -139,6 +141,15 @@ public sealed class ReviewPoster : IReviewPoster
                     ["body"] = comment.Body,
                 })
                 .ToArray(),
+        };
+
+    private static string ToGitHubReviewEventValue(PullRequestReviewEvent reviewEvent) =>
+        reviewEvent switch
+        {
+            PullRequestReviewEvent.Approve => "APPROVE",
+            PullRequestReviewEvent.RequestChanges => "REQUEST_CHANGES",
+            PullRequestReviewEvent.Comment => "COMMENT",
+            _ => "COMMENT",
         };
 
     private static Uri BuildReviewUri(string owner, string repo, int prNumber) =>

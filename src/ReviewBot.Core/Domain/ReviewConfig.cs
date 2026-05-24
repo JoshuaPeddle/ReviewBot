@@ -73,7 +73,9 @@ public sealed record ReviewOutputConfig(
     bool SelfCritique = false,
     bool AgenticContext = false,
     int MaxContextRequests = 5,
-    int MaxContextFileBytes = 50_000);
+    int MaxContextFileBytes = 50_000,
+    bool RequestChangesOnError = false,
+    bool ApproveIfClean = false);
 
 public sealed record TriggerConfig(
     bool OnReviewRequest,

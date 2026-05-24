@@ -44,6 +44,30 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
     }
 
     [Fact]
+    public async Task ReviewRequestedWithRequestChangesOnErrorPostsRequestChangesEvent()
+    {
+        await harness.ResetAsync();
+        ConfigureSuccessfulReview(
+            repoConfig: FixtureLoader.ReadText("repo-config-request-changes.yml"),
+            prFiles: FixtureLoader.ReadText("pr-files-dotnet.json"),
+            llmReviewJson: FixtureLoader.ReadText("llm-response-error-comment.json"));
+        using var client = harness.CreateClient();
+        var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
+
+        using var response = await sender.SendPullRequestAsync(
+            FixtureLoader.ReadText("webhook-pr-opened.json"),
+            deliveryId: "delivery-e2e-request-changes-on-error");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        await WorkerSyncHelper.WaitForRequestAsync(
+            harness.GitHubMock,
+            IsReviewPostPath);
+
+        using var reviewPayload = GetSingleRequestJson(harness.GitHubMock, "POST", IsReviewPostPath);
+        reviewPayload.RootElement.GetProperty("event").GetString().Should().Be("REQUEST_CHANGES");
+    }
+
+    [Fact]
     public async Task ReviewRequestedWithSelfCritiquePostsHighConfidenceAndRetainedMediumComment()
     {
         await harness.ResetAsync();

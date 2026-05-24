@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Options;
+using Octokit;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
@@ -327,10 +328,11 @@ public sealed class ReviewWorker : BackgroundService
             result = AppendRereviewHint(result);
         }
 
+        var reviewEvent = DetermineReviewEvent(result.Comments, config);
         metrics.RecordCommentsPosted(result.Comments.Count);
 
         await reviewPoster
-            .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct)
+            .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct, reviewEvent)
             .ConfigureAwait(false);
 
         await prReviewStateStore
@@ -342,6 +344,23 @@ public sealed class ReviewWorker : BackgroundService
     }
 
     private enum JobProcessStatus { Success, Skipped }
+
+    private static PullRequestReviewEvent DetermineReviewEvent(
+        IReadOnlyList<InlineComment> finalComments,
+        ReviewConfig config)
+    {
+        if (config.Review.RequestChangesOnError && finalComments.Any(c => c.Severity == Severity.Error))
+        {
+            return PullRequestReviewEvent.RequestChanges;
+        }
+
+        if (config.Review.ApproveIfClean && finalComments.Count == 0)
+        {
+            return PullRequestReviewEvent.Approve;
+        }
+
+        return PullRequestReviewEvent.Comment;
+    }
 
     private static IReadOnlyList<FileChange> ApplyIgnoreGlobs(
         IReadOnlyList<FileChange> files,

@@ -135,6 +135,15 @@ review:
   # Maximum decoded size, in bytes, for each fetched context file.
   max_context_file_bytes: 50000
 
+  # Post REQUEST_CHANGES instead of COMMENT when any surviving inline comment
+  # has severity: error. This can block merges on protected branches.
+  # Default: false
+  request_changes_on_error: false
+
+  # Post APPROVE instead of COMMENT when no inline comments survive filtering.
+  # Default: false
+  approve_if_clean: false
+
   trigger:
     # Review when the bot is explicitly added as a reviewer.
     on_review_request: true

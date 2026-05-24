@@ -1,0 +1,10 @@
+model:
+  provider: openai
+  name: e2e-openai-model
+review:
+  request_changes_on_error: true
+  trigger:
+    on_push: true
+grounding:
+  enabled: true
+  build: false

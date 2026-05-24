@@ -3,6 +3,7 @@ using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
+using Octokit;
 using ReviewBot.Api.Workers;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
@@ -338,6 +339,138 @@ public class ReviewWorkerTests
 
         postedResult!.Summary.Should().BeEmpty();
         postedResult.Comments.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RequestChangesOnErrorPostsRequestChangesWhenFinalCommentHasErrorSeverity()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { RequestChangesOnError = true }
+        };
+        PullRequestReviewEvent? postedEvent = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Blocking issue.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "This can corrupt data.", Severity.Error)]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default, Arg.Any<PullRequestReviewEvent>())
+            .ReturnsForAnyArgs(call =>
+            {
+                postedEvent = call.ArgAt<PullRequestReviewEvent>(8);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedEvent.Should().Be(PullRequestReviewEvent.RequestChanges);
+    }
+
+    [Fact]
+    public async Task RequestChangesOnErrorKeepsCommentEventWhenOnlyWarningCommentsSurvive()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { RequestChangesOnError = true }
+        };
+        PullRequestReviewEvent? postedEvent = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Advisory issue.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "Consider simplifying this.", Severity.Warning)]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default, Arg.Any<PullRequestReviewEvent>())
+            .ReturnsForAnyArgs(call =>
+            {
+                postedEvent = call.ArgAt<PullRequestReviewEvent>(8);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedEvent.Should().Be(PullRequestReviewEvent.Comment);
+    }
+
+    [Fact]
+    public async Task ApproveIfCleanPostsApproveWhenNoCommentsSurvive()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { ApproveIfClean = true }
+        };
+        PullRequestReviewEvent? postedEvent = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("No issues found.", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default, Arg.Any<PullRequestReviewEvent>())
+            .ReturnsForAnyArgs(call =>
+            {
+                postedEvent = call.ArgAt<PullRequestReviewEvent>(8);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedEvent.Should().Be(PullRequestReviewEvent.Approve);
+    }
+
+    [Fact]
+    public async Task EmptyCommentSetKeepsCommentEventWhenApproveIfCleanIsDisabled()
+    {
+        await using var fixture = new WorkerFixture();
+        PullRequestReviewEvent? postedEvent = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("No issues found.", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default, Arg.Any<PullRequestReviewEvent>())
+            .ReturnsForAnyArgs(call =>
+            {
+                postedEvent = call.ArgAt<PullRequestReviewEvent>(8);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedEvent.Should().Be(PullRequestReviewEvent.Comment);
     }
 
     [Fact]

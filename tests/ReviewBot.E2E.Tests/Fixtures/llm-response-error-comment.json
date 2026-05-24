@@ -1,0 +1,13 @@
+{
+  "summary": "Found a blocking correctness issue.",
+  "comments": [
+    {
+      "path": "src/Services/UserService.cs",
+      "line": 11,
+      "side": "RIGHT",
+      "severity": "error",
+      "confidence": "high",
+      "body": "Returning an empty string for a missing user hides an error path that callers need to handle explicitly."
+    }
+  ]
+}

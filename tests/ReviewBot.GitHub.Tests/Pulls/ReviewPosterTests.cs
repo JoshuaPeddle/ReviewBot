@@ -132,6 +132,53 @@ public class ReviewPosterTests
     }
 
     [Fact]
+    public async Task PostAsyncPassesReviewEventThroughToPayload()
+    {
+        var connection = CreateSuccessfulConnection();
+        var poster = CreatePoster(connection);
+        var result = new ReviewResult(
+            "Security issue found.",
+            [new InlineComment("src/a.cs", 10, "RIGHT", "Validate this input.", Severity.Error)]);
+
+        await poster.PostAsync(
+            "octo",
+            "repo",
+            42,
+            "head-sha",
+            result,
+            [CreateFile("src/a.cs", 10)],
+            "ghs_token",
+            CancellationToken.None,
+            PullRequestReviewEvent.RequestChanges);
+
+        var payload = await CapturePayloadAsync(connection);
+        payload["event"].Should().Be("REQUEST_CHANGES");
+    }
+
+    [Fact]
+    public async Task PostAsyncPostsApprovalEvenWhenSummaryAndCommentsAreEmpty()
+    {
+        var connection = CreateSuccessfulConnection();
+        var poster = CreatePoster(connection);
+        var result = new ReviewResult("   ", []);
+
+        await poster.PostAsync(
+            "octo",
+            "repo",
+            42,
+            "head-sha",
+            result,
+            [CreateFile("src/a.cs", 10)],
+            "ghs_token",
+            CancellationToken.None,
+            PullRequestReviewEvent.Approve);
+
+        var payload = await CapturePayloadAsync(connection);
+        payload["event"].Should().Be("APPROVE");
+        payload["body"].Should().Be("Automated review by ReviewBot.");
+    }
+
+    [Fact]
     public async Task PostAsyncUsesDefaultBodyWhenSummaryIsEmptyButCommentsAreValid()
     {
         var connection = CreateSuccessfulConnection();

@@ -1,8 +1,8 @@
 # ReviewBot Development Plan
 
-## Current state (v2, 2026-05-24)
+## Current state (v3, 2026-05-24)
 
-Phases 1–16 complete (Steps 1–48 + command-override follow-up). Stop test: `dotnet test --no-restore` → 352 passing, 0 failed, 1 skipped (Ollama E2E).
+Phases 1–17 complete (Steps 1–49 + command-override follow-up). Stop test: `dotnet test --no-restore` → 360 passing, 0 failed, 1 skipped (Ollama E2E).
 
 **Capabilities shipped:**
 - GitHub App webhook handling, signature validation, idempotent delivery tracking (SQLite)
@@ -14,6 +14,7 @@ Phases 1–16 complete (Steps 1–48 + command-override follow-up). Stop test: `
 - Grounding Tier 1 (language metadata), Tier 2 (local builds: .NET, Python), Tier 3 (GitHub Checks/statuses + local test runners); `build_command`/`test_command` overrides honored
 - E2E infrastructure: WireMock + `WebApplicationFactory<Program>`; baseline scenarios cover review-requested, idempotency, empty diff, all-ignored, self-critique, agentic context, GitHub Checks
 - Metrics: skip-reason counter, grounding duration histogram, LLM duration histogram (phase label), incremental-review type counter
+- Review-state escalation from surviving comment severity: opt-in `review.request_changes_on_error` maps error-severity comments to `REQUEST_CHANGES`; opt-in `review.approve_if_clean` maps clean reviews to `APPROVE`
 
 **Key implementation decisions:**
 - EF Core migrations must be generated via `dotnet ef migrations add`; hand-crafted snapshots fail with `PendingModelChangesWarning` promoted to error.
@@ -22,6 +23,8 @@ Phases 1–16 complete (Steps 1–48 + command-override follow-up). Stop test: `
 - `review_requested` event (not `opened`) triggers the first-review path in the webhook handler.
 - Anthropic LLM adapter has no configurable base URL; WireMock E2E scenarios must use the OpenAI-compatible provider via repo config.
 - `OpenAiLlmOptions` is bound eagerly at startup; E2E overrides must replace the singleton in `ConfigureTestServices`.
+- `ReviewPoster` sends raw review JSON through Octokit's connection; map `PullRequestReviewEvent` to GitHub's uppercase wire values (`COMMENT`, `REQUEST_CHANGES`, `APPROVE`) explicitly.
+- Non-`COMMENT` reviews must still post when they have no accepted comments and no summary; clean approvals use the default body instead of being skipped.
 
 ---
 
@@ -37,13 +40,27 @@ Phases 1–16 complete (Steps 1–48 + command-override follow-up). Stop test: `
 
 ---
 
-## Phase 17: Review state from severity
+## Phase 17: Review state from severity — complete
 
 **The problem.** The bot always posts as `COMMENT`, making it advisory-only regardless of finding severity. A security vulnerability and a style nit produce the same GitHub review state.
 
 **The approach.** Map the highest-severity surviving comment to the GitHub review event: `error` → `REQUEST_CHANGES`, warning/info only → `COMMENT`, no surviving comments → optionally `APPROVE`. Both escalation behaviors are opt-in.
 
-### Step 49
+### Step 49 — complete (2026-05-24)
+
+Implemented end-to-end:
+- Added `ReviewOutputConfig.RequestChangesOnError` and `ApproveIfClean`, parsed from `review.request_changes_on_error` and `review.approve_if_clean`.
+- Worker now chooses `REQUEST_CHANGES` when the final filtered comments include `Severity.Error` and escalation is enabled, `APPROVE` when no comments survive and clean approval is enabled, otherwise `COMMENT`.
+- `ReviewPoster.PostAsync` accepts a `PullRequestReviewEvent` and writes the corresponding GitHub review `event` field.
+- Documentation covers both repo config flags and calls out that `request_changes_on_error` can block merges.
+- Unit tests cover worker event selection, poster event serialization/empty approval posting, and YAML parsing.
+- E2E test asserts the review POST body contains `REQUEST_CHANGES` for an error-severity LLM comment with `request_changes_on_error: true`.
+
+Corrected assumptions discovered during implementation:
+- Because the poster sends raw JSON rather than Octokit's typed review model, the event must be serialized as GitHub's uppercase API strings, not `PullRequestReviewEvent.ToString()`.
+- `approve_if_clean` can intentionally produce a review with no inline comments; the poster's previous "empty summary and no valid comments" skip is only correct for advisory `COMMENT` reviews.
+
+Stop test: `dotnet test --no-restore` passes (360 passing, 0 failed, 1 skipped Ollama E2E).
 
 **`ReviewBot.Core/Domain/ReviewConfig.cs`:** Add to `ReviewOutputConfig`:
 ```csharp
@@ -51,7 +68,7 @@ bool RequestChangesOnError = false
 bool ApproveIfClean = false
 ```
 
-**`ReviewBot.GitHub/Pulls/ReviewPoster.cs`:** Add `PullRequestReviewEvent reviewEvent` parameter to `PostAsync`; pass through to Octokit's `PullRequestReviewCreate.Event`.
+**`ReviewBot.GitHub/Pulls/ReviewPoster.cs`:** Add `PullRequestReviewEvent reviewEvent` parameter to `PostAsync`; serialize it into the raw review payload's `event` field.
 
 **`ReviewBot.Api/Workers/ReviewWorker.cs`:** After final comment filtering:
 ```csharp
@@ -68,7 +85,7 @@ else if (config.Review.ApproveIfClean && finalComments.Length == 0)
 
 **Tests:**
 - Worker: error comment + flag → `RequestChanges`; warning only → `Comment`; empty + `ApproveIfClean` → `Approve`; empty without flag → `Comment`.
-- Poster: `reviewEvent` passed through to Octokit.
+- Poster: `reviewEvent` serialized to GitHub's review payload.
 - Config: YAML parsing for both flags.
 
 **E2E:** assert `event` field in `POST /repos/owner/repo/pulls/1/reviews` body is `REQUEST_CHANGES` when repo config has `request_changes_on_error: true` and LLM returns an error-severity comment.
