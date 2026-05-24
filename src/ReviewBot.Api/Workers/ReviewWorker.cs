@@ -136,8 +136,22 @@ public sealed class ReviewWorker : BackgroundService
             job.Reason);
 
         var installationToken = await tokenProvider.GetTokenAsync(job.InstallationId, ct).ConfigureAwait(false);
+
+        // Comment-triggered reviews arrive without a head SHA; resolve it from the API before
+        // fetching config. For push/open triggers the SHA comes from the event payload, so we
+        // defer the metadata call until after the cheap enabled/trigger checks.
+        PullRequestMetadata? prefetchedMetadata = null;
+        var configSha = job.HeadSha;
+        if (configSha is null)
+        {
+            prefetchedMetadata = await pullRequestFetcher
+                .FetchMetadataAsync(job.Owner, job.Repo, job.PrNumber, installationToken.Token, ct)
+                .ConfigureAwait(false);
+            configSha = prefetchedMetadata.HeadSha;
+        }
+
         var config = await repoConfigFetcher
-            .FetchAsync(job.Owner, job.Repo, job.HeadSha, installationToken.Token, ct)
+            .FetchAsync(job.Owner, job.Repo, configSha, installationToken.Token, ct)
             .ConfigureAwait(false);
 
         if (!config.Enabled)
@@ -170,7 +184,7 @@ public sealed class ReviewWorker : BackgroundService
             .GetLastShaAsync(job.InstallationId, repoFullName, job.PrNumber, ct)
             .ConfigureAwait(false);
 
-        var metadata = await pullRequestFetcher
+        var metadata = prefetchedMetadata ?? await pullRequestFetcher
             .FetchMetadataAsync(job.Owner, job.Repo, job.PrNumber, installationToken.Token, ct)
             .ConfigureAwait(false);
 
@@ -308,6 +322,11 @@ public sealed class ReviewWorker : BackgroundService
         candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
             .ConfigureAwait(false);
         result = ApplyOutputConfig(result, candidateComments, config);
+        if (config.Review.Summary)
+        {
+            result = AppendRereviewHint(result);
+        }
+
         metrics.RecordCommentsPosted(result.Comments.Count);
 
         await reviewPoster
@@ -465,6 +484,15 @@ public sealed class ReviewWorker : BackgroundService
             ? note
             : $"{result.Summary.TrimEnd()}\n\n{note}";
 
+        return new ReviewResult(summary, result.Comments, result.ContextRequests);
+    }
+
+    private static ReviewResult AppendRereviewHint(ReviewResult result)
+    {
+        const string hint = "*To re-request a review, comment `/review`.*";
+        var summary = string.IsNullOrWhiteSpace(result.Summary)
+            ? hint
+            : $"{result.Summary.TrimEnd()}\n\n---\n{hint}";
         return new ReviewResult(summary, result.Comments, result.ContextRequests);
     }
 

@@ -51,13 +51,13 @@ public class WebhookEndpointTests
     }
 
     [Fact]
-    public async Task ReviewRequestedForConfiguredBotReturnsAcceptedAndEnqueuesJob()
+    public async Task OpenedPrReturnsAcceptedAndEnqueuesJob()
     {
         using var queue = new CapturingReviewJobQueue();
         var store = new CapturingDeliveryStore();
         await using var factory = CreateFactory(queue, store);
         using var client = factory.CreateClient();
-        var payload = CreatePullRequestPayload("review_requested", BotSlug);
+        var payload = CreatePullRequestPayload("opened", requestedReviewer: null);
         using var request = CreateWebhookRequest(payload);
 
         using var response = await client.SendAsync(request);
@@ -70,18 +70,87 @@ public class WebhookEndpointTests
             Repo: "reviewbot",
             PrNumber: 42,
             HeadSha: "head-sha-abc",
-            Reason: "review_requested"));
+            Reason: "opened"));
         store.RecordedDeliveryIds.Should().Equal("delivery-123");
     }
 
     [Fact]
-    public async Task ReviewRequestedForDifferentReviewerReturnsNoContent()
+    public async Task ReviewRequestedActionReturnsNoContent()
     {
         using var queue = new CapturingReviewJobQueue();
         await using var factory = CreateFactory(queue);
         using var client = factory.CreateClient();
-        var payload = CreatePullRequestPayload("review_requested", "someone-else");
+        var payload = CreatePullRequestPayload("review_requested", BotSlug);
         using var request = CreateWebhookRequest(payload);
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        queue.Jobs.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ReviewCommentReturnsAcceptedAndEnqueuesJobWithNullSha()
+    {
+        using var queue = new CapturingReviewJobQueue();
+        var store = new CapturingDeliveryStore();
+        await using var factory = CreateFactory(queue, store);
+        using var client = factory.CreateClient();
+        var payload = CreateIssueCommentPayload("created", "/review", isPr: true);
+        using var request = CreateWebhookRequest(payload, eventName: "issue_comment");
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        queue.Jobs.Should().ContainSingle().Which.Should().Be(new ReviewJob(
+            DeliveryId: "delivery-123",
+            InstallationId: 98765,
+            Owner: "octo-org",
+            Repo: "reviewbot",
+            PrNumber: 42,
+            HeadSha: null,
+            Reason: "review_comment"));
+        store.RecordedDeliveryIds.Should().Equal("delivery-123");
+    }
+
+    [Fact]
+    public async Task ReviewCommentOnIssueReturnsNoContent()
+    {
+        using var queue = new CapturingReviewJobQueue();
+        await using var factory = CreateFactory(queue);
+        using var client = factory.CreateClient();
+        var payload = CreateIssueCommentPayload("created", "/review", isPr: false);
+        using var request = CreateWebhookRequest(payload, eventName: "issue_comment");
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        queue.Jobs.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ReviewCommentWithWrongCommandReturnsNoContent()
+    {
+        using var queue = new CapturingReviewJobQueue();
+        await using var factory = CreateFactory(queue);
+        using var client = factory.CreateClient();
+        var payload = CreateIssueCommentPayload("created", "LGTM!", isPr: true);
+        using var request = CreateWebhookRequest(payload, eventName: "issue_comment");
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        queue.Jobs.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task EditedReviewCommentReturnsNoContent()
+    {
+        using var queue = new CapturingReviewJobQueue();
+        await using var factory = CreateFactory(queue);
+        using var client = factory.CreateClient();
+        var payload = CreateIssueCommentPayload("edited", "/review", isPr: true);
+        using var request = CreateWebhookRequest(payload, eventName: "issue_comment");
 
         using var response = await client.SendAsync(request);
 
@@ -111,7 +180,7 @@ public class WebhookEndpointTests
         var store = new CapturingDeliveryStore(recordAsNew: false);
         await using var factory = CreateFactory(queue, store);
         using var client = factory.CreateClient();
-        var payload = CreatePullRequestPayload("review_requested", BotSlug);
+        var payload = CreatePullRequestPayload("opened", requestedReviewer: null);
         using var request = CreateWebhookRequest(payload);
 
         using var response = await client.SendAsync(request);
@@ -214,6 +283,39 @@ public class WebhookEndpointTests
               "requested_reviewer": {{requestedReviewerJson}},
               "sender": {
                 "login": "developer"
+              }
+            }
+            """;
+    }
+
+    private static string CreateIssueCommentPayload(string action, string commentBody, bool isPr)
+    {
+        var prJson = isPr
+            ? """
+              ,
+                      "pull_request": {
+                        "url": "https://api.github.com/repos/octo-org/reviewbot/pulls/42"
+                      }
+              """
+            : "";
+
+        return $$"""
+            {
+              "action": "{{action}}",
+              "installation": {
+                "id": 98765
+              },
+              "repository": {
+                "name": "reviewbot",
+                "owner": {
+                  "login": "octo-org"
+                }
+              },
+              "issue": {
+                "number": 42{{prJson}}
+              },
+              "comment": {
+                "body": "{{commentBody}}"
               }
             }
             """;
