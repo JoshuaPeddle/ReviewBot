@@ -1,0 +1,10 @@
+model:
+  provider: openai
+  name: e2e-openai-model
+review:
+  full_file_max_bytes: 10000
+  trigger:
+    on_push: true
+grounding:
+  enabled: true
+  build: false

@@ -187,7 +187,15 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
                 sha,
                 path),
             fileConfig.Review?.RequestChangesOnError ?? defaults.Review.RequestChangesOnError,
-            fileConfig.Review?.ApproveIfClean ?? defaults.Review.ApproveIfClean);
+            fileConfig.Review?.ApproveIfClean ?? defaults.Review.ApproveIfClean,
+            MergeNonNegativeInt(
+                fileConfig.Review?.FullFileMaxBytes,
+                defaults.Review.FullFileMaxBytes,
+                "review.full_file_max_bytes",
+                owner,
+                repo,
+                sha,
+                path));
 
         var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
 
@@ -260,6 +268,37 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         }
 
         if (value > 0)
+        {
+            return value.Value;
+        }
+
+        logger.LogWarning(
+            "Invalid ReviewBot config value {FieldName}={Value} in {Path} for {Owner}/{Repo} at {Sha}; using default {DefaultValue}",
+            fieldName,
+            value,
+            path,
+            owner,
+            repo,
+            sha,
+            defaultValue);
+        return defaultValue;
+    }
+
+    private int MergeNonNegativeInt(
+        int? value,
+        int defaultValue,
+        string fieldName,
+        string owner,
+        string repo,
+        string sha,
+        string path)
+    {
+        if (value is null)
+        {
+            return defaultValue;
+        }
+
+        if (value >= 0)
         {
             return value.Value;
         }
@@ -396,6 +435,8 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public bool? RequestChangesOnError { get; set; }
 
         public bool? ApproveIfClean { get; set; }
+
+        public int? FullFileMaxBytes { get; set; }
     }
 
     private sealed class TriggerConfigFile

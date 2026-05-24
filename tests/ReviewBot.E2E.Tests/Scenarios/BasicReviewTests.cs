@@ -68,6 +68,46 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
     }
 
     [Fact]
+    public async Task ReviewRequestedWithFullFileContextIncludesFullFileBeforeDiff()
+    {
+        await harness.ResetAsync();
+        ConfigureSuccessfulReview(
+            repoConfig: FixtureLoader.ReadText("repo-config-full-file.yml"),
+            prFiles: FixtureLoader.ReadText("pr-files-dotnet.json"),
+            llmReviewJson: FixtureLoader.ReadText("llm-response-two-comments.json"));
+        StubContextFile(
+            "src/Services/UserService.cs",
+            """
+            public sealed class UserService
+            {
+                private readonly IUserRepository _repository;
+
+                public string GetDisplayName(int userId) => string.Empty;
+            }
+            """);
+        using var client = harness.CreateClient();
+        var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
+
+        using var response = await sender.SendPullRequestAsync(
+            FixtureLoader.ReadText("webhook-pr-opened.json"),
+            deliveryId: "delivery-e2e-full-file-context");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        await WorkerSyncHelper.WaitForRequestAsync(
+            harness.GitHubMock,
+            IsReviewPostPath);
+
+        var llmRequest = harness.LlmMock.LogEntries
+            .Where(entry => entry.RequestMessage is { Path: "/v1/chat/completions" })
+            .Select(entry => entry.RequestMessage!.Body)
+            .Single();
+        llmRequest.Should().Contain("### Full file: src/Services/UserService.cs");
+        llmRequest.Should().Contain("private readonly IUserRepository _repository;");
+        llmRequest!.IndexOf("### Full file: src/Services/UserService.cs", StringComparison.Ordinal)
+            .Should().BeLessThan(llmRequest.IndexOf("@@ -8,6 +8,8 @@", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task ReviewRequestedWithSelfCritiquePostsHighConfidenceAndRetainedMediumComment()
     {
         await harness.ResetAsync();

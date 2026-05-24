@@ -99,6 +99,40 @@ public class PromptBuilderTests
     }
 
     [Fact]
+    public void FullFileContentsAreInsertedBeforeMatchingDiff()
+    {
+        var request = CreateRequest(
+            files:
+            [
+                CreateFile(path: "src/WithContext.cs"),
+                CreateFile(path: "src/DiffOnly.cs")
+            ],
+            fullFileContents: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/WithContext.cs"] = "public class WithContext\r\n{\r\n    private int value;\0\r\n}"
+            });
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.UserPrompt.Should().Contain("""
+=== src/WithContext.cs (Modified, +1 -1) ===
+### Full file: src/WithContext.cs
+```
+public class WithContext
+{
+    private int value;
+}
+```
+```diff
+""");
+        payload.UserPrompt.Should().NotContain("\0");
+        payload.UserPrompt.Should().NotContain("### Full file: src/DiffOnly.cs");
+        var fullFileIndex = payload.UserPrompt.IndexOf("### Full file: src/WithContext.cs", StringComparison.Ordinal);
+        var matchingDiffIndex = payload.UserPrompt.IndexOf("```diff", fullFileIndex, StringComparison.Ordinal);
+        fullFileIndex.Should().BeLessThan(matchingDiffIndex);
+    }
+
+    [Fact]
     public void BuildReturnsDeterministicSnapshot()
     {
         var config = ReviewConfig.Default with
@@ -480,14 +514,16 @@ public interface IReviewStore
         string title = "Add review bot",
         string body = "Please review the changes.",
         ReviewConfig? config = null,
-        IReadOnlyList<FileChange>? files = null) =>
+        IReadOnlyList<FileChange>? files = null,
+        IReadOnlyDictionary<string, string>? fullFileContents = null) =>
         new(
             PrTitle: title,
             PrBody: body,
             BaseSha: "base",
             HeadSha: "head",
             Files: files ?? [CreateFile(path: "src/ReviewBot.Core/Review.cs")],
-            Config: config ?? ReviewConfig.Default);
+            Config: config ?? ReviewConfig.Default,
+            FullFileContents: fullFileContents);
 
     private static FileChange CreateFile(
         string path,

@@ -1,8 +1,8 @@
 # ReviewBot Development Plan
 
-## Current state (v3, 2026-05-24)
+## Current state (v4, 2026-05-24)
 
-Phases 1–17 complete (Steps 1–49 + command-override follow-up). Stop test: `dotnet test --no-restore` → 360 passing, 0 failed, 1 skipped (Ollama E2E).
+Phases 1–18 complete (Steps 1–50 + command-override follow-up). Stop test: `dotnet test --no-restore` → 365 passing, 0 failed, 1 skipped (Ollama E2E).
 
 **Capabilities shipped:**
 - GitHub App webhook handling, signature validation, idempotent delivery tracking (SQLite)
@@ -15,6 +15,7 @@ Phases 1–17 complete (Steps 1–49 + command-override follow-up). Stop test: `
 - E2E infrastructure: WireMock + `WebApplicationFactory<Program>`; baseline scenarios cover review-requested, idempotency, empty diff, all-ignored, self-critique, agentic context, GitHub Checks
 - Metrics: skip-reason counter, grounding duration histogram, LLM duration histogram (phase label), incremental-review type counter
 - Review-state escalation from surviving comment severity: opt-in `review.request_changes_on_error` maps error-severity comments to `REQUEST_CHANGES`; opt-in `review.approve_if_clean` maps clean reviews to `APPROVE`
+- Full-file context for small changed files: opt-in `review.full_file_max_bytes` fetches non-deleted changed files under the threshold and prepends full text before each diff in the review prompt
 
 **Key implementation decisions:**
 - EF Core migrations must be generated via `dotnet ef migrations add`; hand-crafted snapshots fail with `PendingModelChangesWarning` promoted to error.
@@ -25,6 +26,8 @@ Phases 1–17 complete (Steps 1–49 + command-override follow-up). Stop test: `
 - `OpenAiLlmOptions` is bound eagerly at startup; E2E overrides must replace the singleton in `ConfigureTestServices`.
 - `ReviewPoster` sends raw review JSON through Octokit's connection; map `PullRequestReviewEvent` to GitHub's uppercase wire values (`COMMENT`, `REQUEST_CHANGES`, `APPROVE`) explicitly.
 - Non-`COMMENT` reviews must still post when they have no accepted comments and no summary; clean approvals use the default body instead of being skipped.
+- Full-file context is carried on `ReviewRequest` because LLM adapters own prompt construction through `PromptBuilder.Build(request)`.
+- `review.full_file_max_bytes` is a non-negative integer: `0` is a valid disabled value, unlike other positive-only review limits.
 
 ---
 
@@ -92,13 +95,29 @@ else if (config.Review.ApproveIfClean && finalComments.Length == 0)
 
 ---
 
-## Phase 18: Full-file context for small modified files
+## Phase 18: Full-file context for small modified files — complete
 
 **The problem.** Diffs contain only changed lines plus a few lines of context. A one-line change in a 50-line file leaves the model unable to see the class signature or field declarations 20 lines away, producing false positives on issues already handled nearby.
 
 **The approach.** For modified files under a configurable byte threshold, fetch the full file content via the Contents API (already wired from Phase 15) and prepend it to that file's diff in the prompt. Disabled by default.
 
-### Step 50
+### Step 50 — complete (2026-05-24)
+
+Implemented end-to-end:
+- Added `ReviewOutputConfig.FullFileMaxBytes` with default `0` (disabled) and parsed `review.full_file_max_bytes` from repo YAML.
+- Worker now selects non-deleted files whose UTF-8 patch byte estimate is at or below the threshold, fetches full content via `PullRequestFetcher.GetFileContentsAsync`, and continues diff-only if fetching fails or every candidate is rejected as missing, oversized, binary, or invalid UTF-8.
+- `ReviewRequest` now carries optional full-file content so existing LLM adapters can continue calling `PromptBuilder.Build(request)`.
+- `PromptBuilder` prepends `### Full file: {path}` fenced content before the matching diff section and sanitizes null bytes/newlines using the same fetched-content sanitizer as agentic context.
+- Documentation covers `review.full_file_max_bytes` and warns that it increases prompt size.
+- Unit tests cover prompt placement, worker selection/disabled behavior, and config parsing including valid `0`.
+- E2E test stubs the Contents API for a small `.cs` file and asserts the OpenAI-compatible request body contains the full-file section before the diff hunk.
+
+Corrected assumptions discovered during implementation:
+- The worker does not build the primary prompt directly; the full-file map must travel on `ReviewRequest` for the LLM adapters to include it.
+- The new numeric option cannot reuse the existing positive-only config merge helper because explicit `0` is a valid disabled state.
+- No new risk was opened. Prompt-size growth is mitigated by default-disabled behavior and the per-repo byte threshold.
+
+Stop test: `dotnet test --no-restore` passes (365 passing, 0 failed, 1 skipped Ollama E2E).
 
 **`ReviewBot.Core/Domain/ReviewConfig.cs`:** Add to `ReviewOutputConfig`:
 ```csharp
@@ -108,11 +127,11 @@ int FullFileMaxBytes = 0  // 0 = disabled
 **`ReviewBot.Api/Workers/ReviewWorker.cs`:** After file filtering and before prompt construction, when `FullFileMaxBytes > 0`:
 - Collect modified (non-deleted) files where `EstimatePatchBytes(f) <= FullFileMaxBytes`
 - Fetch full content via `PullRequestFetcher.GetFileContentsAsync` (reuses Phase 15 logic; same 404/binary/oversized rejection applies)
-- Pass resulting `IReadOnlyDictionary<string, string> fullFileContents` to `PromptBuilder`
+- Carry resulting `IReadOnlyDictionary<string, string> fullFileContents` on `ReviewRequest` so LLM adapters pass it to `PromptBuilder`
 
-**`ReviewBot.Core/Prompting/PromptBuilder.cs`:** `BuildUserPrompt` gains optional `IReadOnlyDictionary<string, string>? fullFileContents`. When a file's path is present, prepend a `### Full file: {path}` fenced block before its diff section.
+**`ReviewBot.Core/Prompting/PromptBuilder.cs`:** `BuildUserPrompt` reads optional `ReviewRequest.FullFileContents`. When a file's path is present, prepend a `### Full file: {path}` fenced block before its diff section.
 
-**`RepoConfigFetcher`:** parse `review.full_file_max_bytes` as positive integer; 0 or absent → disabled.
+**`RepoConfigFetcher`:** parse `review.full_file_max_bytes` as a non-negative integer; 0 or absent → disabled.
 
 **`docs/configuration.md`:** Document `review.full_file_max_bytes`; note it increases prompt size and should be tuned against the model's context window.
 

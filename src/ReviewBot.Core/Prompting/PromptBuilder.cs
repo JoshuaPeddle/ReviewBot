@@ -236,6 +236,15 @@ Omit a comment entirely rather than pick a guessed line, and keep total comments
             prompt.Append(" -");
             prompt.Append(file.DeletionsCount);
             prompt.Append(") ===\n");
+            if (request.FullFileContents?.TryGetValue(file.Path, out var fullFileContent) == true)
+            {
+                prompt.Append("### Full file: ");
+                prompt.Append(file.Path);
+                prompt.Append("\n```\n");
+                prompt.Append(SanitizeFetchedContent(fullFileContent));
+                prompt.Append("\n```\n");
+            }
+
             prompt.Append("```diff\n");
             prompt.Append(AnnotateAndTruncatePatch(file.Patch, request.Config.Review.MaxPatchLines));
             prompt.Append("\n```\n\n");

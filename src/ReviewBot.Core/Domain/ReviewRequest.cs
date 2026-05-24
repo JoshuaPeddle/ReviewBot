@@ -7,4 +7,5 @@ public sealed record ReviewRequest(
     string HeadSha,
     IReadOnlyList<FileChange> Files,
     ReviewConfig Config,
-    GroundingContext? Grounding = null);
+    GroundingContext? Grounding = null,
+    IReadOnlyDictionary<string, string>? FullFileContents = null);

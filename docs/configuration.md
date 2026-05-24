@@ -135,6 +135,13 @@ review:
   # Maximum decoded size, in bytes, for each fetched context file.
   max_context_file_bytes: 50000
 
+  # Fetch and include full file contents for changed, non-deleted files whose
+  # patch is at or below this byte threshold. This can reduce false positives
+  # for small files but increases prompt size; tune it to the model context window.
+  # 0 disables full-file context.
+  # Default: 0
+  full_file_max_bytes: 0
+
   # Post REQUEST_CHANGES instead of COMMENT when any surviving inline comment
   # has severity: error. This can block merges on protected branches.
   # Default: false

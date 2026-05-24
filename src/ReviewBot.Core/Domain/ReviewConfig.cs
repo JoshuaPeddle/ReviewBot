@@ -75,7 +75,8 @@ public sealed record ReviewOutputConfig(
     int MaxContextRequests = 5,
     int MaxContextFileBytes = 50_000,
     bool RequestChangesOnError = false,
-    bool ApproveIfClean = false);
+    bool ApproveIfClean = false,
+    int FullFileMaxBytes = 0);
 
 public sealed record TriggerConfig(
     bool OnReviewRequest,

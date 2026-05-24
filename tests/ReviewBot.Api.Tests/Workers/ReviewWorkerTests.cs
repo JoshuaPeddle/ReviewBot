@@ -342,6 +342,92 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task FullFileContextFetchesOnlySmallNonDeletedFilesAndPassesContentToLlm()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { FullFileMaxBytes = 10_000 }
+        };
+        var files = new[]
+        {
+            CreateFile("src/Small.cs"),
+            CreateFile("src/Large.cs", patch: new string('x', 10_001), commentableLines: new HashSet<int> { 1 }),
+            CreateFile("src/Deleted.cs", "@@ -1 +0 @@\n-old", new HashSet<int> { 1 }, FileChangeStatus.Removed)
+        };
+        IReadOnlyList<ContextRequest>? fetchedRequests = null;
+        ReviewRequest? capturedRequest = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                fetchedRequests = call.ArgAt<IReadOnlyList<ContextRequest>>(2);
+                return [("src/Small.cs", "public class Small { }")];
+            });
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedRequest = call.Arg<ReviewRequest>();
+                return new ReviewResult("Reviewed.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        fetchedRequests!.Select(request => request.Path).Should().Equal("src/Small.cs");
+        capturedRequest!.FullFileContents.Should().NotBeNull();
+        capturedRequest.FullFileContents.Should().ContainSingle()
+            .Which.Should().Be(new KeyValuePair<string, string>("src/Small.cs", "public class Small { }"));
+    }
+
+    [Fact]
+    public async Task FullFileContextDisabledDoesNotFetchFileContents()
+    {
+        await using var fixture = new WorkerFixture();
+        ReviewRequest? capturedRequest = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedRequest = call.Arg<ReviewRequest>();
+                return new ReviewResult("Reviewed.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await fixture.PullRequestFetcher.DidNotReceiveWithAnyArgs()
+            .GetFileContentsAsync(default!, default!, default!, default!, default, default!, default);
+        capturedRequest!.FullFileContents.Should().BeNull();
+    }
+
+    [Fact]
     public async Task RequestChangesOnErrorPostsRequestChangesWhenFinalCommentHasErrorSeverity()
     {
         await using var fixture = new WorkerFixture();
@@ -1742,7 +1828,8 @@ public class ReviewWorkerTests
     private static FileChange CreateFile(
         string path,
         string patch,
-        IReadOnlySet<int> commentableLines)
+        IReadOnlySet<int> commentableLines,
+        FileChangeStatus status = FileChangeStatus.Modified)
     {
         return new FileChange(
             path,
@@ -1750,7 +1837,7 @@ public class ReviewWorkerTests
             commentableLines,
             AdditionsCount: 1,
             DeletionsCount: 0,
-            FileChangeStatus.Modified);
+            status);
     }
 
     private sealed class WorkerFixture : IAsyncDisposable
