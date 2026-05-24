@@ -7,7 +7,7 @@ namespace ReviewBot.Llm.OpenAi;
 internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
 {
     private readonly ApiKeyCredential credential;
-    private readonly OpenAIClientOptions? clientOptions;
+    private readonly OpenAIClientOptions clientOptions;
 
     public OpenAiSdkChatClient(OpenAiLlmOptions options)
     {
@@ -19,7 +19,7 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
         }
 
         credential = new ApiKeyCredential(options.ApiKey);
-        clientOptions = CreateClientOptions(options.BaseUrl);
+        clientOptions = CreateClientOptions(options.BaseUrl, options.TimeoutSeconds);
     }
 
     public async Task<string> CompleteChatAsync(OpenAiChatRequest request, CancellationToken ct)
@@ -52,8 +52,10 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
         return string.Concat(textParts);
     }
 
-    internal static OpenAIClientOptions? CreateClientOptions(Uri? baseUrl) =>
-        baseUrl is null
-            ? null
-            : new OpenAIClientOptions { Endpoint = baseUrl };
+    internal static OpenAIClientOptions CreateClientOptions(Uri? baseUrl, int timeoutSeconds) =>
+        new()
+        {
+            Endpoint = baseUrl,
+            NetworkTimeout = TimeSpan.FromSeconds(timeoutSeconds)
+        };
 }

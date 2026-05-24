@@ -15,4 +15,6 @@ public sealed record OpenAiLlmOptions
     public float Temperature { get; set; } = 0.2f;
 
     public bool UseJsonMode { get; set; } = true;
+
+    public int TimeoutSeconds { get; set; } = 600;
 }

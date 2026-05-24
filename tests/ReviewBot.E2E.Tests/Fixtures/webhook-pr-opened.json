@@ -1,5 +1,5 @@
 {
-  "action": "review_requested",
+  "action": "opened",
   "installation": {
     "id": 98765
   },
@@ -17,15 +17,7 @@
     },
     "user": {
       "login": "developer"
-    },
-    "requested_reviewers": [
-      {
-        "login": "reviewbot[bot]"
-      }
-    ]
-  },
-  "requested_reviewer": {
-    "login": "reviewbot[bot]"
+    }
   },
   "sender": {
     "login": "developer"
