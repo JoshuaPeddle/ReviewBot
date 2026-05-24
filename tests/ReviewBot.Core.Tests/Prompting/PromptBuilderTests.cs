@@ -21,7 +21,7 @@ public class PromptBuilderTests
         payload.SystemPrompt.Should().Contain("- tests");
         payload.SystemPrompt.Should().Contain("\"summary\": \"string, markdown allowed, 1-3 short paragraphs\"");
         payload.SystemPrompt.Should().Contain("\"comments\": [");
-        payload.SystemPrompt.Should().Contain("\"line\": \"integer, must be a commentable line on the new side\"");
+        payload.SystemPrompt.Should().Contain("\"line\": \"integer, use the NNN from the diff line annotation prefix\"");
     }
 
     [Fact]
@@ -142,6 +142,10 @@ Assign a confidence level to each comment based on how certain you are:
 - "medium": likely an issue but depends on context outside the diff
 - "low": speculative or stylistic; you would not block a merge on this alone
 
+When an existing code comment explains why a design choice was made, do not flag it as a bug unless you can identify a factual error in the stated reasoning.
+Only flag security issues at real trust boundaries — user-supplied HTTP fields, external API responses, untrusted file content. Do not flag internal method parameters passed between layers of the same codebase as injection or path traversal risks.
+Each non-deleted diff line is prefixed with its exact new-file line number (format: `+  NNN: code` for added, `   NNN: code` for context). Use that number directly as the `line` field — do not count lines yourself.
+
 Respond ONLY with a JSON object matching this schema and nothing else. Do not use markdown fences, preambles, or trailing prose.
 Schema:
 {
@@ -149,7 +153,7 @@ Schema:
   "comments": [
     {
       "path": "string, must match one of the changed files",
-      "line": "integer, must be a commentable line on the new side",
+      "line": "integer, use the NNN from the diff line annotation prefix",
       "severity": "info|warning|error",
       "confidence": "high|medium|low",
       "body": "string, markdown allowed; for fixes use GitHub suggestion blocks"
@@ -170,18 +174,18 @@ Changed Files:
 === src/ReviewBot.Core/Alpha.cs (Modified, +2 -1) ===
 ```diff
 @@ -10,2 +10,3 @@
- public class Alpha
--old
-+new
+    10: public class Alpha
+-       old
++   11: new
 ... (truncated, 1 more lines)
 ```
 
 === src/ReviewBot.Core/Zeta.cs (Modified, +2 -0) ===
 ```diff
 @@ -1,2 +1,3 @@
- public class Zeta
-+{
-+}
+     1: public class Zeta
++    2: {
++    3: }
 ```
 """);
     }
