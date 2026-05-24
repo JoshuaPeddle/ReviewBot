@@ -519,6 +519,14 @@ public sealed class ReviewWorker : BackgroundService
             return initialResult;
         }
 
+        logger.LogInformation(
+            "Agentic context: model requested {RequestCount} file(s) for {Owner}/{Repo}#{PrNumber}: {Paths}",
+            validation.Requests.Count,
+            job.Owner,
+            job.Repo,
+            job.PrNumber,
+            string.Join(", ", validation.Requests.Select(r => r.Path)));
+
         IReadOnlyList<(string Path, string Content)> fetchedFiles;
         try
         {
@@ -541,14 +549,23 @@ public sealed class ReviewWorker : BackgroundService
 
         if (fetchedFiles.Count == 0)
         {
-            logger.LogDebug(
-                "Agentic context requested {RequestCount} files for {Owner}/{Repo}#{PrNumber}, but no text files were fetched",
+            logger.LogInformation(
+                "Agentic context: requested {RequestCount} file(s) for {Owner}/{Repo}#{PrNumber} but none could be fetched (404, binary, or oversized); using initial comments",
                 validation.Requests.Count,
                 job.Owner,
                 job.Repo,
                 job.PrNumber);
             return initialResult;
         }
+
+        logger.LogInformation(
+            "Agentic context: fetched {FetchedCount}/{RequestCount} file(s) for {Owner}/{Repo}#{PrNumber}, running second-pass review: {Paths}",
+            fetchedFiles.Count,
+            validation.Requests.Count,
+            job.Owner,
+            job.Repo,
+            job.PrNumber,
+            string.Join(", ", fetchedFiles.Select(f => f.Path)));
 
         try
         {
@@ -564,6 +581,12 @@ public sealed class ReviewWorker : BackgroundService
             var enrichedParsed = LlmResultParser.Parse(enrichedRaw, logger);
             if (enrichedParsed.Success)
             {
+                logger.LogInformation(
+                    "Agentic context: second-pass review completed for {Owner}/{Repo}#{PrNumber}; {CommentCount} comment(s) in final result",
+                    job.Owner,
+                    job.Repo,
+                    job.PrNumber,
+                    enrichedParsed.Value!.Comments.Count);
                 return enrichedParsed.Value!;
             }
 
