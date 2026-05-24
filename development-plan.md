@@ -2,7 +2,7 @@
 
 ## Current state (v2, 2026-05-23)
 
-Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, Phase 14 Steps 41–42, Phase 15 Steps 43–44, and Phase 16 Steps 45–46. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Phase 15 agentic context is wired end-to-end behind `review.agentic_context`: the primary LLM can request bounded repository files, the worker validates and filters paths, GitHub Contents fetches text files with a byte cap, and one final LLM pass produces the posted result. Phase 16 checks grounding now reads completed GitHub Checks and commit statuses behind `grounding.tests`, carries them through grounding, and exposes them in the review prompt without cloning or executing code. `DotNetTestRunner` is implemented and registered; running `dotnet test --no-build --no-restore -c Release`, parsing the VSTest aggregate summary line, and returning timed-out or cancelled results safely. `dotnet test --no-restore` passes: 328 passing, 0 failed, 1 skipped Ollama E2E test. Docker image published on tags.
+Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, Phase 14 Steps 41–42, Phase 15 Steps 43–44, and Phase 16 Steps 45–47. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Phase 15 agentic context is wired end-to-end behind `review.agentic_context`: the primary LLM can request bounded repository files, the worker validates and filters paths, GitHub Contents fetches text files with a byte cap, and one final LLM pass produces the posted result. Phase 16 checks grounding now reads completed GitHub Checks and commit statuses behind `grounding.tests`, carries them through grounding, and exposes them in the review prompt without cloning or executing code. `DotNetTestRunner` is implemented, running `dotnet test --no-build --no-restore -c Release`, parsing the VSTest aggregate summary line, and returning timed-out or cancelled results safely. `PythonTestRunner` is implemented, detects pytest configuration before running `python3 -m pytest --tb=no -q --no-header`, parses pytest summary counts, and handles timeouts/cancellation safely. Local test runner registration in `Program.cs` remains Step 48. Step 47 targeted stop test passes; current full-suite verification is blocked by the pre-existing `DeliveryStoreCleanupServiceTests` timing flake under parallel full-solution execution. Docker image published on tags.
 
 Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 build runners (`DotNetBuildRunner`, `PythonBuildRunner`) are registered in `Program.cs`. `CompositeGroundingProvider` starts the workspace clone concurrently with Tier 1 `ExtractMetadataAsync`; on metadata failure the pre-started workspace is disposed; on clone failure `Build` is null and the review proceeds. `ReviewWorker` has a fast-exit when `files.Count == 0` after filtering (no grounding, no LLM call, no review post). Skip-reason counter (`reviewbot.jobs.skipped`) and grounding duration histogram (`reviewbot.grounding.duration_ms`) are live in `ReviewBotMetrics`.
 
@@ -815,16 +815,16 @@ If checks/tests are available but language metadata is null, `PromptBuilder` sho
 
 **Stop test:** `dotnet test --no-restore` passes: 328 passing, 0 failed, 1 skipped Ollama E2E test. Targeted suite: Grounding.Tests 100 passing (up from 96).
 
-### Step 47: Python test runner
+### Step 47: Python test runner ✓ Complete
 
 **`ReviewBot.Grounding/Languages/Python/PythonTestRunner.cs`:** Implements `ITestRunner`. `LanguageId = "python"`.
 
 Checks for any of: `pytest.ini`, `pyproject.toml` (with `[tool.pytest.ini_options]` section), `setup.cfg` (with `[tool:pytest]`), `conftest.py` in `workspacePath`. If none found, returns `new TestResult(0, 0, 0, "no pytest configuration detected")` without running anything.
 
-If detected: runs `python3 -m pytest --tb=no -q --no-header`. Parses summary line:
+If detected: runs `python3 -m pytest --tb=no -q --no-header`. Parses pytest summary counts in any order:
 
 ```
-(\d+) passed(?:, (\d+) failed)?(?:, (\d+) skipped)?
+(?<count>\d+)\s+(?<kind>passed|failed|skipped)
 ```
 
 Timeout from `GroundingConfig.TestTimeoutSeconds`. External cancellation propagates.
@@ -835,6 +835,20 @@ Timeout from `GroundingConfig.TestTimeoutSeconds`. External cancellation propaga
 - No pytest config: returns result with 0 counts without running pytest (no process spawned).
 - Timeout: returns result, does not throw.
 - External cancellation: rethrows.
+
+**Implemented in Step 47:**
+- Added `PythonTestRunner` in `src/ReviewBot.Grounding/Languages/Python/PythonTestRunner.cs`. It detects pytest config via `pytest.ini`, `conftest.py`, `[tool.pytest.ini_options]` in `pyproject.toml`, or `[tool:pytest]` in `setup.cfg` before spawning any process.
+- When config is present, the runner executes `python3 -m pytest --tb=no -q --no-header`, sets `PYTHONDONTWRITEBYTECODE=1`, captures stdout/stderr, truncates output to 4096 chars, and returns `TestResult` counts with source defaulting to `"local"`.
+- Internal timeouts return `new TestResult(0, 0, 0, "pytest timed out")`; external cancellation rethrows `OperationCanceledException`; killed processes use `entireProcessTree: true`.
+- Added deterministic `PythonTestRunnerTests` using a local temporary `pytest.py` module so the process path and parser are covered without requiring pytest to be installed globally on the worker.
+- Added tests for passing, failing, skipped, no-config/no-process, timeout, external cancellation, and pytest-config detection.
+
+**Corrected implementation assumptions discovered during Step 47:**
+- The planned regex `(\d+) passed(?:, (\d+) failed)?(?:, (\d+) skipped)?` does not match common pytest failure summaries such as `1 failed, 1 passed`. The implementation instead parses `count + kind` pairs for `passed`, `failed`, and `skipped` in any order.
+- This environment's system `python3` does not have pytest installed. Tests therefore use a local `pytest.py` fixture module to exercise `python3 -m pytest` deterministically without relying on global packages.
+- `DotNetTestRunner` is implemented but local test runners are not registered in `Program.cs` yet. Step 48 remains the production wiring chunk for both .NET and Python test runners.
+
+**Stop test:** `dotnet test tests/ReviewBot.Grounding.Tests/ReviewBot.Grounding.Tests.csproj --no-restore` passes: 111 passing, 0 failed. Full-suite verification was attempted twice with `dotnet test --no-restore`; both runs failed only in the pre-existing `ReviewBot.Persistence.Tests.DeliveryStoreCleanupServiceTests.RunsCleanupEachHourWithThirtyDayCutoff` timing flake, while the persistence project passed immediately on targeted rerun (`14 passing, 0 failed`) after the first full-suite attempt.
 
 ### Step 48: Program.cs wiring and E2E scenario
 
@@ -870,7 +884,7 @@ builder.Services
 - **Open**: Dockerfile has not been exercised with an actual `docker build`. Validate before relying on container output.
 - **Open**: `Anthropic.SDK` 5.10.0 is unofficial. Confined to `AnthropicReviewLlm`; revisit if an official .NET SDK ships.
 - **Open**: OpenAI-compatible providers may not all support JSON mode. Mitigated by `UseJsonMode` toggle.
-- **Open**: `DeliveryStoreCleanupServiceTests.ContinuesLoopWhenCleanupFails` is flaky under parallel test execution. Pre-existing; reproduced once during Phase 13 Step 39 full-solution verification, then passed on immediate project rerun.
+- **Open**: `DeliveryStoreCleanupServiceTests` contains timing-sensitive cleanup-loop tests that are flaky under parallel full-solution execution. `ContinuesLoopWhenCleanupFails` was reproduced during Phase 13 Step 39; `RunsCleanupEachHourWithThirtyDayCutoff` reproduced during Phase 16 Step 47 verification. The persistence project passed on immediate targeted rerun after the Step 47 full-suite failure.
 - **Closed (Phase 10)**: Parallel clone + extraction — `CancelAndDisposeCloneAsync` propagates `OperationCanceledException`; covered by `MetadataExtractionThrowsDisposesPreStartedWorkspace` test.
 - **Closed (Phase 12 Step 36)**: EF Core 10 promotes `PendingModelChangesWarning` to an error, so hand-crafted model snapshots always fail migration tests. Always use `dotnet ef migrations add` to generate both the migration file and the snapshot; never write them by hand.
 - **Closed (Phase 12 Step 37)**: GitHub's compare API returns at most 300 files. `ChangedFilesResult.IsComplete` is `false` when `Paths.Count >= 300`; the worker (Step 38) must not use the truncated path list as an allowlist in that case.
