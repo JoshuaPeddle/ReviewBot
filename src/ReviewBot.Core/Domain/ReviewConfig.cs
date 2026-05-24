@@ -14,8 +14,8 @@ public sealed record ReviewConfig(
     public static ReviewConfig Default { get; } = new(
         Enabled: true,
         Model: new ModelConfig(
-            Provider: "anthropic",
-            Name: "claude-opus-4-7",
+            Provider: "openai",
+            Name: "qwen3.5:9b-q4_K_M",
             BaseUrlEnvVar: null),
         Review: new ReviewOutputConfig(
             InlineComments: true,
