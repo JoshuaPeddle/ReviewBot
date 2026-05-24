@@ -1,907 +1,163 @@
 # ReviewBot Development Plan
 
-## Current state (v2, 2026-05-23)
+## Current state (v2, 2026-05-24)
 
-Phases 1–12 complete (Steps 1–38), Phase 13 Steps 39–40, Phase 14 Steps 41–42, Phase 15 Steps 43–44, and Phase 16 Steps 45–48 plus the Phase 16 command-override follow-up. The bot handles PR webhooks for GitHub Apps, reviews diffs with Anthropic or any OpenAI-compatible endpoint, posts inline comments, stores idempotency in SQLite, and is configurable per-repo via `.github/review-bot.yml`. E2E baseline scenarios now exercise the real webhook → worker → GitHub API review-post path through WireMock. Phase 14 self-critique is wired end-to-end behind `review.self_critique`, with the prompt/result/parser core, raw LLM completion support, worker filtering, metrics labelling, repo config, docs, unit tests, and E2E coverage in place. Phase 15 agentic context is wired end-to-end behind `review.agentic_context`: the primary LLM can request bounded repository files, the worker validates and filters paths, GitHub Contents fetches text files with a byte cap, and one final LLM pass produces the posted result. Phase 16 checks grounding now reads completed GitHub Checks and commit statuses behind `grounding.tests`, carries them through grounding, and exposes them in the review prompt without cloning or executing code. `DotNetTestRunner` is implemented and registered, running `dotnet test --no-build --no-restore -c Release`, parsing the VSTest aggregate summary line, and returning timed-out or cancelled results safely. `PythonTestRunner` is implemented and registered, detects pytest configuration before running `python3 -m pytest --tb=no -q --no-header`, parses pytest summary counts, and handles timeouts/cancellation safely. `grounding.build_command` and `grounding.test_command` are now honored by the .NET and Python build/test runners using direct argv parsing without shell evaluation. Latest stop test passes: `dotnet test --no-restore` completed with 352 passing, 0 failed, and 1 skipped Ollama E2E test. Docker image published on tags.
+Phases 1–16 complete (Steps 1–48 + command-override follow-up). Stop test: `dotnet test --no-restore` → 352 passing, 0 failed, 1 skipped (Ollama E2E).
 
-Grounding is fully wired end-to-end. Tier 1 (language metadata from config files via GitHub Contents API) is live for .NET and Python. Tier 2 build runners (`DotNetBuildRunner`, `PythonBuildRunner`) are registered in `Program.cs`. `CompositeGroundingProvider` starts the workspace clone concurrently with Tier 1 `ExtractMetadataAsync`; on metadata failure the pre-started workspace is disposed; on clone failure `Build` is null and the review proceeds. `ReviewWorker` has a fast-exit when `files.Count == 0` after filtering (no grounding, no LLM call, no review post). Skip-reason counter (`reviewbot.jobs.skipped`) and grounding duration histogram (`reviewbot.grounding.duration_ms`) are live in `ReviewBotMetrics`.
+**Capabilities shipped:**
+- GitHub App webhook handling, signature validation, idempotent delivery tracking (SQLite)
+- LLM-backed PR review via Anthropic SDK and OpenAI-compatible endpoints (Ollama, vLLM)
+- Inline comments with `severity` (info/warning/error) and `confidence` (low/medium/high); `review.min_confidence` filtering
+- Self-critique second pass (`review.self_critique`): retains high-confidence comments; LLM votes on lower-confidence ones
+- Agentic context fetching (`review.agentic_context`): model requests up to N repo files; worker validates paths, enforces ignore globs, rejects secrets/binaries before fetching
+- Incremental reviews: tracks last-reviewed HEAD SHA per PR; diffs only changed files on re-push
+- Grounding Tier 1 (language metadata), Tier 2 (local builds: .NET, Python), Tier 3 (GitHub Checks/statuses + local test runners); `build_command`/`test_command` overrides honored
+- E2E infrastructure: WireMock + `WebApplicationFactory<Program>`; baseline scenarios cover review-requested, idempotency, empty diff, all-ignored, self-critique, agentic context, GitHub Checks
+- Metrics: skip-reason counter, grounding duration histogram, LLM duration histogram (phase label), incremental-review type counter
 
-Confidence scoring and filtering is live (Phase 11). `InlineComment` carries a `Confidence` enum (`Low`/`Medium`/`High`, default `High`). The parser reads the `confidence` field from LLM JSON. The system prompt instructs the model how to assign confidence and includes `"confidence"` in the response schema. `ReviewOutputConfig.MinConfidence` (default `Low`, i.e. no filtering) controls the threshold; `ReviewWorker.ApplyOutputConfig` filters below-threshold comments before posting. `review.min_confidence` in `.github/review-bot.yml` maps to the enum.
-
-Phase 12 complete (Steps 36–38). `PrReviewStateRecord` EF entity added with composite PK `(InstallationId, RepoFullName, PullNumber)`. `IPrReviewStateStore` interface lives in `ReviewBot.Core/Storage/`. `EfCorePrReviewStateStore` implements it via `FindAsync`+update/add upsert. Migration `20260523184735_AddPrReviewState` generated by `dotnet ef`. `IPrReviewStateStore` registered as singleton in `AddReviewBotPersistence`. `IPullRequestFetcher` extended with `FetchMetadataAsync`, `FetchFilesAsync` (with `IReadOnlySet<string>? pathAllowlist`), and `GetChangedFilesSinceAsync`. `ReviewWorker` now injects `IPrReviewStateStore` and implements the incremental review flow: fetches metadata first, compares against stored SHA, uses the changed-path set as an allowlist for file fetching when the compare result is complete and non-empty, skips the review when no files changed, and falls back to the full file list when the compare fails or is truncated. SHA is stored after each successful post. Incremental type metric (`reviewbot.review.incremental_type`) added with labels `first_review`, `delta_review`, `no_changes`, `compare_failed_fallback`, `compare_truncated_fallback`. 6 new worker tests cover all incremental review paths.
-
----
-
-## Performance priority order
-
-The next iterations should reduce unnecessary work before adding new high-latency features:
-
-1. **Avoid work entirely:** skip empty/all-ignored/no-budget file sets before grounding or LLM calls; track last-reviewed SHAs; use compare results safely before spending prompt budget.
-2. **Fetch less:** on incremental reviews, fetch only changed file patches when the compare result is complete and trustworthy.
-3. **Overlap required I/O:** parallelize independent GitHub Contents API reads and workspace cloning/build setup where it is safe.
-4. **Improve signal quality behind gates:** confidence filtering is cheap and should be on the main path; self-critique, agentic context, local builds, and local tests all add latency/cost and remain opt-in.
-5. **Measure before/after:** every performance phase should add or update metrics for skip reason, GitHub API duration/count, grounding duration, prompt size, LLM duration, and comments posted.
-
----
-
-## Phase 10: Cheap skips, grounding wiring, and parallel grounding ✓ Complete (Step 33)
-
-**The problem.** `CompositeGroundingProvider.GetContextAsync` is fully sequential: list root files → detect language → Tier 1 extraction → clone workspace → run build. When `grounding.build: true`, the git clone cannot start until Tier 1 extraction completes, even though the clone URL (`https://github.com/{owner}/{repo}.git`) is known the moment the detector matches. On a typical PR this serializes two independent network/IO operations that could overlap.
-
-**The approach.** First ensure the production composition actually registers build runners, then add fast worker exits when there is nothing reviewable. After the matching detector is identified, start the workspace clone as a concurrent `Task` while Tier 1 `ExtractMetadataAsync` runs. Await both with `Task.WhenAll`. The clone result is only consumed after both complete. If the clone fails while metadata extraction is in progress, log and proceed without build result — same failure mode as today. If metadata extraction fails, cancel and dispose the pre-started workspace.
-
-### Step 33: Concurrent clone and Tier 1 extraction
-
-**`Program.cs` composition fixed first.** Register `DotNetBuildRunner` and `PythonBuildRunner` in the API composition root. Add a composition-root test proving `IEnumerable<IBuildRunner>` contains both runner language IDs when the app starts.
-
-**`ReviewWorker.ProcessAsync` fast path.** After ignore globs, max-file trimming, and patch-budget filtering, if `files.Count == 0`, log a skip reason and return `JobProcessStatus.Skipped` before calling grounding or the LLM. This avoids paying for Tier 1 grounding and prompt construction on empty diffs, all-ignored PRs, binary-only changes, or PRs whose reviewable patches were fully removed by budget policy.
-
-**`CompositeGroundingProvider.GetContextAsync`** refactored. The change is mostly internal to the private method; public interfaces stay unchanged. All existing tests continue to pass, with new tests covering the production DI wiring and the new worker skip path.
-
-Revised flow inside `GetContextAsync`:
-
-```csharp
-var reader = readerFactory(request);
-var rootFiles = await reader.ListRootFilesAsync(request.HeadSha, ct);
-var detector = detectors.FirstOrDefault(d => d.CanDetect(rootFiles));
-if (detector is null) return Empty;
-
-// Start clone immediately; it runs concurrently with metadata extraction.
-Task<IWorkspace?>? cloneTask = null;
-if (request.Config.Build && workspaceFactory is not null)
-    cloneTask = StartCloneAsync(request, ct);
-
-LanguageMetadata? language = null;
-try
-{
-    language = await detector.ExtractMetadataAsync(reader, request.HeadSha, ct);
-}
-catch
-{
-    // Cancel the in-flight clone to avoid leaking the workspace.
-    if (cloneTask is not null)
-        await CancelAndDisposeCloneAsync(cloneTask);
-    throw;  // rethrown; outer catch returns Empty
-}
-
-BuildResult? buildResult = null;
-if (language is not null && cloneTask is not null)
-    buildResult = await RunBuildOnCloneAsync(cloneTask, language.LanguageId, request.Config, ct);
-
-return new GroundingContext(language, buildResult, null);
-```
-
-`StartCloneAsync` returns `Task<IWorkspace?>` (null on clone failure, logged as Warning). `RunBuildOnCloneAsync` awaits `cloneTask`, runs the matching runner on the ready workspace, and disposes in `finally`.
-
-**New tests** in `ReviewBot.Grounding.Tests/CompositeGroundingProviderTests.cs` (4 cases):
-- Clone starts before metadata extraction completes: use `TaskCompletionSource`-backed test doubles where `ExtractMetadataAsync` blocks until signalled; assert clone factory was called before unblocking.
-- Clone failure during parallel extraction: metadata still returned; `Build` is null.
-- Metadata extraction throws: workspace is disposed (verify `DisposeAsync` called on the pre-started workspace).
-- Build disabled: `workspaceFactory` never called, even when a detector matches.
-
-**New tests** in `ReviewBot.Api.Tests/Workers/ReviewWorkerTests.cs`:
-- Empty diff: no grounding call, no LLM call, no review post, skipped metric recorded.
-- All files ignored: no grounding call, no LLM call, no review post, skipped metric recorded.
-- Patch budget removes all reviewable files: no grounding call, no LLM call, no review post, skipped metric recorded.
-
-**Metrics:** Extend `ReviewBotMetrics` with a skip-reason counter (`disabled`, `trigger_disabled`, `no_reviewable_files`, `incremental_no_changes`, `duplicate_delivery` where available) and a grounding duration histogram labelled by result (`none`, `tier1`, `build_success`, `build_failed`, `checks_success`, `checks_failed`). Keep labels low-cardinality.
+**Key implementation decisions:**
+- EF Core migrations must be generated via `dotnet ef migrations add`; hand-crafted snapshots fail with `PendingModelChangesWarning` promoted to error.
+- Octokit 14 model classes (`CompareResult`, `GitHubCommitFile`, etc.) have non-virtual properties — construct via public constructors in tests, never `Substitute.For<T>()`. Compare API is `client.Repository.Commit.Compare` (singular).
+- `ReviewPoster` posts one review with a `comments` array; E2E assertions inspect the single review payload, not per-comment API calls.
+- `review_requested` event (not `opened`) triggers the first-review path in the webhook handler.
+- Anthropic LLM adapter has no configurable base URL; WireMock E2E scenarios must use the OpenAI-compatible provider via repo config.
+- `OpenAiLlmOptions` is bound eagerly at startup; E2E overrides must replace the singleton in `ConfigureTestServices`.
 
 ---
 
-## Phase 11: Confidence scoring and comment filtering ✓ Complete (Steps 34–35)
+## Open risks
 
-**The problem.** Every posted comment carries the same implicit weight. A speculative style nit gets the same treatment as a confirmed null-reference bug. Reviewers either override every comment or begin to ignore the bot entirely.
+- Dockerfile has not been exercised with an actual `docker build`.
+- `Anthropic.SDK` 5.10.0 is unofficial; revisit when an official .NET SDK ships.
+- `DeliveryStoreCleanupServiceTests` has timing-sensitive flakes under parallel full-solution runs; pass on immediate targeted rerun.
+- Octokit 14 non-virtual model properties: always construct in tests via public constructors.
+- Anthropic E2E base URL not injectable; all WireMock scenarios use OpenAI-compatible provider.
+- Local build/test execution requires SDKs on the worker; keep SDK-dependent E2E tests behind `[Trait("Category", "RequiresSdk")]`.
+- Branch-protection "required" check context not distinguished; `CheckRunFetcher` treats any completed failing check/status as failed.
 
-**The approach.** Extend the response schema with a `confidence` field per comment. Add a configurable `min_confidence` threshold to `review-bot.yml`. The worker filters below-threshold comments before posting. This field is also foundational for Phase 14's self-critique pass, which uses confidence to decide which comments to defend.
+---
 
-### Step 34: Confidence field in InlineComment, parser, and prompt schema ✓
+## Phase 17: Review state from severity
 
-**`ReviewBot.Core/Domain/ReviewResult.cs`:** Add `Confidence` property to `InlineComment`:
+**The problem.** The bot always posts as `COMMENT`, making it advisory-only regardless of finding severity. A security vulnerability and a style nit produce the same GitHub review state.
 
+**The approach.** Map the highest-severity surviving comment to the GitHub review event: `error` → `REQUEST_CHANGES`, warning/info only → `COMMENT`, no surviving comments → optionally `APPROVE`. Both escalation behaviors are opt-in.
+
+### Step 49
+
+**`ReviewBot.Core/Domain/ReviewConfig.cs`:** Add to `ReviewOutputConfig`:
 ```csharp
-public sealed record InlineComment(
-    string Path,
-    int Line,
-    string Side,
-    string Body,
-    Severity Severity,
-    Confidence Confidence = Confidence.High);
-
-public enum Confidence { Low = 0, Medium = 1, High = 2 }
+bool RequestChangesOnError = false
+bool ApproveIfClean = false
 ```
 
-Default `Confidence.High` on the record parameter makes this backwards-compatible: any code constructing `InlineComment` without the new field continues to compile and behaves as if confidence is high (i.e., not filtered).
+**`ReviewBot.GitHub/Pulls/ReviewPoster.cs`:** Add `PullRequestReviewEvent reviewEvent` parameter to `PostAsync`; pass through to Octokit's `PullRequestReviewCreate.Event`.
 
-**`ReviewBot.Core/Llm/LlmResultParser.cs`:** In `TryParseComment`, parse the `confidence` field via `TryGetString(element, "confidence", out var confidence)` and map `"low"` → `Confidence.Low`, `"medium"` → `Confidence.Medium`, anything else → `Confidence.High`.
-
-**`ReviewBot.Core/Prompting/PromptBuilder.cs`:** In `BuildSystemPrompt`, append confidence instructions before the JSON schema block:
-
-```
-Assign a confidence level to each comment based on how certain you are:
-- "high": you have seen the code in question and are certain this is a real issue
-- "medium": likely an issue but depends on context outside the diff
-- "low": speculative or stylistic; you would not block a merge on this alone
-```
-
-Update the inline JSON schema string to include `"confidence": "high|medium|low"` as a required field in each comment object.
-
-**Tests** in `ReviewBot.Core.Tests/`:
-- `LlmResultParserTests`: response with `"confidence": "low"` → `Confidence.Low`; response without `confidence` field → defaults to `Confidence.High`.
-- `PromptBuilderTests`: system prompt contains the confidence instruction text; JSON schema string contains `confidence` field.
-
-### Step 35: Filtering pipeline and config ✓
-
-**`ReviewBot.Core/Domain/ReviewConfig.cs`:** Add `MinConfidence` to `ReviewOutputConfig`:
-
+**`ReviewBot.Api/Workers/ReviewWorker.cs`:** After final comment filtering:
 ```csharp
-public sealed record ReviewOutputConfig(
-    bool InlineComments,
-    bool Summary,
-    int MaxFiles,
-    int MaxPatchLines,
-    TriggerConfig Trigger,
-    Confidence MinConfidence = Confidence.Low);
+var reviewEvent = PullRequestReviewEvent.Comment;
+if (config.Review.RequestChangesOnError && finalComments.Any(c => c.Severity == Severity.Error))
+    reviewEvent = PullRequestReviewEvent.RequestChanges;
+else if (config.Review.ApproveIfClean && finalComments.Length == 0)
+    reviewEvent = PullRequestReviewEvent.Approve;
 ```
 
-Default `Confidence.Low` means no filtering — all comments pass.
+**`RepoConfigFetcher`:** parse `review.request_changes_on_error` and `review.approve_if_clean` booleans.
 
-**`ReviewBot.GitHub/Config/RepoConfigFetcher.cs`:** YAML DTO updated with `min_confidence` string field under `review:`. Map `"low"` / `"medium"` / `"high"` to the enum; unknown values default to `Confidence.Low` with a logged warning.
-
-**`ReviewBot.Api/Workers/ReviewWorker.cs`:** In `ApplyOutputConfig`, apply confidence filter after the existing `InlineComments` gate:
-
-```csharp
-var comments = config.Review.InlineComments
-    ? result.Comments.Where(c => c.Confidence >= config.Review.MinConfidence).ToArray()
-    : Array.Empty<InlineComment>();
-```
-
-**`docs/configuration.md`:** Document `review.min_confidence` with the three accepted values and their effects.
+**`docs/configuration.md`:** Document both flags; note `request_changes_on_error` actively blocks merges.
 
 **Tests:**
-- `ReviewWorkerTests` (substituting `IReviewLlm`): `min_confidence: medium` → low-confidence comment removed, high and medium retained.
-- `RepoConfigFetcherTests`: `min_confidence: high` in YAML → `Confidence.High`; missing field → `Confidence.Low`.
-- `ApplyOutputConfig` unit tests (directly on the static or extracted method): all three threshold levels.
+- Worker: error comment + flag → `RequestChanges`; warning only → `Comment`; empty + `ApproveIfClean` → `Approve`; empty without flag → `Comment`.
+- Poster: `reviewEvent` passed through to Octokit.
+- Config: YAML parsing for both flags.
+
+**E2E:** assert `event` field in `POST /repos/owner/repo/pulls/1/reviews` body is `REQUEST_CHANGES` when repo config has `request_changes_on_error: true` and LLM returns an error-severity comment.
 
 ---
 
-## Phase 12: Incremental reviews ✓ Complete (Steps 36–38)
+## Phase 18: Full-file context for small modified files
 
-**The problem.** When a developer pushes a fixup commit or force-pushes a rebase, the bot re-reviews the entire PR including files untouched since the last review. This wastes LLM tokens and re-surfaces already-seen feedback on unchanged lines.
+**The problem.** Diffs contain only changed lines plus a few lines of context. A one-line change in a 50-line file leaves the model unable to see the class signature or field declarations 20 lines away, producing false positives on issues already handled nearby.
 
-**The approach.** Track the last-reviewed HEAD SHA per PR in the database. On subsequent reviews, fetch PR metadata first, use GitHub's compare API to identify files changed since that SHA, and only then fetch PR file patches. If the compare result is complete, fetch only those changed file patches; if the compare result is unavailable or potentially truncated, fall back to the current full-review path. If no files changed since the last review, skip grounding and the LLM call entirely.
+**The approach.** For modified files under a configurable byte threshold, fetch the full file content via the Contents API (already wired from Phase 15) and prepend it to that file's diff in the prompt. Disabled by default.
 
-### Step 36: PrReviewState entity and store ✓
+### Step 50
 
-**`ReviewBot.Persistence/Entities/PrReviewStateRecord.cs`:** New EF entity:
-
+**`ReviewBot.Core/Domain/ReviewConfig.cs`:** Add to `ReviewOutputConfig`:
 ```csharp
-public sealed class PrReviewStateRecord
-{
-    public long InstallationId { get; set; }
-    public string RepoFullName { get; set; } = string.Empty;
-    public int PullNumber { get; set; }
-    public string LastSha { get; set; } = string.Empty;
-    public DateTimeOffset ReviewedAt { get; set; }
-}
+int FullFileMaxBytes = 0  // 0 = disabled
 ```
 
-**`ReviewBot.Persistence/ReviewBotDbContext.cs`:** Add `DbSet<PrReviewStateRecord> PrReviewStates => Set<PrReviewStateRecord>();` and configure the composite PK `(InstallationId, RepoFullName, PullNumber)` in `OnModelCreating`.
+**`ReviewBot.Api/Workers/ReviewWorker.cs`:** After file filtering and before prompt construction, when `FullFileMaxBytes > 0`:
+- Collect modified (non-deleted) files where `EstimatePatchBytes(f) <= FullFileMaxBytes`
+- Fetch full content via `PullRequestFetcher.GetFileContentsAsync` (reuses Phase 15 logic; same 404/binary/oversized rejection applies)
+- Pass resulting `IReadOnlyDictionary<string, string> fullFileContents` to `PromptBuilder`
 
-**New EF migration** in `ReviewBot.Persistence/Migrations/` via `dotnet ef migrations add AddPrReviewState`.
+**`ReviewBot.Core/Prompting/PromptBuilder.cs`:** `BuildUserPrompt` gains optional `IReadOnlyDictionary<string, string>? fullFileContents`. When a file's path is present, prepend a `### Full file: {path}` fenced block before its diff section.
 
-**`ReviewBot.Core/Storage/IPrReviewStateStore.cs`:** New interface:
+**`RepoConfigFetcher`:** parse `review.full_file_max_bytes` as positive integer; 0 or absent → disabled.
 
-```csharp
-public interface IPrReviewStateStore
-{
-    Task<string?> GetLastShaAsync(long installationId, string repoFullName, int pullNumber, CancellationToken ct);
-    Task SetLastShaAsync(long installationId, string repoFullName, int pullNumber, string sha, CancellationToken ct);
-}
-```
+**`docs/configuration.md`:** Document `review.full_file_max_bytes`; note it increases prompt size and should be tuned against the model's context window.
 
-**`ReviewBot.Persistence/EfCorePrReviewStateStore.cs`:** Implements `IPrReviewStateStore` using `ReviewBotDbContext`. Uses `ExecuteUpdateAsync`/upsert pattern — `FindAsync` + update or add, then `SaveChangesAsync`.
+**Tests:**
+- Worker: `FullFileMaxBytes = 10000`, small file → `GetFileContentsAsync` called; large file → skipped; disabled → never called.
+- `PromptBuilder`: file in dict → full-file section before diff; absent → diff only.
+- Config: YAML parsing.
 
-**DI:** registered in `ReviewBot.Persistence/DependencyInjection.cs` alongside `EfCoreDeliveryStore`.
-
-**Tests** in `ReviewBot.Persistence.Tests/`: upsert then retrieve returns same SHA; different PR returns null; overwrite updates the SHA.
-
-### Step 37: GitHub compare API integration ✓
-
-**`ReviewBot.GitHub/Pulls/IPullRequestFetcher.cs`:** Split PR metadata from PR files so incremental filtering can happen before `max_files` truncation. Add either new methods on `IPullRequestFetcher` or dedicated interfaces (`IPullRequestMetadataFetcher`, `IPullRequestFileFetcher`, `IPullRequestComparer`):
-
-```csharp
-Task<PullRequestMetadata> FetchMetadataAsync(
-    string owner, string repo, int prNumber,
-    string installationToken, CancellationToken ct);
-
-Task<IReadOnlyList<FileChange>> FetchFilesAsync(
-    string owner, string repo, int prNumber,
-    string installationToken, int maxFiles,
-    IReadOnlySet<string>? pathAllowlist,
-    CancellationToken ct);
-```
-
-`FetchFilesAsync(..., pathAllowlist: not null)` pages through the PR files API until all allowlisted paths are found or GitHub returns no more pages. The `maxFiles` limit applies after allowlist filtering, not before it, so a delta file past the first N files is still reviewable.
-
-Add compare support:
-
-```csharp
-Task<ChangedFilesResult> GetChangedFilesSinceAsync(
-    string owner, string repo, string baseSha, string headSha,
-    string installationToken, CancellationToken ct);
-```
-
-**Implementation** in `ReviewBot.GitHub/Pulls/PullRequestFetcher.cs` (or dedicated services): uses Octokit's `client.Repository.Commit.Compare(owner, repo, baseSha, headSha)` (note: singular `Commit`, not `Commits` — the property on `IRepositoriesClient` in Octokit 14 is `Commit`), returns a structured result:
-
-```csharp
-public sealed record ChangedFilesResult(
-    IReadOnlyList<string> Paths,
-    bool IsComplete);
-```
-
-`IsComplete` is false if the compare response hits GitHub's 300-file cap or any other known truncation signal. When `IsComplete` is false, the worker must not use the path list as an allowlist; it logs a Warning and falls back to the full file list.
-
-**Tests** in `ReviewBot.GitHub.Tests/`: substitute `IGitHubClientFactory`; assert `Compare` called with the correct SHAs; returns file name list; marks exactly-300-file responses as incomplete; 404 response throws a descriptive exception that the worker can catch and convert to a full-review fallback.
-
-### Step 38: Worker integration
-
-**`ReviewBot.Api/Workers/ReviewWorker.cs`:** Inject `IPrReviewStateStore` alongside existing dependencies.
-
-In `ProcessAsync`, after config is loaded and before PR file patches are fetched:
-
-1. Query `IPrReviewStateStore.GetLastShaAsync(job.InstallationId, $"{job.Owner}/{job.Repo}", job.PrNumber, ct)`.
-2. Fetch PR metadata (`title`, `body`, `baseSha`, `headSha`) without file patches.
-3. If `lastSha` is non-null and differs from `metadata.HeadSha`:
-   - Call `GetChangedFilesSinceAsync(lastSha, metadata.HeadSha)`.
-   - If compare succeeds and `IsComplete == true`, use the changed path set as the PR-file fetch allowlist.
-   - If the changed path set is empty: log Debug "No files changed since last review; skipping review", call `SetLastShaAsync` to update timestamp, and return `JobProcessStatus.Skipped`.
-   - If compare fails, returns 404, or `IsComplete == false`: log Warning and fetch the full PR file list.
-4. Fetch PR files with the allowlist when available, otherwise use the current full-file path.
-5. Apply ignore globs, max-files, patch-budget filtering, and the Phase 10 no-reviewable-files fast path.
-6. After `reviewPoster.PostAsync` completes successfully: call `SetLastShaAsync(job.InstallationId, ..., metadata.HeadSha)`.
-7. Record an incremental-review metric labelled `first_review`, `delta_review`, `no_changes`, `compare_failed_fallback`, or `compare_truncated_fallback`.
-
-`IPrReviewStateStore` is injected (not optional) — it is always registered.
-
-**Tests** in `ReviewBot.Api.Tests/Workers/ReviewWorkerTests.cs` (4 new cases):
-- First review of a PR: SHA stored after posting.
-- Second push (new SHA, files changed): compare API called with old SHA as base; only delta files in LLM request.
-- Second push (new SHA, no files changed since last review): LLM not called; SHA updated; returns Skipped.
-- Compare API throws: full file list used; Warning logged; review proceeds.
-- Compare API returns 300 files / `IsComplete == false`: full file list used; Warning logged; review proceeds.
-- Delta file is beyond the first `max_files` PR-file page/window: allowlist fetch still retrieves it and sends it to the LLM.
+**E2E:** stub Contents API for a small `.cs` file; assert LLM request body contains the full-file section before the diff hunk.
 
 ---
 
-## Phase 13: E2E test infrastructure
+## Phase 19: OpenAI-compatible robustness
 
-**The problem.** No test covers the full path: webhook HTTP POST → job enqueue → background worker execution → GitHub API comment posting. Wiring bugs, middleware regressions, and cross-component interactions are invisible until production.
+**The problem.** Self-hosted models (Ollama, vLLM, llama.cpp) vary in JSON mode support. Parse failures return an empty result with no recovery. Token usage is invisible, so there is no signal for context-window pressure.
 
-**The approach.** A dedicated test project hosts the full ASP.NET Core app in-process via `WebApplicationFactory<Program>`. GitHub API and LLM endpoints are replaced by `WireMock.Net` stubs. A `WorkerSyncHelper` polls for the expected GitHub API call to appear in the WireMock capture log. Scenarios are expressed as reusable fixture files.
+**The approach.** Add a configurable response format mode, a single repair retry on parse failure, and token usage metrics from the API response. Focus is the OpenAI-compatible adapter.
 
-### Step 39: E2E test project and harness ✓ Complete
+### Step 51: Structured output mode
 
-**New project** `tests/ReviewBot.E2E.Tests/ReviewBot.E2E.Tests.csproj` targeting the same TFM as `ReviewBot.Api`. Added to solution file. This is separate from the pre-existing skipped/manual Ollama E2E project at `tests/ReviewBot.E2eTests/`.
+**`ReviewBot.Llm.OpenAi/OpenAiLlmOptions.cs`:** Add:
+```csharp
+public string ResponseFormat { get; set; } = "json_object";
+// accepted: json_object | json_schema | text
+```
 
-**Dependencies:**
-- `WireMock.Net` — in-process HTTP mock server.
-- `Microsoft.AspNetCore.Mvc.Testing` — `WebApplicationFactory<Program>`.
-- `xunit`, `xunit.runner.visualstudio` (already used elsewhere).
+**`ReviewBot.Llm.OpenAi/OpenAiReviewLlm.cs`:** In the request builder:
+- `json_object`: current behavior (`response_format: {"type": "json_object"}`).
+- `json_schema`: pass the full review JSON Schema via `response_format: {"type": "json_schema", "json_schema": {"name": "review_response", "strict": false, "schema": {...}}}`. `strict: false` for compatibility; not all self-hosted endpoints enforce it. Schema matches the prompt-embedded schema: `summary` (string), `comments` (array with `path`, `line`, `severity`, `confidence`, `body`), plus optional `context_requests` when agentic context is enabled.
+- `text`: omit `response_format` entirely; rely on the parser's fenced-JSON extraction.
 
-**Corrected implementation assumptions discovered during Step 39:**
-- There was no configurable GitHub API base URL, so Step 39 added `GitHubApp.ApiBaseUrl` and wired it into both `InstallationTokenClient` and `OctokitGitHubClientFactory`.
-- Octokit's `GitHubClient(product, uri)` constructor treats the URI as a GitHub Enterprise web root and appends `/api/v3`; `OctokitGitHubClientFactory` now uses an explicit `Connection` so the configured API URL is preserved exactly.
-- `AnthropicReviewLlm` does not currently expose a base URL option. The harness configures the OpenAI-compatible endpoint to `LlmMock`; mocked HTTP scenarios in Step 40 should use repo config to select provider `openai`, or a future chunk should add Anthropic base URL support before Anthropic-backed E2E scenarios.
+`CompleteRawAsync` (self-critique, agentic context passes) always uses `text` mode — those passes have non-standard schemas not covered by the review schema object.
 
-**`ReviewBotHarness`** (`IAsyncLifetime`, used as `IClassFixture` / `ICollectionFixture`):
-- Starts two `WireMockServer` instances on random ports: `GitHubMock` and `LlmMock`.
-- Creates a `WebApplicationFactory<Program>` that overrides:
-  - `GitHubApp.ApiBaseUrl` → `GitHubMock` URL.
-  - `OpenAi.BaseUrl` → `LlmMock` URL (`/v1`).
-  - `Webhook.Secret` → `"test-secret"`.
-  - SQLite connection string → temp file path (cleaned up in `DisposeAsync`).
-- Exposes `HttpClient CreateClient()` for posting webhooks.
-- Exposes `GitHubMock` and `LlmMock` for per-test stub configuration.
-- `ResetAsync()` clears all WireMock stubs and captured requests between tests.
+Config key: `OpenAi__ResponseFormat` env var or `OpenAi.ResponseFormat` in appsettings.
 
-**`WebhookSender`** helper: computes `X-Hub-Signature-256` HMAC-SHA256 over the body using `"test-secret"`, posts to `/webhook` with correct `X-GitHub-Event` and `X-GitHub-Delivery` headers.
+**Tests:** request serialization under each mode; existing tests pass with `json_object` default.
 
-**`WorkerSyncHelper`**: polls `GitHubMock.LogEntries` in a loop (50 ms intervals, 10-second timeout) until a `POST` request matching a supplied path predicate appears. Throws `TimeoutException` with a diagnostic message on expiry. Also exposes `WaitForNoCallAsync` (asserts the predicate is never matched within 2 seconds) for negative assertions.
+### Step 52: Parse-failure repair and token usage metrics
 
-**Harness tests added** in `ReviewBot.E2E.Tests/Infrastructure/ReviewBotHarnessTests.cs`:
-- Harness boots the full ASP.NET Core app and `/healthz` returns OK after applying migrations to temp SQLite.
-- `ResetAsync` clears WireMock logs.
-- `WebhookSender` creates a correctly signed pull-request webhook.
-- `WorkerSyncHelper` detects matching requests and passes negative assertions.
+**Parse repair** in `OpenAiReviewLlm.ReviewAsync` (and `AnthropicReviewLlm` for consistency):
 
-### Step 40: Fixture library and baseline E2E scenarios ✓ Complete
+On `LlmResultParser.Parse` failure:
+1. Log Warning with raw response truncated to 500 chars.
+2. Build repair payload: system = "Your previous response was not valid JSON. Return only a JSON object matching this schema: {schema}"; user = failed raw response.
+3. Call API once more; parse result.
+4. On second failure: log Warning "Repair failed"; return empty result.
 
-**Fixture files** in `tests/ReviewBot.E2E.Tests/Fixtures/` (embedded resources):
-- `webhook-pr-review-requested.json` — realistic `pull_request.review_requested` payload for `owner/repo` PR #1, SHA `abc123`, targeting `reviewbot[bot]`.
-- `webhook-pr-synchronize.json` — `pull_request.synchronize` payload, same PR, new SHA `def456`.
-- `pr-files-dotnet.json` — GitHub `/pulls/{n}/files` response with one `.cs` file diff.
-- `pr-files-empty.json` — empty files array.
-- `directory-build-props.xml` — `Directory.Build.props` with `net10.0` for grounding fixture.
-- `llm-response-two-comments.json` — canned LLM response: summary + two `high`-confidence comments.
-- `llm-response-mixed-confidence.json` — one `high` and one `low` comment (used in Phase 11 tests).
-- `installation-token-response.json` — GitHub Apps installation access token response.
-- `repo-config-openai.yml` — selects the OpenAI-compatible provider, enables `review.trigger.on_push`, and leaves grounding enabled without local builds.
-- `repo-config-ignore-all.yml` — selects the OpenAI-compatible provider and ignores all changed files.
+Repair is skipped when cancellation is already requested.
 
-**Baseline tests** in `ReviewBot.E2E.Tests/Scenarios/`:
+**Token usage metrics:** parse `usage` from every chat completion response:
+- Emit `reviewbot.llm.tokens` histogram with labels `direction=prompt|completion` and `phase=review|self_critique|agentic_context`
+- Log `cached_tokens` (from `usage.prompt_tokens_details.cached_tokens`) at Debug when non-zero — indicator of server-side KV cache hits on vLLM
+- Counter `reviewbot.llm.parse_failures_total` with label `repaired=true|false`
 
-`BasicReviewTests` (uses `ReviewBotHarness`):
-- **`ReviewRequestedPostsReviewWithTwoComments`**: stubs GitHub token, repo config, PR metadata, PR files, .NET grounding contents, OpenAI-compatible LLM response, and review POST endpoint. Posts `webhook-pr-review-requested.json`. Asserts a single `POST /repos/owner/repo/pulls/1/reviews` payload contains commit `abc123` and two inline comments.
-- **`ReviewRequestedIsIdempotentForDuplicateDelivery`**: delivers the same webhook twice with the same `X-GitHub-Delivery` ID. Asserts the LLM is called once and the review is posted once.
-- **`ReviewRequestedWithEmptyDiffSkipsLlmAndReviewPost`**: stubs PR files with `pr-files-empty.json`. Asserts `WorkerSyncHelper.WaitForNoCallAsync` confirms no LLM call and no review POST.
-- **`ReviewRequestedWithAllFilesIgnoredSkipsLlmAndReviewPost`**: repo config sets `ignore: ['**']`. Asserts no LLM call and no review POST.
+**Tests:**
+- Repair: first parse fails → repair call made → success → result returned; second parse also fails → Warning, empty result.
+- Token metrics: response with `usage` → histogram recorded; missing `usage` → no exception.
+- `parse_failures_total` incremented correctly.
 
-Each test class registers a `[Collection("E2E")]` to run sequentially (WireMock port conflicts under parallel execution).
-
-**Corrected implementation assumptions discovered during Step 40:**
-- The production webhook endpoint does not enqueue `pull_request.opened`; it enqueues `pull_request.review_requested` when the requested reviewer is the bot, and `pull_request.synchronize`. Baseline E2E coverage therefore uses `review_requested` for first-review scenarios.
-- `ReviewPoster` posts one pull-request review containing a `comments` array, not one API call per inline comment. Baseline assertions inspect the single review payload and its comment count.
-- The Step 39 Anthropic base URL limitation is handled in Step 40 by embedding repo config fixtures that select the OpenAI-compatible provider for HTTP-mocked scenarios.
+**E2E:** stub LLM to return malformed JSON on first call, valid JSON on repair call; assert review is posted and `parse_failures_total` counter is non-zero via metrics endpoint.
 
 ---
-
-## Phase 14: Self-critique pass
-
-**The problem.** A single-pass review contains false positives: code the model misreads, missing-error-handling comments where the caller handles it, and range-check complaints about values already validated upstream. A second LLM pass focused on finding false positives removes most of these at 2× the per-review LLM cost.
-
-**The approach.** After the initial review, first apply the cheap inline-comment and `min_confidence` gates to produce the candidate comments that could actually be posted. If `review.self_critique: true`, make a second LLM call only when at least one surviving candidate is below `Confidence.High`; high-confidence comments are retained without critique by default. The critique prompt presents the diff and the numbered lower-confidence proposed comments and asks the model to return the indices worth posting. Critique LLM failures fall through to the filtered candidate list — a review is never blocked.
-
-### Step 41: Self-critique prompt builder and response schema ✓ Complete
-
-**`ReviewBot.Core/Prompting/SelfCritiquePromptBuilder.cs`:**
-
-```csharp
-public static class SelfCritiquePromptBuilder
-{
-    public static PromptPayload Build(
-        IReadOnlyList<FileChange> files,
-        IReadOnlyList<InlineComment> proposedComments);
-}
-```
-
-System prompt: instructs the model it is a senior reviewer evaluating a junior reviewer's proposed comments for accuracy and usefulness. Lists criteria for removal: comment targets a line not in the diff, claims a bug that is clearly handled elsewhere in the same diff, flagging valid modern syntax as invalid, pure style preference with no correctness implication.
-
-User prompt: the diff (same format as the primary review), followed by the numbered proposed comments (index, path, line, confidence, body). Only comments being critiqued are listed; automatically retained high-confidence comments are not sent to reduce prompt size and cost.
-
-Response schema (separate from the primary review schema):
-
-```json
-{
-  "retained_indices": [0, 2],
-  "rationale": "string, brief explanation of removals"
-}
-```
-
-`retained_indices` is the authoritative output. The original comment text is never re-emitted — the model only votes on indices. `rationale` is logged at Debug.
-
-**`ReviewBot.Core/Domain/SelfCritiqueResult.cs`:**
-
-```csharp
-public sealed record SelfCritiqueResult(IReadOnlyList<int> RetainedIndices, string Rationale);
-```
-
-**`ReviewBot.Core/Llm/SelfCritiqueParser.cs`:** parses the critique JSON response, extracts `retained_indices` array. Invalid response (parse failure, missing field, out-of-range indices) returns `null` — caller falls back to all comments.
-
-**Tests** in `ReviewBot.Core.Tests/Prompting/SelfCritiquePromptBuilderTests.cs`:
-- Prompt contains the full diff and each proposed comment with its index.
-- Response JSON schema contains `retained_indices` array.
-- `SelfCritiqueParser`: valid response with subset of indices → correct `SelfCritiqueResult`; missing field → null; out-of-range index → null.
-
-**Implemented in Step 41:**
-- Added `SelfCritiqueResult` in `ReviewBot.Core/Domain`.
-- Added `SelfCritiquePromptBuilder`, which emits the full changed-file diff plus indexed proposed comments and a self-critique-only JSON schema.
-- Added `SelfCritiqueParser`, which accepts fenced/prose-wrapped JSON like the primary LLM parser, returns `null` on invalid output, rejects duplicate indices, and validates retained indices against the number of proposed comments.
-- Added focused core tests for prompt content, response schema, patch sanitization, valid parser output, fenced JSON, missing fields, malformed JSON, duplicates, and out-of-range indices.
-
-**Corrected implementation assumptions discovered during Step 41:**
-- `SelfCritiqueParser` cannot validate out-of-range indices without knowing how many comments were sent to the critique pass. Its public API is therefore `Parse(string rawResponse, int proposedCommentCount)`, and worker integration in Step 42 should pass `critiqueCandidates.Length`.
-
-**Stop test:** `dotnet test tests/ReviewBot.Core.Tests/ReviewBot.Core.Tests.csproj` passes: 55 passing, 0 failed.
-
-### Step 42: Worker integration ✓ Complete
-
-**`ReviewBot.Core/Domain/ReviewConfig.cs`:** Add `bool SelfCritique = false` to `ReviewOutputConfig`.
-
-**`ReviewBot.GitHub/Config/RepoConfigFetcher.cs`:** YAML DTO updated with `self_critique` boolean under `review:`.
-
-**`ReviewBot.Api/Workers/ReviewWorker.cs`:** Split output shaping into two stages:
-
-1. `FilterCandidateComments(result, config)` applies `inline_comments` and `min_confidence` before any optional second-pass work.
-2. Summary shaping and skipped-file notes happen after optional second-pass work.
-
-In `ProcessAsync`, after `result` is obtained from `llm.ReviewAsync`, after agentic context if enabled, and after candidate comment filtering, add the critique gate:
-
-```csharp
-var highConfidence = candidateComments
-    .Where(c => c.Confidence == Confidence.High)
-    .ToArray();
-var critiqueCandidates = candidateComments
-    .Where(c => c.Confidence != Confidence.High)
-    .ToArray();
-
-if (config.Review.SelfCritique && critiqueCandidates.Length > 0)
-{
-    var critiquePayload = SelfCritiquePromptBuilder.Build(files, critiqueCandidates);
-    try
-    {
-        var rawCritique = await llm.CompleteRawAsync(critiquePayload, ct);
-        var critique = SelfCritiqueParser.Parse(rawCritique, critiqueCandidates.Length);
-        if (critique is not null)
-        {
-            var retained = critique.RetainedIndices
-                .Select(i => critiqueCandidates[i])
-                .ToArray();
-            candidateComments = highConfidence.Concat(retained).ToArray();
-            logger.LogDebug(
-                "Self-critique retained {Retained}/{Total} lower-confidence comments",
-                retained.Length,
-                critiqueCandidates.Length);
-        }
-    }
-    catch (Exception ex) when (ex is not OperationCanceledException)
-    {
-        logger.LogWarning(ex, "Self-critique failed; using full initial comment set");
-    }
-}
-```
-
-`IReviewLlm` gains a `CompleteRawAsync(PromptPayload, CancellationToken)` method that returns the raw string response, used for non-standard response schemas (self-critique, later agentic context). Both `AnthropicReviewLlm` and `OpenAiReviewLlm` implement it by reusing their existing send/retry plumbing. Record a distinct metric label for second-pass LLM calls so the added cost is visible.
-
-**`docs/configuration.md`:** Document `review.self_critique`.
-
-**Tests** in `ReviewBot.Api.Tests/Workers/ReviewWorkerTests.cs`:
-- `SelfCritique = false`: `CompleteRawAsync` never called.
-- `SelfCritique = true`, all surviving comments are high confidence: `CompleteRawAsync` never called.
-- `SelfCritique = true`, critique retains indices `[0, 2]` from a 3-comment lower-confidence set: high-confidence comments plus lower-confidence comments 0 and 2 are posted.
-- `SelfCritique = true`, critique fails: all surviving candidate comments are posted; Warning logged.
-- `SelfCritique = true`, empty initial comment list: `CompleteRawAsync` not called.
-
-**E2E scenario** (extends Phase 13 harness): stub LLM primary call with a mixed-confidence response containing one high-confidence and two medium-confidence comments; stub second LLM call (critique) with `{"retained_indices": [0], "rationale": "comment 1 targets unchanged code"}` for the medium-confidence subset; assert the high-confidence comment plus the retained medium-confidence comment are posted.
-
-**Implemented in Step 42:**
-- Added `ReviewOutputConfig.SelfCritique` (default `false`) and mapped `review.self_critique` from `.github/review-bot.yml`.
-- Added `IReviewLlm.CompleteRawAsync(PromptPayload, CancellationToken)` for non-review response schemas. `AnthropicReviewLlm` and `OpenAiReviewLlm` reuse their existing send/retry plumbing for raw completions; `StubReviewLlm` supports deterministic raw responses in tests.
-- Split worker output shaping into candidate-comment filtering (`inline_comments` + `min_confidence`), optional self-critique for surviving lower-confidence comments, and final summary/comment shaping.
-- Worker self-critique keeps high-confidence comments automatically, sends only low/medium candidates to `SelfCritiquePromptBuilder`, parses retained indices with `SelfCritiqueParser.Parse(raw, critiqueCandidates.Length)`, and falls back to the full candidate set on parser failure or LLM exception.
-- Added `phase` to the `reviewbot.llm.duration_ms` histogram; primary calls record `phase=review`, and second-pass calls record `phase=self_critique`.
-- Documented `review.self_critique` and `review.min_confidence` in `docs/configuration.md`.
-- Added focused unit tests for raw-completion adapters, repo-config mapping, worker self-critique gates/fallbacks/retention behavior, and `StubReviewLlm`.
-- Added an E2E scenario using WireMock to return different OpenAI-compatible responses for the primary review and self-critique pass; it asserts one high-confidence comment plus the retained medium-confidence comment are posted.
-
-**Corrected implementation assumptions discovered during Step 42:**
-- The OpenAI-compatible and self-critique calls share the same `/v1/chat/completions` endpoint in E2E, so the WireMock stub must dispatch by request body content rather than by path.
-- The existing LLM duration histogram can expose second-pass cost with a low-cardinality `phase` tag instead of a separate metric instrument.
-- `docs/configuration.md` listed the wrong environment variable for OpenAI `MaxTokens`; corrected it while documenting the new review options.
-
-**Stop test:** `dotnet test --no-restore` passes: 290 passing, 0 failed, 1 skipped Ollama E2E test. First full-suite attempt reproduced the known `DeliveryStoreCleanupServiceTests.ContinuesLoopWhenCleanupFails` flake; the persistence project passed on immediate rerun, and the second full-suite run passed.
-
----
-
-## Phase 15: Agentic context fetching
-
-**The problem.** The model reviews a diff without being able to see the types, interfaces, and base classes that changed code depends on. "This doesn't implement the interface contract" is usually a false positive because the model cannot see the interface. Fetching a small number of referenced files eliminates this class of error.
-
-**The approach.** The initial review response may include a `context_requests` field listing files the model wants to read. The worker fetches those files via the GitHub Contents API and makes a single follow-up LLM call with the enriched context. The follow-up call produces the final comment set. Bounded to `max_context_requests` files (default 5) to prevent runaway API usage. Disabled by default.
-
-### Step 43: Context request schema, parser, and prompt changes ✓ Complete
-
-**`ReviewBot.Core/Domain/ContextRequest.cs`:**
-
-```csharp
-public sealed record ContextRequest(string Path, string? Reason);
-```
-
-**`ReviewBot.Core/Domain/ReviewResult.cs`:** Extend `ReviewResult`:
-
-```csharp
-public sealed record ReviewResult
-{
-    public ReviewResult(
-        string summary,
-        IReadOnlyList<InlineComment> comments,
-        IReadOnlyList<ContextRequest>? contextRequests = null)
-    {
-        Summary = summary;
-        Comments = comments;
-        ContextRequests = contextRequests ?? Array.Empty<ContextRequest>();
-    }
-
-    public string Summary { get; }
-    public IReadOnlyList<InlineComment> Comments { get; }
-    public IReadOnlyList<ContextRequest> ContextRequests { get; }
-}
-```
-
-The explicit constructor preserves existing two-argument construction sites while avoiding a `null!` list in the domain model.
-
-**`ReviewBot.Core/Llm/LlmResultParser.cs`:** In `ParseRoot`, after parsing `comments`, optionally parse `context_requests` array: each element must have a `path` string; `reason` is optional.
-
-**`ReviewBot.Core/Prompting/PromptBuilder.cs`:** `BuildSystemPrompt` extended. When `config.Review.AgenticContext == true`, append before the response schema:
-
-```
-You may request up to {MaxContextRequests} additional files to review. Include a context_requests array in your response if you need to see referenced types, interfaces, or base classes. Only request files you are confident are relevant.
-```
-
-Update the inline JSON schema to include:
-
-```json
-"context_requests": [
-  { "path": "string, repo-relative path", "reason": "optional string" }
-]
-```
-
-When `AgenticContext == false`, the field is absent from the schema instruction so the model never populates it.
-
-**`ReviewBot.Core/Prompting/PromptBuilder.cs`:** New static method:
-
-```csharp
-public static PromptPayload BuildContextEnrichedRequest(
-    ReviewRequest request,
-    ReviewResult initialResult,
-    IReadOnlyList<(string Path, string Content)> fetchedFiles);
-```
-
-Assembles the follow-up prompt: original diff + initial summary + initial comments (for continuity) + a `## Additional context` section listing each fetched file in a fenced code block. System prompt instructs the model this is the final review pass: re-emit all valid comments from the first pass plus any new ones informed by the additional context.
-
-**Tests** in `ReviewBot.Core.Tests/`:
-- `LlmResultParserTests`: response with `context_requests` → `ReviewResult.ContextRequests` populated; missing field → empty list.
-- `PromptBuilderTests`: `AgenticContext = true` → schema includes `context_requests` instruction; `AgenticContext = false` → schema does not.
-- `BuildContextEnrichedRequest`: prompt contains fetched file content in fenced block.
-- `BuildContextEnrichedRequest`: prompt includes the initial summary and comments so the second pass can retain or retract them intentionally.
-
-**Implemented in Step 43:**
-- Added `ContextRequest` and extended `ReviewResult` with a non-null `ContextRequests` list while preserving existing two-argument and named-argument construction sites.
-- Added `ReviewOutputConfig.AgenticContext` (default `false`) and `MaxContextRequests` (default `5`) in the core domain so prompt construction can be gated before Step 44's repo-config and worker wiring.
-- `LlmResultParser` now parses optional `context_requests`, accepts entries with required `path` and optional `reason`, defaults missing arrays to empty, and drops malformed context request entries without failing an otherwise valid review response.
-- `PromptBuilder.Build` now includes context-request instructions and schema only when `AgenticContext` is enabled.
-- Added `PromptBuilder.BuildContextEnrichedRequest`, which builds the second-pass prompt from the original diff, initial summary/comments, and fetched file contents, and disables recursive `context_requests` in the final-pass schema.
-- Fixed adjacent result-shaping helpers in `ReviewWorker` to preserve `ReviewResult.ContextRequests` when appending skipped-file notes or applying output filters.
-- Added focused parser and prompt-builder tests for context-request parsing, disabled/enabled schema behavior, fetched file inclusion, and initial review continuity in the enriched prompt.
-
-**Corrected implementation assumptions discovered during Step 43:**
-- The prompt gate cannot be implemented cleanly without core-domain config fields. `AgenticContext` and `MaxContextRequests` were added in Step 43; YAML mapping, `max_context_file_bytes`, validation, fetching, and worker execution remain Step 44.
-- `ReviewResult` needed to preserve source compatibility for existing tests and call sites that use `new ReviewResult(Summary: ..., Comments: ...)`, so the explicit constructor uses those parameter names.
-
-**Stop test:** `dotnet test tests/ReviewBot.Core.Tests/ReviewBot.Core.Tests.csproj` passes: 63 passing, 0 failed. Additional verification: `dotnet test tests/ReviewBot.Api.Tests/ReviewBot.Api.Tests.csproj --no-restore` passes: 52 passing, 0 failed. `dotnet test --no-restore` passed all projects except the known `DeliveryStoreCleanupServiceTests.ContinuesLoopWhenCleanupFails` flake; `dotnet test tests/ReviewBot.Persistence.Tests/ReviewBot.Persistence.Tests.csproj --no-restore` passed immediately afterward.
-
-### Step 44: Worker integration
-
-**`ReviewBot.Core/Domain/ReviewConfig.cs`:** `AgenticContext` and `MaxContextRequests` were added in Step 43 for prompt gating. Step 44 should add the remaining file-size cap:
-
-```csharp
-int MaxContextFileBytes = 50_000
-```
-
-**`ReviewBot.GitHub/Config/RepoConfigFetcher.cs`:** YAML keys `agentic_context`, `max_context_requests`, and `max_context_file_bytes` under `review:`.
-
-**`ReviewBot.GitHub/Pulls/IPullRequestFetcher.cs`** (or `IGitHubContentService`): add a bounded batch helper:
-
-```csharp
-Task<IReadOnlyList<(string Path, string Content)>> GetFileContentsAsync(
-    string owner,
-    string repo,
-    IReadOnlyList<ContextRequest> requests,
-    string sha,
-    int maxBytes,
-    string installationToken,
-    CancellationToken ct);
-```
-
-Internally this can call a single-file helper that returns null on 404, binary content, or files over `maxBytes`. Octokit's `Repository.Content.GetAllContentsByRef` already used in `GitHubRepoContentReader` — extract or reuse.
-
-Before fetching, validate each requested path:
-- Must be repo-relative, use `/` separators, and not start with `/`.
-- Reject `..` segments, empty segments, and duplicate paths.
-- Reject files already ignored by repo config.
-- Reject obvious secret/private-key paths (`.env`, `*.pem`, `*.key`, `id_rsa`, etc.) even if present in the repo.
-- Cap to `MaxContextRequests` after validation and log how many were dropped by each reason.
-
-Fetch validated paths with small bounded parallelism (for example 3 concurrent GitHub Contents calls) so context gathering does not serialize independent network requests but also does not burst API usage.
-
-**`ReviewBot.Api/Workers/ReviewWorker.cs`:** After obtaining the initial `result` from `llm.ReviewAsync` and before self-critique (if enabled), add the agentic context gate:
-
-```csharp
-if (config.Review.AgenticContext
-    && result.ContextRequests is { Count: > 0 } requests)
-{
-    var validRequests = ContextRequestValidator.Filter(
-        requests,
-        config.Ignore,
-        config.Review.MaxContextRequests,
-        logger);
-    var capped = validRequests.ToArray();
-    if (capped.Length < requests.Count)
-        logger.LogWarning("Context requests capped at {Cap}; {Total} requested", capped.Length, requests.Count);
-
-    var fetched = new List<(string Path, string Content)>();
-    // Fetch with bounded parallelism; preserve request order in the final prompt.
-    fetched.AddRange(await githubService.GetFileContentsAsync(
-        job.Owner, job.Repo, capped, snapshot.HeadSha,
-        config.Review.MaxContextFileBytes,
-        installationToken.Token, ct));
-
-    if (fetched.Count > 0)
-    {
-        try
-        {
-            var enrichedPayload = PromptBuilder.BuildContextEnrichedRequest(request, result, fetched);
-            var enrichedRaw = await llm.CompleteRawAsync(enrichedPayload, ct);
-            var enrichedParsed = LlmResultParser.Parse(enrichedRaw, logger);
-            if (enrichedParsed.Success)
-                result = enrichedParsed.Value!;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogWarning(ex, "Agentic context second pass failed; using initial comments");
-        }
-    }
-}
-```
-
-**`docs/configuration.md`:** Document `review.agentic_context`, `review.max_context_requests`, and `review.max_context_file_bytes`.
-
-**Tests** in `ReviewBot.Api.Tests/Workers/ReviewWorkerTests.cs`:
-- `AgenticContext = false`: `GetFileContentsAsync` never called.
-- `AgenticContext = true`, 2 requests, both fetched: second LLM call made; second-pass comments used.
-- 7 requests (over cap of 5): only 5 fetched; Warning logged.
-- Requests with `..`, absolute paths, ignored files, duplicate paths, secret-looking paths, binary files, and oversized files are dropped before the second LLM call.
-- All fetches return 404: second pass skipped; initial comments used.
-- Second LLM call fails: initial comments used; Warning logged.
-
-**E2E scenario**: stub initial LLM response with `context_requests: [{path: "src/IFoo.cs"}]`; stub GitHub Contents API for `src/IFoo.cs`; stub second LLM call returning a clean comment set. Assert second LLM call payload contains `src/IFoo.cs` content; assert posted comments come from second pass.
-
-**Implemented in Step 44:**
-- Added `ReviewOutputConfig.MaxContextFileBytes` (default `50_000`) and mapped `review.agentic_context`, `review.max_context_requests`, and `review.max_context_file_bytes` from `.github/review-bot.yml` with positive-integer validation.
-- Extended `IPullRequestFetcher` with `GetFileContentsAsync(...)`. `PullRequestFetcher` now fetches requested files through GitHub Contents with bounded parallelism of 3, preserves request order in the returned prompt context, returns null-on-skip for 404s, non-files, missing encoded content, oversized files, binary-looking NUL bytes, malformed base64, and invalid UTF-8, and enforces the decoded byte cap.
-- Added worker-side context request validation before any GitHub content fetch: repo-relative `/` paths only, no absolute paths, backslashes, empty segments, `.` or `..`; duplicate paths are dropped; repo ignore globs are honored; obvious secret/private-key paths such as `.env`, `*.pem`, `*.key`, and `id_rsa` are denied; accepted requests are capped to `MaxContextRequests`.
-- `ReviewWorker` now runs the agentic-context pass after the primary review and before self-critique/output filtering. If files are fetched, it builds `PromptBuilder.BuildContextEnrichedRequest`, calls `CompleteRawAsync`, parses with `LlmResultParser`, and replaces the initial result only on a valid response. Fetch, LLM, or parse failures fall back to the initial review.
-- Added `phase=agentic_context` samples to the existing LLM duration histogram for the second pass.
-- Documented `review.agentic_context`, `review.max_context_requests`, and `review.max_context_file_bytes`.
-- Added focused unit tests for repo-config mapping, GitHub content fetching/skipping, worker gates, validation/capping, fetch-empty fallback, and second-pass failure fallback.
-- Added an E2E scenario using WireMock: primary LLM response requests `src/Contracts/IUserRepository.cs`, GitHub Contents returns it, the second LLM request includes its content, and the posted review uses the second-pass comment.
-
-**Corrected implementation assumptions discovered during Step 44:**
-- Step 43 added `AgenticContext` and `MaxContextRequests`, but repo YAML mapping was not yet present. Step 44 added the mapping and the missing byte cap together so the feature can be enabled only with all guardrails configured.
-- Unsafe path rejection must happen in the worker before fetching, while binary/oversized/malformed content rejection belongs in the GitHub fetcher because those properties are only visible after the Contents API response.
-- The final agentic-context pass can reuse `LlmResultParser.Parse`; no separate response schema or parser is needed because the final pass emits the standard review result schema with recursive `context_requests` disabled by the prompt builder.
-
-**Stop test:** `dotnet test --no-restore` passes: 306 passing, 0 failed, 1 skipped Ollama E2E test.
-
----
-
-## Phase 16: Tier 3 grounding (checks first, local test runners second)
-
-**The problem.** Tier 2 grounding proves the PR branch compiles. The model still cannot know whether the change breaks existing tests or CI checks. A behavioral regression surfaces as "Tests: FAILED (4 failed)" or "Checks: FAILED" in the grounding context, giving the model ground truth to mention in its summary.
-
-**The approach.** Prefer already-computed GitHub Checks/statuses before executing anything locally. When `grounding.tests: true`, fetch completed check runs/statuses for the PR head SHA and include their aggregate result in the prompt; this is cheap, sandboxed by CI, and usually more representative than a local worker run. Add `ITestRunner` alongside `IBuildRunner` for the slower path, but run local tests only when a new explicit `grounding.local_tests: true` flag is set, after a successful build. Local tests remain opt-in because they add latency and execute project code on the worker.
-
-### Step 45: GitHub Checks grounding and local test-runner interface
-
-**`ReviewBot.GitHub/Checks/ICheckRunFetcher.cs`:** New interface:
-
-```csharp
-public interface ICheckRunFetcher
-{
-    Task<TestResult?> GetHeadCheckSummaryAsync(
-        string owner, string repo, string headSha,
-        string installationToken, CancellationToken ct);
-}
-```
-
-Implementation uses GitHub Checks and commit statuses for the head SHA. If no completed checks/statuses are found, returns null. If any required-looking check has `failure`, `timed_out`, `cancelled`, or `action_required`, returns a failed result. Successful checks count as passed; neutral/skipped checks count as skipped. `TestResult.Output` lists check names and conclusions, truncated to the same prompt-safe output length as local tests. Add a `Source` field to `TestResult` with default `"local"` and set it to `"github_checks"` for this path.
-
-**Tests** in `ReviewBot.GitHub.Tests/`:
-- All completed checks successful: returns `TestResult(Source: "github_checks", Failed: 0)`.
-- One failed check: returns failed result with the check name in output.
-- No completed checks/statuses: returns null.
-- GitHub API failure: throws; the worker/provider catches and proceeds without tests.
-
-**`ReviewBot.Grounding/Build/ITestRunner.cs`:**
-
-```csharp
-public interface ITestRunner
-{
-    string LanguageId { get; }
-    Task<TestResult> RunAsync(string workspacePath, GroundingConfig config, CancellationToken ct);
-}
-```
-
-**`ReviewBot.Grounding/DependencyInjection/GroundingBuilder.cs`:** Add `AddTestRunner<T>()` extension method, mirroring `AddBuildRunner<T>()`.
-
-**`GroundingConfig`:** Keep `Tests` as the cheap check/status summary switch and add `LocalTests` for worker-executed test commands:
-
-```csharp
-bool Tests,
-bool LocalTests,
-```
-
-`Tests = true, LocalTests = false` means "read GitHub Checks/statuses only." `LocalTests = true` implies `Tests = true` in config parsing.
-
-**`CompositeGroundingProvider`:** New constructor parameters `ICheckRunFetcher? checkRunFetcher` and `IEnumerable<ITestRunner> testRunners`. Internal test constructors gain defaults to preserve compatibility.
-
-`GetContextAsync` extended:
-1. When `request.Config.Tests == true`, first call `checkRunFetcher.GetHeadCheckSummaryAsync(...)`. If it returns a result, keep it even if no language detector matches.
-2. If no language detector matches, return `new GroundingContext(null, null, checkResult)` instead of `Empty` when check results exist.
-3. When check results exist, include them and do not run local tests unless `LocalTests == true`.
-4. When `request.Config.LocalTests == true && buildResult?.Success == true`, call `RunTestsAsync(request, language.LanguageId, ct)` in the ready workspace. `RunTestsAsync` follows the same exception-isolation pattern as `RunBuildAsync`: runner exceptions → failed `TestResult` with exception message, never rethrow.
-5. If both checks and local tests exist, prefer local test counts but append check conclusions to the output so the prompt still sees CI state.
-
-`GroundingContext` returned is now `new GroundingContext(language, buildResult, testResult)`.
-
-**`Program.cs`:** updated (Step 48).
-
-**Tests** in `ReviewBot.Grounding.Tests/CompositeGroundingProviderTests.cs`:
-- Local tests enabled + build success: test runner called; `TestResult` in context.
-- Tests enabled + GitHub checks available: local test runner not called when `LocalTests` is false.
-- Local tests enabled + build failure: local test runner not called; check result is still used if available.
-- Tests disabled: check fetcher and local test runner not called.
-- Test runner throws: `Tests.Passed = 0, Failed = 0`; review proceeds.
-
-**Implemented in Step 45:**
-- Added `TestResult.Source` (default `"local"`) so GitHub Checks/status summaries can be distinguished from future local test-runner output.
-- Added `ReviewBot.GitHub/Checks/ICheckRunFetcher` and `CheckRunFetcher`. It reads completed check runs via `client.Check.Run.GetAllForReference(...)` and commit statuses via `client.Repository.Status.GetCombined(...)`, returns `null` when nothing completed, maps successful checks/statuses to passed, failure/error/timed-out/cancelled/action-required conclusions to failed, neutral/skipped/stale checks to skipped, and records low-cardinality output with check/status names.
-- Added `GroundingConfig.LocalTests` and YAML mapping for `grounding.local_tests`; config parsing makes `local_tests: true` imply `tests: true`.
-- Added `ITestRunner` and `AddTestRunner<T>()` registration support. No language-specific local test runners are registered yet; Steps 46 and 47 remain responsible for .NET and Python implementations.
-- Extended `CompositeGroundingProvider` to fetch GitHub Checks/statuses when `grounding.tests` is enabled, preserve check results even when no language detector matches, skip local test runners unless `grounding.local_tests` is enabled, run matching local test runners only after a successful local build, convert local test-runner exceptions into a non-blocking `TestResult`, and append check output when both checks and local tests exist.
-- Registered `ICheckRunFetcher` in `Program.cs`.
-- Pulled the minimal prompt plumbing forward so Step 45 is end-to-end: `PromptBuilder` now emits a `## Project verification` section for checks-only grounding and includes source-aware `Checks:` / `Tests:` lines when `GroundingContext.Tests` is populated.
-- Grounding duration metrics now label check-backed results as `checks_success` or `checks_failed`.
-- Documented `grounding.tests` as GitHub Checks/status fetching and `grounding.local_tests` as a future local-execution flag.
-- Added focused tests for check/status fetching, config parsing, grounding-provider checks/local-test behavior, prompt exposure, and API composition compile coverage.
-
-**Corrected implementation assumptions discovered during Step 45:**
-- `TestResult` already existed in the core domain, so Step 45 did not need to add the type, only a source discriminator.
-- Fetching checks without prompt plumbing would have done work that the LLM could not see. The source-aware prompt section was moved forward from Step 46; Step 46 should now focus on the .NET runner and any refinements rather than first exposure of test/check results.
-- Commit statuses are separate from Checks in Octokit (`client.Repository.Status.GetCombined(...)`), so the check fetcher reads both APIs and merges their completed results.
-- `grounding.local_tests` must be parsed independently from `grounding.tests`, but it implies `Tests = true` so GitHub Checks remain available alongside future local runs.
-
-**Stop test:** `dotnet test --no-restore` passes: 322 passing, 0 failed, 1 skipped Ollama E2E test. Targeted suites also passed during implementation: Core (65), GitHub (54), Grounding (96), and API (58).
-
-### Step 46: .NET test runner ✓ Complete
-
-**`ReviewBot.Grounding/Languages/DotNet/DotNetTestRunner.cs`:** Implements `ITestRunner`. `LanguageId = "dotnet"`.
-
-Runs `dotnet test --no-build --no-restore -c Release` in `workspacePath`. Timeout from `GroundingConfig.TestTimeoutSeconds`. Captures stdout+stderr combined.
-
-Parses the MSBuild/VSTest summary line with a regex on the last match (multi-project solutions emit one line per project then an aggregate):
-
-```
-(?:Passed|Failed)!\s*-\s*Failed:\s*(\d+),\s*Passed:\s*(\d+),\s*Skipped:\s*(\d+)
-```
-
-Success when `exitCode == 0`. Output truncated to 4096 chars.
-
-Timeout (non-cancellation): returns `new TestResult(0, 0, 0, "dotnet test timed out")`. External cancellation propagates.
-
-**`PromptBuilder.BuildGroundingSection`** extended: when `tests` is not null (parameter added), append source-aware output even if `build` is null:
-
-```
-- Tests: PASSED (42 passed, 0 failed, 3 skipped) — existing behavior confirmed
-```
-or:
-```
-- Tests: FAILED (38 passed, 4 failed) — existing behavior may have regressed
-```
-For GitHub Checks-derived results, use `Checks:` instead of `Tests:` so the prompt does not confuse check counts with test-case counts.
-
-`BuildGroundingSection` signature becomes `BuildGroundingSection(LanguageMetadata? language, BuildResult? build, TestResult? tests)`. All callers updated.
-
-If checks/tests are available but language metadata is null, `PromptBuilder` should still append a small `## Project verification` section rather than dropping the checks.
-
-**Tests** in `ReviewBot.Grounding.Tests/Languages/DotNet/DotNetTestRunnerTests.cs`:
-- Valid project with passing tests: `TestResult(Passed: N, Failed: 0, Skipped: 0)`.
-- Failing test: `TestResult(Failed: 1, ...)`.
-- 1-second timeout: returns result, does not throw.
-- External cancellation: rethrows `OperationCanceledException`.
-
-**Tests** in `ReviewBot.Core.Tests/Prompting/PromptBuilderTests.cs`:
-- Grounding with passing tests: prompt contains "Tests: PASSED". ✓ (pre-existing)
-- Grounding with failing tests: prompt contains "Tests: FAILED". ✓ (added in Step 46)
-- Grounding with null tests: tests line absent from prompt. ✓ (added in Step 46)
-
-**Implemented in Step 46:**
-- Added `DotNetTestRunner` in `src/ReviewBot.Grounding/Languages/DotNet/DotNetTestRunner.cs`. Runs `dotnet test --no-build --no-restore -c Release`; parses the VSTest aggregate summary line with a compiled regex (uses the last match for multi-project solutions); returns `TestResult(0, 0, 0, "dotnet test timed out")` on internal timeout; rethrows external `OperationCanceledException`; truncates output to 4096 chars. Output truncation and regex capture groups order (Groups[1]=Failed, Groups[2]=Passed, Groups[3]=Skipped) match the `(?:Passed|Failed)! - Failed:(\d+), Passed:(\d+), Skipped:(\d+)` pattern.
-- Added `DotNetTestRunnerTests` with 4 integration tests: passing tests (pre-built xunit project), failing test (assertion fails), 1-second timeout (no exception), external cancellation (propagates). Tests pre-build the fixture project so the runner can use `--no-build --no-restore`.
-- Added `GroundingWithFailingLocalTestsIncludesFailedLine` and `GroundingWithNullTestsOmitsTestsLine` to `PromptBuilderTests`.
-
-**Corrected implementation assumptions discovered during Step 46:**
-- The `PromptBuilder` `Tests: PASSED`/`FAILED` and `null tests → absent` prompt tests were partially already covered by `GroundingWithPassingLocalTestsIncludesTestsLine` and `GroundingWithGitHubChecksIncludesVerificationWithoutLanguage`. Step 46 added the missing `Tests: FAILED` (local) and null-Tests-with-language cases.
-- Pre-building the fixture project in `CreateAndBuildTestProjectAsync` is necessary because the runner uses `--no-build`; adding packages to the test project's csproj with explicit versions (not central management) avoids conflicts with the host repo's `Directory.Packages.props`.
-
-**Stop test:** `dotnet test --no-restore` passes: 328 passing, 0 failed, 1 skipped Ollama E2E test. Targeted suite: Grounding.Tests 100 passing (up from 96).
-
-### Step 47: Python test runner ✓ Complete
-
-**`ReviewBot.Grounding/Languages/Python/PythonTestRunner.cs`:** Implements `ITestRunner`. `LanguageId = "python"`.
-
-Checks for any of: `pytest.ini`, `pyproject.toml` (with `[tool.pytest.ini_options]` section), `setup.cfg` (with `[tool:pytest]`), `conftest.py` in `workspacePath`. If none found, returns `new TestResult(0, 0, 0, "no pytest configuration detected")` without running anything.
-
-If detected: runs `python3 -m pytest --tb=no -q --no-header`. Parses pytest summary counts in any order:
-
-```
-(?<count>\d+)\s+(?<kind>passed|failed|skipped)
-```
-
-Timeout from `GroundingConfig.TestTimeoutSeconds`. External cancellation propagates.
-
-**Tests** in `ReviewBot.Grounding.Tests/Languages/Python/PythonTestRunnerTests.cs`:
-- All passing: `TestResult(Passed: N, Failed: 0)`.
-- One failing: `TestResult(Failed: 1)`.
-- No pytest config: returns result with 0 counts without running pytest (no process spawned).
-- Timeout: returns result, does not throw.
-- External cancellation: rethrows.
-
-**Implemented in Step 47:**
-- Added `PythonTestRunner` in `src/ReviewBot.Grounding/Languages/Python/PythonTestRunner.cs`. It detects pytest config via `pytest.ini`, `conftest.py`, `[tool.pytest.ini_options]` in `pyproject.toml`, or `[tool:pytest]` in `setup.cfg` before spawning any process.
-- When config is present, the runner executes `python3 -m pytest --tb=no -q --no-header`, sets `PYTHONDONTWRITEBYTECODE=1`, captures stdout/stderr, truncates output to 4096 chars, and returns `TestResult` counts with source defaulting to `"local"`.
-- Internal timeouts return `new TestResult(0, 0, 0, "pytest timed out")`; external cancellation rethrows `OperationCanceledException`; killed processes use `entireProcessTree: true`.
-- Added deterministic `PythonTestRunnerTests` using a local temporary `pytest.py` module so the process path and parser are covered without requiring pytest to be installed globally on the worker.
-- Added tests for passing, failing, skipped, no-config/no-process, timeout, external cancellation, and pytest-config detection.
-
-**Corrected implementation assumptions discovered during Step 47:**
-- The planned regex `(\d+) passed(?:, (\d+) failed)?(?:, (\d+) skipped)?` does not match common pytest failure summaries such as `1 failed, 1 passed`. The implementation instead parses `count + kind` pairs for `passed`, `failed`, and `skipped` in any order.
-- This environment's system `python3` does not have pytest installed. Tests therefore use a local `pytest.py` fixture module to exercise `python3 -m pytest` deterministically without relying on global packages.
-- `DotNetTestRunner` is implemented but local test runners are not registered in `Program.cs` yet. Step 48 remains the production wiring chunk for both .NET and Python test runners.
-
-**Stop test:** `dotnet test tests/ReviewBot.Grounding.Tests/ReviewBot.Grounding.Tests.csproj --no-restore` passes: 111 passing, 0 failed. Full-suite verification was attempted twice with `dotnet test --no-restore`; both runs failed only in the pre-existing `ReviewBot.Persistence.Tests.DeliveryStoreCleanupServiceTests.RunsCleanupEachHourWithThirtyDayCutoff` timing flake, while the persistence project passed immediately on targeted rerun (`14 passing, 0 failed`) after the first full-suite attempt.
-
-### Step 48: Program.cs wiring and E2E scenario ✓ Complete
-
-**Implemented in Step 48:**
-- Registered `DotNetTestRunner` and `PythonTestRunner` in `ReviewBot.Api/Program.cs` through the existing `AddTestRunner<T>()` grounding builder. `ICheckRunFetcher` was already registered from Step 45, so no duplicate composition change was needed.
-- Added an API composition-root test proving `IEnumerable<ITestRunner>` contains both `dotnet` and `python`, mirroring the existing build-runner registration test.
-- Updated `docs/configuration.md` so `grounding.local_tests` no longer says local runners are future work. The docs now list the built-in .NET and Python commands, keep the security warning tied to local code execution, and clarify that `test_timeout_seconds` affects local runners only.
-- Added `repo-config-checks.yml` and an E2E scenario that stubs Tier 1 .NET grounding plus GitHub Checks/status endpoints. The captured OpenAI-compatible LLM request body must contain `## Project context`, `C# (.NET 10.0)`, `Checks: FAILED`, and the failed check name before the review is posted.
-
-**Corrected implementation assumptions discovered during Step 48:**
-- `ICheckRunFetcher` was already registered in `Program.cs` by Step 45; Step 48 only needed local test-runner DI wiring.
-- At Step 48 time, `grounding.test_command` was parsed from repo YAML but the .NET and Python test runners still used their fixed language-specific commands. The command-override follow-up below closes this risk and also fixes the same issue for `grounding.build_command`.
-
-**Stop test:** `dotnet test --no-restore` passes: 345 passing, 0 failed, 1 skipped Ollama E2E test. Targeted suites also passed during implementation: API (63) and E2E (12).
-
-### Phase 16 command-override follow-up ✓ Complete
-
-**Implemented after Step 48:**
-- Added shared `ProcessCommand` parsing for grounding command overrides. The parser splits configured commands into `FileName` + argv without invoking a shell, supports quoted arguments and escaped whitespace, rejects unterminated quotes, and preserves backslashes that are not escaping shell syntax.
-- `DotNetBuildRunner` and `PythonBuildRunner` now honor `GroundingConfig.BuildCommand` before falling back to their language-specific auto-detected commands.
-- `DotNetTestRunner` and `PythonTestRunner` now honor `GroundingConfig.TestCommand` before falling back to their language-specific auto-detected commands. Python custom test commands intentionally bypass pytest-config detection because the configured command is already the user's explicit execution choice.
-- `docs/configuration.md` now documents `build_command` and `test_command` as active direct-argv overrides and clarifies that shell operators and environment expansion are not evaluated.
-- Added tests for command parsing, quoted arguments, non-shell backslash preservation, and all four runner override paths.
-
-**Corrected implementation assumptions discovered during this follow-up:**
-- The open Step 48 risk named `grounding.test_command`, but reading the runner area showed `grounding.build_command` was also parsed and documented as an override while still ignored by both build runners.
-- Command overrides should be parsed directly into `ProcessStartInfo.ArgumentList`; using shell evaluation would make repo config more surprising and expand the security surface for an already opt-in code-execution feature.
-
-**Stop test:** `dotnet test --no-restore` passes: 352 passing, 0 failed, 1 skipped Ollama E2E test. Targeted suite: `dotnet test tests/ReviewBot.Grounding.Tests/ReviewBot.Grounding.Tests.csproj --no-restore` passes: 118 passing, 0 failed.
-
----
-
-## Risk register
-
-- **Open**: Dockerfile has not been exercised with an actual `docker build`. Validate before relying on container output.
-- **Open**: `Anthropic.SDK` 5.10.0 is unofficial. Confined to `AnthropicReviewLlm`; revisit if an official .NET SDK ships.
-- **Open**: OpenAI-compatible providers may not all support JSON mode. Mitigated by `UseJsonMode` toggle.
-- **Open**: `DeliveryStoreCleanupServiceTests` contains timing-sensitive cleanup-loop tests that are flaky under parallel full-solution execution. `ContinuesLoopWhenCleanupFails` was reproduced during Phase 13 Step 39; `RunsCleanupEachHourWithThirtyDayCutoff` reproduced during Phase 16 Step 47 verification. The persistence project passed on immediate targeted rerun after the Step 47 full-suite failure.
-- **Closed (Phase 10)**: Parallel clone + extraction — `CancelAndDisposeCloneAsync` propagates `OperationCanceledException`; covered by `MetadataExtractionThrowsDisposesPreStartedWorkspace` test.
-- **Closed (Phase 12 Step 36)**: EF Core 10 promotes `PendingModelChangesWarning` to an error, so hand-crafted model snapshots always fail migration tests. Always use `dotnet ef migrations add` to generate both the migration file and the snapshot; never write them by hand.
-- **Closed (Phase 12 Step 37)**: GitHub's compare API returns at most 300 files. `ChangedFilesResult.IsComplete` is `false` when `Paths.Count >= 300`; the worker (Step 38) must not use the truncated path list as an allowlist in that case.
-- **Open**: Octokit 14 model classes (`CompareResult`, `GitHubCommitFile`, etc.) have non-virtual properties. NSubstitute cannot mock them. Tests must construct these types directly via their public constructors. Future tests touching new Octokit model types should verify property virtuality before attempting `Substitute.For<T>()`. The `client.Repository.Commit.Compare` API uses singular `Commit`, not `Commits`.
-- **Closed (Phase 13 Step 39)**: E2E WireMock required a configurable GitHub API base URL. Added `GitHubApp.ApiBaseUrl` and used an explicit Octokit `Connection` so configured API URLs are not rewritten to GitHub Enterprise `/api/v3` paths.
-- **Closed (Phase 13 Step 40)**: The baseline E2E plan assumed `pull_request.opened` was reviewable and that inline comments produced separate GitHub review API calls. The implemented tests now match production behavior: `review_requested` triggers first-review coverage, and assertions inspect the single review payload's `comments` array.
-- **Closed (Phase 14 Step 41)**: Self-critique retained-index validation needs the proposed comment count. `SelfCritiqueParser.Parse` now takes `proposedCommentCount`, rejects out-of-range and duplicate indices, and Step 42 worker integration passes `critiqueCandidates.Length`.
-- **Open (future Anthropic E2E)**: The current Anthropic SDK adapter has no configurable base URL. HTTP-mocked E2E scenarios should select the OpenAI-compatible provider through `.github/review-bot.yml`, as Step 40 does, or add Anthropic base URL injection before testing Anthropic over WireMock.
-- **Closed (Phase 14 Step 42)**: `IReviewLlm.CompleteRawAsync` is implemented by Anthropic, OpenAI-compatible, and stub LLMs; worker self-critique uses it only behind `review.self_critique`.
-- **Closed (Phase 15 Step 44)**: Agentic context gives the model influence over which repository files are fetched. Step 44 shipped worker-side path validation, ignore-glob enforcement, duplicate/cap handling, secret-looking path denial, and fetcher-side file-size, binary, malformed base64, invalid UTF-8, and 404 rejection before fetched content is sent to the LLM.
-- **Open (Phase 16)**: Local build/test execution requires SDKs on the worker and executes project code. Keep local-test E2E scenarios behind `[Trait("Category", "RequiresSdk")]` and a CI flag; default Tier 3 E2E should use mocked GitHub Checks/statuses.
-- **Closed (Phase 16 command-override follow-up)**: `grounding.test_command` was parsed from repo YAML but was not honored by `DotNetTestRunner` or `PythonTestRunner`; reading the area also found `grounding.build_command` was documented as an override but ignored by both build runners. The .NET and Python build/test runners now honor both config keys through direct argv parsing without shell evaluation.
-- **Closed (Phase 16 Step 45)**: GitHub Checks/status grounding must not execute repository code. Step 45 reads only GitHub API check/status results behind `grounding.tests`; local execution is separated behind `grounding.local_tests`.
-- **Closed (Phase 16 Step 48)**: Local test runners were implemented but not registered in production DI. `Program.cs` now registers both `DotNetTestRunner` and `PythonTestRunner`, with composition-root coverage.
-- **Open (Phase 16 Step 45)**: Branch-protection "required" check context discovery is not implemented. The check fetcher currently treats any completed failing check/status as failed and any completed successful check/status as passed.
 
 ## What is intentionally excluded
 
@@ -910,6 +166,6 @@ Timeout from `GroundingConfig.TestTimeoutSeconds`. External cancellation propaga
 - No support for reply threads on existing review comments.
 - No GitHub Enterprise Server (only github.com).
 - No fine-grained per-file model selection.
-- No Tier 3 grounding for languages other than .NET and Python in v2.
-- Agentic context fetching is bounded to one round of file fetching — no recursive context expansion.
-- No local build/test execution by default; local execution remains a per-repo opt-in.
+- No Tier 3 grounding for languages other than .NET and Python.
+- Agentic context fetching is bounded to one round — no recursive expansion.
+- No local build/test execution by default; remains per-repo opt-in.
