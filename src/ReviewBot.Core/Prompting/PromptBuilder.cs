@@ -76,6 +76,15 @@ Assign a confidence level to each comment based on how certain you are:
 - "medium": likely an issue but depends on context outside the diff
 - "low": speculative or stylistic; you would not block a merge on this alone
 
+Comment quality rules:
+- Inline comments should be concise: state the issue, why it matters, and the smallest useful fix direction in 1-3 sentences.
+- Do not paste, quote, or restate code that is already visible in the diff. The GitHub review UI already shows the relevant code.
+- Do not include code fences, pseudocode, or example implementations unless you can provide a short GitHub suggestion block that is an exact replacement for the commented lines.
+- If a concern depends on code that is not present, request that file through the additional context mechanism when available. If you cannot request or see the needed context, omit the comment.
+- Do not leave "not visible in this diff", "cannot verify", or "make sure this is handled elsewhere" comments.
+- Do not flag that a call "could throw" unless the diff changed an error-handling boundary, removed existing handling, violates a visible contract, or creates an observable reliability regression.
+- If several lines share the same root cause, leave one comment at the best line instead of repeating the same concern on each call site.
+
 When an existing code comment explains why a design choice was made, do not flag it as a bug unless you can identify a factual error in the stated reasoning.
 Only flag security issues at real trust boundaries — user-supplied HTTP fields, external API responses, untrusted file content. Do not flag internal method parameters passed between layers of the same codebase as injection or path traversal risks.
 Each non-deleted diff line is prefixed with its exact new-file line number (format: `+  NNN: code` for added, `   NNN: code` for context). Use that number directly as the `line` field — do not count lines yourself.
@@ -85,7 +94,7 @@ Each non-deleted diff line is prefixed with its exact new-file line number (form
         {
             prompt.Append($"""
 
-You may request up to {config.Review.MaxContextRequests} additional files to review. Include a context_requests array in your response if you need to see referenced types, interfaces, or base classes. Only request files you are confident are relevant.
+You may request up to {config.Review.MaxContextRequests} additional files to review. Include a context_requests array in your response if you need to see referenced types, interfaces, base classes, or helper implementations before making a comment. Only request files you are confident are relevant.
 """);
         }
 
@@ -108,7 +117,7 @@ Schema:
       "line": "integer, use the NNN from the diff line annotation prefix",
       "severity": "info|warning|error",
       "confidence": "high|medium|low",
-      "body": "string, markdown allowed; for fixes use GitHub suggestion blocks"
+      "body": "string, markdown allowed; concise review comment, no copied diff code"
     }
   ]
 """);

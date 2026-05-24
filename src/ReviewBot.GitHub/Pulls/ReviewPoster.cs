@@ -37,10 +37,12 @@ public sealed class ReviewPoster : IReviewPoster
         ValidateInputs(owner, repo, prNumber, commitSha, result, files, installationToken);
         ct.ThrowIfCancellationRequested();
 
-        var commentableLinesByPath = files.ToDictionary(
-            file => file.Path,
-            file => file.CommentableLines,
-            StringComparer.Ordinal);
+        var commentableLinesByPath = files
+            .GroupBy(f => f.Path, StringComparer.Ordinal)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlySet<int>)g.SelectMany(f => f.CommentableLines).ToHashSet(),
+                StringComparer.Ordinal);
         var acceptedComments = new List<InlineComment>();
         var droppedCount = 0;
 
