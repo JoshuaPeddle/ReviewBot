@@ -61,7 +61,7 @@ public static class WebhookEndpoint
             return Results.BadRequest();
         }
 
-        if (!ShouldEnqueue(payload, options.Value.BotSlug))
+        if (!ShouldEnqueue(payload))
         {
             return Results.NoContent();
         }
@@ -100,16 +100,8 @@ public static class WebhookEndpoint
         return buffer.ToArray();
     }
 
-    private static bool ShouldEnqueue(PullRequestEvent payload, string botSlug)
-    {
-        if (string.Equals(payload.Action, "synchronize", StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        return string.Equals(payload.Action, "review_requested", StringComparison.Ordinal) &&
-               string.Equals(payload.RequestedReviewer?.Login, botSlug, StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool ShouldEnqueue(PullRequestEvent payload) =>
+        payload.Action is "opened" or "reopened" or "synchronize";
 
     private static bool HasRequiredFields(PullRequestEvent payload)
     {

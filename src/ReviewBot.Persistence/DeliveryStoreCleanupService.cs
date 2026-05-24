@@ -11,12 +11,11 @@ public sealed class DeliveryStoreCleanupService(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromHours(1), clock);
-
         try
         {
-            while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
+            while (true)
             {
+                await Task.Delay(TimeSpan.FromHours(1), clock, stoppingToken).ConfigureAwait(false);
                 try
                 {
                     await store.CleanupAsync(clock.GetUtcNow().AddDays(-30), stoppingToken).ConfigureAwait(false);

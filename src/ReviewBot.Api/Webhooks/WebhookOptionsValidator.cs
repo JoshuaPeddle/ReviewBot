@@ -14,11 +14,6 @@ public sealed class WebhookOptionsValidator : IValidateOptions<WebhookOptions>
             failures.Add("Webhook:Secret must be provided.");
         }
 
-        if (string.IsNullOrWhiteSpace(options.BotSlug))
-        {
-            failures.Add("Webhook:BotSlug must be provided.");
-        }
-
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);
