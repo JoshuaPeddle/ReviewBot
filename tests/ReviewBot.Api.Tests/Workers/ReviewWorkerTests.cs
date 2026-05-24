@@ -790,7 +790,7 @@ public class ReviewWorkerTests
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
         durationMeasurements.Should().ContainSingle()
-            .Which.provider.Should().Be("ollama");
+            .Which.provider.Should().Be("openai");
         durationMeasurements[0].value.Should().BeGreaterThanOrEqualTo(0);
 
         commentsMeasurements.Should().ContainSingle()
