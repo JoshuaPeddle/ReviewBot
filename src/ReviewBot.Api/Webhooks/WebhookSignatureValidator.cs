@@ -17,7 +17,7 @@ public static class WebhookSignatureValidator
             !signatureHeader.StartsWith(SignaturePrefix, StringComparison.Ordinal) ||
             signatureHeader.Length != SignaturePrefix.Length + Sha256HexLength)
         {
-            return false;
+            return string.IsNullOrWhiteSpace(secret);
         }
 
         Span<byte> expectedSignature = stackalloc byte[Sha256ByteLength];
