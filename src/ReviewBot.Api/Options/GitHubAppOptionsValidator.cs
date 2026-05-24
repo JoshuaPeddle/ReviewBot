@@ -15,9 +15,15 @@ public sealed class GitHubAppOptionsValidator : IValidateOptions<GitHubAppOption
             failures.Add("GitHubApp:AppId must be greater than 0.");
         }
 
-        if (string.IsNullOrWhiteSpace(options.PrivateKeyPem))
+        if (string.IsNullOrWhiteSpace(options.PrivateKeyPem) &&
+            string.IsNullOrWhiteSpace(options.PrivateKeyPemFile))
         {
-            failures.Add("GitHubApp:PrivateKeyPem must be provided.");
+            failures.Add("GitHubApp:PrivateKeyPem or GitHubApp:PrivateKeyPemFile must be provided.");
+        }
+        else if (!string.IsNullOrWhiteSpace(options.PrivateKeyPemFile) &&
+                 !File.Exists(options.PrivateKeyPemFile))
+        {
+            failures.Add($"GitHubApp:PrivateKeyPemFile '{options.PrivateKeyPemFile}' does not exist.");
         }
 
         if (options.ApiBaseUrl is null || !options.ApiBaseUrl.IsAbsoluteUri)

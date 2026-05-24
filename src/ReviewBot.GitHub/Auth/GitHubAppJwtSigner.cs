@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using StringBuilder = System.Text.StringBuilder;
 
 namespace ReviewBot.GitHub.Auth;
 
@@ -22,14 +23,21 @@ public sealed class GitHubAppJwtSigner
             throw new ArgumentOutOfRangeException(nameof(options), options.AppId, "GitHub App ID must be positive.");
         }
 
-        if (string.IsNullOrWhiteSpace(options.PrivateKeyPem))
+        if (string.IsNullOrWhiteSpace(options.PrivateKeyPem) &&
+            string.IsNullOrWhiteSpace(options.PrivateKeyPemFile))
         {
             throw new ArgumentException("GitHub App private key PEM must be provided.", nameof(options));
         }
 
         this.options = options;
         signingKey = new Lazy<RSA>(
-            () => LoadPrivateKey(options.PrivateKeyPem),
+            () =>
+            {
+                var pem = string.IsNullOrWhiteSpace(options.PrivateKeyPem)
+                    ? File.ReadAllText(options.PrivateKeyPemFile)
+                    : options.PrivateKeyPem;
+                return LoadPrivateKey(pem);
+            },
             LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
@@ -74,7 +82,6 @@ public sealed class GitHubAppJwtSigner
             throw;
         }
     }
-
     private static string Base64UrlEncode(ReadOnlySpan<byte> bytes) =>
         Convert
             .ToBase64String(bytes)
