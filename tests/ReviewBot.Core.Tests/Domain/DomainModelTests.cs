@@ -10,8 +10,8 @@ public class DomainModelTests
     {
         var config = ReviewConfig.Default;
 
-        config.Model.Provider.Should().Be("anthropic");
-        config.Model.Name.Should().Be("claude-opus-4-7");
+        config.Model.Provider.Should().Be("openai");
+        config.Model.Name.Should().Be("qwen3.5:9b-q4_K_M");
         config.Review.InlineComments.Should().BeTrue();
         config.Review.Summary.Should().BeTrue();
         config.Review.MaxFiles.Should().Be(50);
