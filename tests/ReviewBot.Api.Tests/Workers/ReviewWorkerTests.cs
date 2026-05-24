@@ -790,7 +790,7 @@ public class ReviewWorkerTests
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
         durationMeasurements.Should().ContainSingle()
-            .Which.provider.Should().Be("anthropic");
+            .Which.provider.Should().Be("ollama");
         durationMeasurements[0].value.Should().BeGreaterThanOrEqualTo(0);
 
         commentsMeasurements.Should().ContainSingle()
