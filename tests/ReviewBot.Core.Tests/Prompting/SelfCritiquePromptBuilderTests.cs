@@ -49,6 +49,11 @@ public class SelfCritiquePromptBuilderTests
         var payload = SelfCritiquePromptBuilder.Build([], []);
 
         payload.SystemPrompt.Should().Contain("evaluating a junior reviewer's proposed pull request comments");
+        payload.SystemPrompt.Should().Contain("depend on missing context instead of evidence visible in the diff");
+        payload.SystemPrompt.Should().Contain("say an implementation is not visible, cannot be verified");
+        payload.SystemPrompt.Should().Contain("merely say a call could throw");
+        payload.SystemPrompt.Should().Contain("duplicate the same root cause already covered by a clearer comment");
+        payload.SystemPrompt.Should().Contain("paste or restate code already visible in the diff");
         payload.SystemPrompt.Should().Contain("\"retained_indices\": [0, 2]");
         payload.SystemPrompt.Should().Contain("\"rationale\": \"string, brief explanation of removals\"");
         payload.SystemPrompt.Should().Contain("The retained_indices array is authoritative");

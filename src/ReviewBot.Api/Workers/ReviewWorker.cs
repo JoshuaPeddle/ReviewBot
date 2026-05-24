@@ -1,6 +1,8 @@
 using System.Diagnostics;
+using System.Text;
 using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Options;
+using Octokit;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
@@ -262,6 +264,15 @@ public sealed class ReviewWorker : BackgroundService
             return JobProcessStatus.Skipped;
         }
 
+        var fullFileContents = await FetchFullFileContentsAsync(
+                files,
+                config,
+                job,
+                metadata.HeadSha,
+                installationToken.Token,
+                ct)
+            .ConfigureAwait(false);
+
         var groundingRequest = new GroundingRequest(
             Owner: job.Owner,
             Repo: job.Repo,
@@ -295,7 +306,8 @@ public sealed class ReviewWorker : BackgroundService
             metadata.HeadSha,
             files,
             config,
-            grounding);
+            grounding,
+            fullFileContents);
 
         var llm = llmFactory.Create(config.Model);
         var sw = Stopwatch.StartNew();
@@ -327,10 +339,11 @@ public sealed class ReviewWorker : BackgroundService
             result = AppendRereviewHint(result);
         }
 
+        var reviewEvent = DetermineReviewEvent(result.Comments, config);
         metrics.RecordCommentsPosted(result.Comments.Count);
 
         await reviewPoster
-            .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct)
+            .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct, reviewEvent)
             .ConfigureAwait(false);
 
         await prReviewStateStore
@@ -342,6 +355,97 @@ public sealed class ReviewWorker : BackgroundService
     }
 
     private enum JobProcessStatus { Success, Skipped }
+
+    private async Task<IReadOnlyDictionary<string, string>?> FetchFullFileContentsAsync(
+        IReadOnlyList<FileChange> files,
+        ReviewConfig config,
+        ReviewJob job,
+        string headSha,
+        string installationToken,
+        CancellationToken ct)
+    {
+        if (config.Review.FullFileMaxBytes <= 0)
+        {
+            return null;
+        }
+
+        var requests = files
+            .Where(file => file.Status != FileChangeStatus.Removed)
+            .Where(file => EstimatePatchBytes(file) <= config.Review.FullFileMaxBytes)
+            .Select(file => new ContextRequest(file.Path, "full-file context for small changed file"))
+            .ToArray();
+
+        if (requests.Length == 0)
+        {
+            logger.LogDebug(
+                "Full-file context enabled for {Owner}/{Repo}#{PrNumber}, but no changed files were under {MaxBytes} bytes",
+                job.Owner,
+                job.Repo,
+                job.PrNumber,
+                config.Review.FullFileMaxBytes);
+            return null;
+        }
+
+        IReadOnlyList<(string Path, string Content)> fetchedFiles;
+        try
+        {
+            fetchedFiles = await pullRequestFetcher
+                .GetFileContentsAsync(
+                    job.Owner,
+                    job.Repo,
+                    requests,
+                    headSha,
+                    config.Review.FullFileMaxBytes,
+                    installationToken,
+                    ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Full-file context fetch failed; continuing with diff-only prompt");
+            return null;
+        }
+
+        if (fetchedFiles.Count == 0)
+        {
+            logger.LogInformation(
+                "Full-file context: {CandidateCount} candidate file(s) for {Owner}/{Repo}#{PrNumber} but none could be fetched (404, binary, or oversized)",
+                requests.Length,
+                job.Owner,
+                job.Repo,
+                job.PrNumber);
+            return null;
+        }
+
+        logger.LogInformation(
+            "Full-file context: fetched {FetchedCount}/{CandidateCount} file(s) for {Owner}/{Repo}#{PrNumber}",
+            fetchedFiles.Count,
+            requests.Length,
+            job.Owner,
+            job.Repo,
+            job.PrNumber);
+
+        return fetchedFiles.ToDictionary(file => file.Path, file => file.Content, StringComparer.Ordinal);
+    }
+
+    private static int EstimatePatchBytes(FileChange file) => Encoding.UTF8.GetByteCount(file.Patch);
+
+    private static PullRequestReviewEvent DetermineReviewEvent(
+        IReadOnlyList<InlineComment> finalComments,
+        ReviewConfig config)
+    {
+        if (config.Review.RequestChangesOnError && finalComments.Any(c => c.Severity == Severity.Error))
+        {
+            return PullRequestReviewEvent.RequestChanges;
+        }
+
+        if (config.Review.ApproveIfClean && finalComments.Count == 0)
+        {
+            return PullRequestReviewEvent.Approve;
+        }
+
+        return PullRequestReviewEvent.Comment;
+    }
 
     private static IReadOnlyList<FileChange> ApplyIgnoreGlobs(
         IReadOnlyList<FileChange> files,

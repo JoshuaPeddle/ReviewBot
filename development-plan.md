@@ -1,8 +1,8 @@
 # ReviewBot Development Plan
 
-## Current state (v2, 2026-05-24)
+## Current state (v4, 2026-05-24)
 
-Phases 1–16 complete (Steps 1–48 + command-override follow-up). Stop test: `dotnet test --no-restore` → 352 passing, 0 failed, 1 skipped (Ollama E2E).
+Phases 1–18 complete (Steps 1–50 + command-override follow-up). Stop test: `dotnet test --no-restore` → 365 passing, 0 failed, 1 skipped (Ollama E2E).
 
 **Capabilities shipped:**
 - GitHub App webhook handling, signature validation, idempotent delivery tracking (SQLite)
@@ -14,6 +14,8 @@ Phases 1–16 complete (Steps 1–48 + command-override follow-up). Stop test: `
 - Grounding Tier 1 (language metadata), Tier 2 (local builds: .NET, Python), Tier 3 (GitHub Checks/statuses + local test runners); `build_command`/`test_command` overrides honored
 - E2E infrastructure: WireMock + `WebApplicationFactory<Program>`; baseline scenarios cover review-requested, idempotency, empty diff, all-ignored, self-critique, agentic context, GitHub Checks
 - Metrics: skip-reason counter, grounding duration histogram, LLM duration histogram (phase label), incremental-review type counter
+- Review-state escalation from surviving comment severity: opt-in `review.request_changes_on_error` maps error-severity comments to `REQUEST_CHANGES`; opt-in `review.approve_if_clean` maps clean reviews to `APPROVE`
+- Full-file context for small changed files: opt-in `review.full_file_max_bytes` fetches non-deleted changed files under the threshold and prepends full text before each diff in the review prompt
 
 **Key implementation decisions:**
 - EF Core migrations must be generated via `dotnet ef migrations add`; hand-crafted snapshots fail with `PendingModelChangesWarning` promoted to error.
@@ -22,6 +24,10 @@ Phases 1–16 complete (Steps 1–48 + command-override follow-up). Stop test: `
 - `review_requested` event (not `opened`) triggers the first-review path in the webhook handler.
 - Anthropic LLM adapter has no configurable base URL; WireMock E2E scenarios must use the OpenAI-compatible provider via repo config.
 - `OpenAiLlmOptions` is bound eagerly at startup; E2E overrides must replace the singleton in `ConfigureTestServices`.
+- `ReviewPoster` sends raw review JSON through Octokit's connection; map `PullRequestReviewEvent` to GitHub's uppercase wire values (`COMMENT`, `REQUEST_CHANGES`, `APPROVE`) explicitly.
+- Non-`COMMENT` reviews must still post when they have no accepted comments and no summary; clean approvals use the default body instead of being skipped.
+- Full-file context is carried on `ReviewRequest` because LLM adapters own prompt construction through `PromptBuilder.Build(request)`.
+- `review.full_file_max_bytes` is a non-negative integer: `0` is a valid disabled value, unlike other positive-only review limits.
 
 ---
 
@@ -37,13 +43,27 @@ Phases 1–16 complete (Steps 1–48 + command-override follow-up). Stop test: `
 
 ---
 
-## Phase 17: Review state from severity
+## Phase 17: Review state from severity — complete
 
 **The problem.** The bot always posts as `COMMENT`, making it advisory-only regardless of finding severity. A security vulnerability and a style nit produce the same GitHub review state.
 
 **The approach.** Map the highest-severity surviving comment to the GitHub review event: `error` → `REQUEST_CHANGES`, warning/info only → `COMMENT`, no surviving comments → optionally `APPROVE`. Both escalation behaviors are opt-in.
 
-### Step 49
+### Step 49 — complete (2026-05-24)
+
+Implemented end-to-end:
+- Added `ReviewOutputConfig.RequestChangesOnError` and `ApproveIfClean`, parsed from `review.request_changes_on_error` and `review.approve_if_clean`.
+- Worker now chooses `REQUEST_CHANGES` when the final filtered comments include `Severity.Error` and escalation is enabled, `APPROVE` when no comments survive and clean approval is enabled, otherwise `COMMENT`.
+- `ReviewPoster.PostAsync` accepts a `PullRequestReviewEvent` and writes the corresponding GitHub review `event` field.
+- Documentation covers both repo config flags and calls out that `request_changes_on_error` can block merges.
+- Unit tests cover worker event selection, poster event serialization/empty approval posting, and YAML parsing.
+- E2E test asserts the review POST body contains `REQUEST_CHANGES` for an error-severity LLM comment with `request_changes_on_error: true`.
+
+Corrected assumptions discovered during implementation:
+- Because the poster sends raw JSON rather than Octokit's typed review model, the event must be serialized as GitHub's uppercase API strings, not `PullRequestReviewEvent.ToString()`.
+- `approve_if_clean` can intentionally produce a review with no inline comments; the poster's previous "empty summary and no valid comments" skip is only correct for advisory `COMMENT` reviews.
+
+Stop test: `dotnet test --no-restore` passes (360 passing, 0 failed, 1 skipped Ollama E2E).
 
 **`ReviewBot.Core/Domain/ReviewConfig.cs`:** Add to `ReviewOutputConfig`:
 ```csharp
@@ -51,7 +71,7 @@ bool RequestChangesOnError = false
 bool ApproveIfClean = false
 ```
 
-**`ReviewBot.GitHub/Pulls/ReviewPoster.cs`:** Add `PullRequestReviewEvent reviewEvent` parameter to `PostAsync`; pass through to Octokit's `PullRequestReviewCreate.Event`.
+**`ReviewBot.GitHub/Pulls/ReviewPoster.cs`:** Add `PullRequestReviewEvent reviewEvent` parameter to `PostAsync`; serialize it into the raw review payload's `event` field.
 
 **`ReviewBot.Api/Workers/ReviewWorker.cs`:** After final comment filtering:
 ```csharp
@@ -68,20 +88,36 @@ else if (config.Review.ApproveIfClean && finalComments.Length == 0)
 
 **Tests:**
 - Worker: error comment + flag → `RequestChanges`; warning only → `Comment`; empty + `ApproveIfClean` → `Approve`; empty without flag → `Comment`.
-- Poster: `reviewEvent` passed through to Octokit.
+- Poster: `reviewEvent` serialized to GitHub's review payload.
 - Config: YAML parsing for both flags.
 
 **E2E:** assert `event` field in `POST /repos/owner/repo/pulls/1/reviews` body is `REQUEST_CHANGES` when repo config has `request_changes_on_error: true` and LLM returns an error-severity comment.
 
 ---
 
-## Phase 18: Full-file context for small modified files
+## Phase 18: Full-file context for small modified files — complete
 
 **The problem.** Diffs contain only changed lines plus a few lines of context. A one-line change in a 50-line file leaves the model unable to see the class signature or field declarations 20 lines away, producing false positives on issues already handled nearby.
 
 **The approach.** For modified files under a configurable byte threshold, fetch the full file content via the Contents API (already wired from Phase 15) and prepend it to that file's diff in the prompt. Disabled by default.
 
-### Step 50
+### Step 50 — complete (2026-05-24)
+
+Implemented end-to-end:
+- Added `ReviewOutputConfig.FullFileMaxBytes` with default `0` (disabled) and parsed `review.full_file_max_bytes` from repo YAML.
+- Worker now selects non-deleted files whose UTF-8 patch byte estimate is at or below the threshold, fetches full content via `PullRequestFetcher.GetFileContentsAsync`, and continues diff-only if fetching fails or every candidate is rejected as missing, oversized, binary, or invalid UTF-8.
+- `ReviewRequest` now carries optional full-file content so existing LLM adapters can continue calling `PromptBuilder.Build(request)`.
+- `PromptBuilder` prepends `### Full file: {path}` fenced content before the matching diff section and sanitizes null bytes/newlines using the same fetched-content sanitizer as agentic context.
+- Documentation covers `review.full_file_max_bytes` and warns that it increases prompt size.
+- Unit tests cover prompt placement, worker selection/disabled behavior, and config parsing including valid `0`.
+- E2E test stubs the Contents API for a small `.cs` file and asserts the OpenAI-compatible request body contains the full-file section before the diff hunk.
+
+Corrected assumptions discovered during implementation:
+- The worker does not build the primary prompt directly; the full-file map must travel on `ReviewRequest` for the LLM adapters to include it.
+- The new numeric option cannot reuse the existing positive-only config merge helper because explicit `0` is a valid disabled state.
+- No new risk was opened. Prompt-size growth is mitigated by default-disabled behavior and the per-repo byte threshold.
+
+Stop test: `dotnet test --no-restore` passes (365 passing, 0 failed, 1 skipped Ollama E2E).
 
 **`ReviewBot.Core/Domain/ReviewConfig.cs`:** Add to `ReviewOutputConfig`:
 ```csharp
@@ -91,11 +127,11 @@ int FullFileMaxBytes = 0  // 0 = disabled
 **`ReviewBot.Api/Workers/ReviewWorker.cs`:** After file filtering and before prompt construction, when `FullFileMaxBytes > 0`:
 - Collect modified (non-deleted) files where `EstimatePatchBytes(f) <= FullFileMaxBytes`
 - Fetch full content via `PullRequestFetcher.GetFileContentsAsync` (reuses Phase 15 logic; same 404/binary/oversized rejection applies)
-- Pass resulting `IReadOnlyDictionary<string, string> fullFileContents` to `PromptBuilder`
+- Carry resulting `IReadOnlyDictionary<string, string> fullFileContents` on `ReviewRequest` so LLM adapters pass it to `PromptBuilder`
 
-**`ReviewBot.Core/Prompting/PromptBuilder.cs`:** `BuildUserPrompt` gains optional `IReadOnlyDictionary<string, string>? fullFileContents`. When a file's path is present, prepend a `### Full file: {path}` fenced block before its diff section.
+**`ReviewBot.Core/Prompting/PromptBuilder.cs`:** `BuildUserPrompt` reads optional `ReviewRequest.FullFileContents`. When a file's path is present, prepend a `### Full file: {path}` fenced block before its diff section.
 
-**`RepoConfigFetcher`:** parse `review.full_file_max_bytes` as positive integer; 0 or absent → disabled.
+**`RepoConfigFetcher`:** parse `review.full_file_max_bytes` as a non-negative integer; 0 or absent → disabled.
 
 **`docs/configuration.md`:** Document `review.full_file_max_bytes`; note it increases prompt size and should be tuned against the model's context window.
 

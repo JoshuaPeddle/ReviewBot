@@ -99,6 +99,40 @@ public class PromptBuilderTests
     }
 
     [Fact]
+    public void FullFileContentsAreInsertedBeforeMatchingDiff()
+    {
+        var request = CreateRequest(
+            files:
+            [
+                CreateFile(path: "src/WithContext.cs"),
+                CreateFile(path: "src/DiffOnly.cs")
+            ],
+            fullFileContents: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/WithContext.cs"] = "public class WithContext\r\n{\r\n    private int value;\0\r\n}"
+            });
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.UserPrompt.Should().Contain("""
+=== src/WithContext.cs (Modified, +1 -1) ===
+### Full file: src/WithContext.cs
+```
+public class WithContext
+{
+    private int value;
+}
+```
+```diff
+""");
+        payload.UserPrompt.Should().NotContain("\0");
+        payload.UserPrompt.Should().NotContain("### Full file: src/DiffOnly.cs");
+        var fullFileIndex = payload.UserPrompt.IndexOf("### Full file: src/WithContext.cs", StringComparison.Ordinal);
+        var matchingDiffIndex = payload.UserPrompt.IndexOf("```diff", fullFileIndex, StringComparison.Ordinal);
+        fullFileIndex.Should().BeLessThan(matchingDiffIndex);
+    }
+
+    [Fact]
     public void BuildReturnsDeterministicSnapshot()
     {
         var config = ReviewConfig.Default with
@@ -142,6 +176,15 @@ Assign a confidence level to each comment based on how certain you are:
 - "medium": likely an issue but depends on context outside the diff
 - "low": speculative or stylistic; you would not block a merge on this alone
 
+Comment quality rules:
+- Inline comments should be concise: state the issue, why it matters, and the smallest useful fix direction in 1-3 sentences.
+- Do not paste, quote, or restate code that is already visible in the diff. The GitHub review UI already shows the relevant code.
+- Do not include code fences, pseudocode, or example implementations unless you can provide a short GitHub suggestion block that is an exact replacement for the commented lines.
+- If a concern depends on code that is not present, request that file through the additional context mechanism when available. If you cannot request or see the needed context, omit the comment.
+- Do not leave "not visible in this diff", "cannot verify", or "make sure this is handled elsewhere" comments.
+- Do not flag that a call "could throw" unless the diff changed an error-handling boundary, removed existing handling, violates a visible contract, or creates an observable reliability regression.
+- If several lines share the same root cause, leave one comment at the best line instead of repeating the same concern on each call site.
+
 When an existing code comment explains why a design choice was made, do not flag it as a bug unless you can identify a factual error in the stated reasoning.
 Only flag security issues at real trust boundaries — user-supplied HTTP fields, external API responses, untrusted file content. Do not flag internal method parameters passed between layers of the same codebase as injection or path traversal risks.
 Each non-deleted diff line is prefixed with its exact new-file line number (format: `+  NNN: code` for added, `   NNN: code` for context). Use that number directly as the `line` field — do not count lines yourself.
@@ -156,7 +199,7 @@ Schema:
       "line": "integer, use the NNN from the diff line annotation prefix",
       "severity": "info|warning|error",
       "confidence": "high|medium|low",
-      "body": "string, markdown allowed; for fixes use GitHub suggestion blocks"
+      "body": "string, markdown allowed; concise review comment, no copied diff code"
     }
   ]
 }
@@ -206,6 +249,22 @@ Changed Files:
         var confidenceIndex = payload.SystemPrompt.IndexOf("Assign a confidence level", StringComparison.Ordinal);
         var schemaIndex = payload.SystemPrompt.IndexOf("Respond ONLY with a JSON", StringComparison.Ordinal);
         confidenceIndex.Should().BeLessThan(schemaIndex);
+    }
+
+    [Fact]
+    public void SystemPromptContainsActionableInlineCommentRules()
+    {
+        var request = CreateRequest();
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.SystemPrompt.Should().Contain("Comment quality rules:");
+        payload.SystemPrompt.Should().Contain("Do not paste, quote, or restate code that is already visible in the diff");
+        payload.SystemPrompt.Should().Contain("request that file through the additional context mechanism when available");
+        payload.SystemPrompt.Should().Contain("Do not leave \"not visible in this diff\", \"cannot verify\"");
+        payload.SystemPrompt.Should().Contain("Do not flag that a call \"could throw\"");
+        payload.SystemPrompt.Should().Contain("If several lines share the same root cause");
+        payload.SystemPrompt.Should().Contain("\"body\": \"string, markdown allowed; concise review comment, no copied diff code\"");
     }
 
     [Fact]
@@ -480,14 +539,16 @@ public interface IReviewStore
         string title = "Add review bot",
         string body = "Please review the changes.",
         ReviewConfig? config = null,
-        IReadOnlyList<FileChange>? files = null) =>
+        IReadOnlyList<FileChange>? files = null,
+        IReadOnlyDictionary<string, string>? fullFileContents = null) =>
         new(
             PrTitle: title,
             PrBody: body,
             BaseSha: "base",
             HeadSha: "head",
             Files: files ?? [CreateFile(path: "src/ReviewBot.Core/Review.cs")],
-            Config: config ?? ReviewConfig.Default);
+            Config: config ?? ReviewConfig.Default,
+            FullFileContents: fullFileContents);
 
     private static FileChange CreateFile(
         string path,

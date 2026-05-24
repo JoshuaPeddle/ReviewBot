@@ -1,3 +1,4 @@
+using Octokit;
 using ReviewBot.Core.Domain;
 
 namespace ReviewBot.GitHub.Pulls;
@@ -12,5 +13,6 @@ public interface IReviewPoster
         ReviewResult result,
         IReadOnlyList<FileChange> files,
         string installationToken,
-        CancellationToken ct);
+        CancellationToken ct,
+        PullRequestReviewEvent reviewEvent = PullRequestReviewEvent.Comment);
 }

@@ -135,6 +135,22 @@ review:
   # Maximum decoded size, in bytes, for each fetched context file.
   max_context_file_bytes: 50000
 
+  # Fetch and include full file contents for changed, non-deleted files whose
+  # patch is at or below this byte threshold. This can reduce false positives
+  # for small files but increases prompt size; tune it to the model context window.
+  # 0 disables full-file context.
+  # Default: 0
+  full_file_max_bytes: 0
+
+  # Post REQUEST_CHANGES instead of COMMENT when any surviving inline comment
+  # has severity: error. This can block merges on protected branches.
+  # Default: false
+  request_changes_on_error: false
+
+  # Post APPROVE instead of COMMENT when no inline comments survive filtering.
+  # Default: false
+  approve_if_clean: false
+
   trigger:
     # Review when the bot is explicitly added as a reviewer.
     on_review_request: true
