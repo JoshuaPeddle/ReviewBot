@@ -39,9 +39,7 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
         {
             MaxOutputTokenCount = request.MaxTokens,
             Temperature = request.Temperature,
-            ResponseFormat = request.UseJsonMode
-                ? ChatResponseFormat.CreateJsonObjectFormat()
-                : null
+            ResponseFormat = CreateResponseFormat(request.ResponseFormat, request.IncludeContextRequestsInJsonSchema)
         };
 
         var completion = await client.CompleteChatAsync(messages, options, ct);
@@ -58,4 +56,66 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
             Endpoint = baseUrl,
             NetworkTimeout = TimeSpan.FromSeconds(timeoutSeconds)
         };
+
+    internal static ChatResponseFormat? CreateResponseFormat(string responseFormat, bool includeContextRequests)
+    {
+        var normalized = OpenAiResponseFormats.Normalize(responseFormat);
+        return normalized switch
+        {
+            OpenAiResponseFormats.JsonObject => ChatResponseFormat.CreateJsonObjectFormat(),
+            OpenAiResponseFormats.JsonSchema => ChatResponseFormat.CreateJsonSchemaFormat(
+                jsonSchemaFormatName: "review_response",
+                jsonSchema: BinaryData.FromString(BuildReviewJsonSchema(includeContextRequests)),
+                jsonSchemaIsStrict: false),
+            OpenAiResponseFormats.Text => null,
+            _ => throw new InvalidOperationException($"Unexpected OpenAI response format '{normalized}'."),
+        };
+    }
+
+    internal static string BuildReviewJsonSchema(bool includeContextRequests)
+    {
+        var contextRequestsSchema = includeContextRequests
+            ? """
+              ,
+                    "context_requests": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": { "type": "string" },
+                          "reason": { "type": "string" }
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                      }
+                    }
+              """
+            : string.Empty;
+
+        return $$"""
+               {
+                 "type": "object",
+                 "properties": {
+                   "summary": { "type": "string" },
+                   "comments": {
+                     "type": "array",
+                     "items": {
+                       "type": "object",
+                       "properties": {
+                         "path": { "type": "string" },
+                         "line": { "type": "integer" },
+                         "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+                         "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+                         "body": { "type": "string" }
+                       },
+                       "required": ["path", "line", "severity", "confidence", "body"],
+                       "additionalProperties": false
+                     }
+                   }{{contextRequestsSchema}}
+                 },
+                 "required": ["summary", "comments"],
+                 "additionalProperties": false
+               }
+               """;
+    }
 }

@@ -6,4 +6,5 @@ internal sealed record OpenAiChatRequest(
     string ModelName,
     int MaxTokens,
     float Temperature,
-    bool UseJsonMode);
+    string ResponseFormat,
+    bool IncludeContextRequestsInJsonSchema);

@@ -134,7 +134,7 @@ public class OllamaReviewE2eTests
                 ApiKey = "ollama",
                 BaseUrl = new Uri(OllamaBaseUrl!),
                 ModelName = OllamaModel!,
-                UseJsonMode = true,
+                ResponseFormat = "json_object",
             });
         });
 

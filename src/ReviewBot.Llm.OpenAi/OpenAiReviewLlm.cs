@@ -47,7 +47,9 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
         ArgumentNullException.ThrowIfNull(request);
 
         var prompt = PromptBuilder.Build(request);
-        var firstResponse = await SendAsync(prompt, [prompt.UserPrompt], ct);
+        var responseFormat = OpenAiResponseFormats.Normalize(options.ResponseFormat);
+        var includeContextRequests = request.Config.Review.AgenticContext;
+        var firstResponse = await SendAsync(prompt, [prompt.UserPrompt], responseFormat, includeContextRequests, ct);
         var firstParse = LlmResultParser.Parse(firstResponse, logger);
         if (firstParse is { Success: true, Value: not null })
         {
@@ -56,7 +58,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
 
         logger.LogWarning("OpenAI-compatible response was not valid review JSON; retrying once. Error: {Error}", firstParse.Error);
 
-        var retryResponse = await SendAsync(prompt, [prompt.UserPrompt, RetryInstruction], ct);
+        var retryResponse = await SendAsync(prompt, [prompt.UserPrompt, RetryInstruction], responseFormat, includeContextRequests, ct);
         var retryParse = LlmResultParser.Parse(retryResponse, logger);
         if (retryParse is { Success: true, Value: not null })
         {
@@ -70,7 +72,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
     {
         ArgumentNullException.ThrowIfNull(prompt);
 
-        return SendAsync(prompt, [prompt.UserPrompt], ct);
+        return SendAsync(prompt, [prompt.UserPrompt], OpenAiResponseFormats.Text, includeContextRequestsInJsonSchema: false, ct);
     }
 
     public IReviewLlm WithModelName(string modelName)
@@ -84,7 +86,12 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
             delayAsync);
     }
 
-    private async Task<string> SendAsync(PromptPayload prompt, IReadOnlyList<string> userMessages, CancellationToken ct)
+    private async Task<string> SendAsync(
+        PromptPayload prompt,
+        IReadOnlyList<string> userMessages,
+        string responseFormat,
+        bool includeContextRequestsInJsonSchema,
+        CancellationToken ct)
     {
         var request = new OpenAiChatRequest(
             SystemPrompt: prompt.SystemPrompt,
@@ -92,7 +99,8 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
             ModelName: options.ModelName,
             MaxTokens: options.MaxTokens,
             Temperature: options.Temperature,
-            UseJsonMode: options.UseJsonMode);
+            ResponseFormat: responseFormat,
+            IncludeContextRequestsInJsonSchema: includeContextRequestsInJsonSchema);
 
         for (var retryAttempt = 0; ; retryAttempt++)
         {

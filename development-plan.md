@@ -1,8 +1,8 @@
 # ReviewBot Development Plan
 
-## Current state (v4, 2026-05-24)
+## Current state (v6, 2026-05-24)
 
-Phases 1–18 complete (Steps 1–50 + command-override follow-up). Stop test: `dotnet test --no-restore` → 365 passing, 0 failed, 1 skipped (Ollama E2E).
+Phases 1–18 complete (Steps 1–50 + command-override follow-up). Phase 19 Step 51 complete, including the `UseJsonMode` removal follow-up. Stop test: `dotnet test --no-restore` → 375 passing, 0 failed, 1 skipped (Ollama E2E).
 
 **Capabilities shipped:**
 - GitHub App webhook handling, signature validation, idempotent delivery tracking (SQLite)
@@ -16,6 +16,7 @@ Phases 1–18 complete (Steps 1–50 + command-override follow-up). Stop test: `
 - Metrics: skip-reason counter, grounding duration histogram, LLM duration histogram (phase label), incremental-review type counter
 - Review-state escalation from surviving comment severity: opt-in `review.request_changes_on_error` maps error-severity comments to `REQUEST_CHANGES`; opt-in `review.approve_if_clean` maps clean reviews to `APPROVE`
 - Full-file context for small changed files: opt-in `review.full_file_max_bytes` fetches non-deleted changed files under the threshold and prepends full text before each diff in the review prompt
+- OpenAI-compatible adapter response-format selection: `OpenAi.ResponseFormat` supports `json_object`, `json_schema`, and `text`; raw self-critique/agentic passes always use text mode
 
 **Key implementation decisions:**
 - EF Core migrations must be generated via `dotnet ef migrations add`; hand-crafted snapshots fail with `PendingModelChangesWarning` promoted to error.
@@ -28,6 +29,7 @@ Phases 1–18 complete (Steps 1–50 + command-override follow-up). Stop test: `
 - Non-`COMMENT` reviews must still post when they have no accepted comments and no summary; clean approvals use the default body instead of being skipped.
 - Full-file context is carried on `ReviewRequest` because LLM adapters own prompt construction through `PromptBuilder.Build(request)`.
 - `review.full_file_max_bytes` is a non-negative integer: `0` is a valid disabled value, unlike other positive-only review limits.
+- `OpenAi.ResponseFormat` is the only OpenAI-compatible response-format switch; the old `OpenAi.UseJsonMode` flag was removed because ReviewBot is not deployed outside this repo yet.
 
 ---
 
@@ -40,6 +42,7 @@ Phases 1–18 complete (Steps 1–50 + command-override follow-up). Stop test: `
 - Anthropic E2E base URL not injectable; all WireMock scenarios use OpenAI-compatible provider.
 - Local build/test execution requires SDKs on the worker; keep SDK-dependent E2E tests behind `[Trait("Category", "RequiresSdk")]`.
 - Branch-protection "required" check context not distinguished; `CheckRunFetcher` treats any completed failing check/status as failed.
+- OpenAI-compatible parse repair and token usage metrics are still pending (Step 52); malformed review responses can still fail after the existing retry path.
 
 ---
 
@@ -150,7 +153,34 @@ int FullFileMaxBytes = 0  // 0 = disabled
 
 **The approach.** Add a configurable response format mode, a single repair retry on parse failure, and token usage metrics from the API response. Focus is the OpenAI-compatible adapter.
 
-### Step 51: Structured output mode
+### Step 51 — complete (2026-05-24)
+
+Implemented end-to-end:
+- Added `OpenAiLlmOptions.ResponseFormat` with accepted values `json_object`, `json_schema`, and `text`; default behavior remains `json_object`.
+- Removed the previous `UseJsonMode` flag; deployments configure response behavior only through `ResponseFormat`.
+- OpenAI review calls now send the configured response format, including a structured-output JSON schema for `json_schema`.
+- The JSON schema matches the review shape (`summary`, `comments`, `path`, `line`, `severity`, `confidence`, `body`) and includes optional `context_requests` when agentic context is enabled.
+- `CompleteRawAsync` now always uses text mode so self-critique and agentic-context passes are not constrained by the primary review schema.
+- Documentation covers `OpenAi.ResponseFormat`, its environment variable, and the related `.github/review-bot.yml` notes for OpenAI-compatible providers.
+- Base appsettings now declares `ResponseFormat: json_object`; development appsettings uses `ResponseFormat: text` for the local OpenAI-compatible/Ollama default.
+- Unit tests cover request construction for `json_object`, `json_schema`, and `text`, raw completions forcing text mode, schema content, SDK response-format mapping, and validation.
+
+Corrected assumptions discovered during implementation:
+- Compatibility with the old `UseJsonMode` flag is not required while ReviewBot is only deployed in this repo, so the old flag was removed instead of bridged.
+- `CompleteRawAsync` was still using the primary review JSON mode, which is wrong for self-critique and agentic-context prompts with non-review schemas.
+
+Risk register update:
+- No new risk opened. JSON-mode incompatibility is now mitigated by `ResponseFormat: text` and `ResponseFormat: json_schema`.
+- Remaining Phase 19 risk: parse repair and token usage metrics are still pending in Step 52.
+
+Stop test: `dotnet test --no-restore` passes (376 passing, 0 failed, 1 skipped Ollama E2E).
+
+Follow-up (2026-05-24):
+- Removed the old `OpenAi.UseJsonMode` option entirely; `OpenAi.ResponseFormat` is now the only host-level response-format setting.
+- Updated appsettings, E2E harness overrides, docs, and `.github/review-bot*.yml` comments to use or point to `ResponseFormat`.
+- Removed the legacy fallback unit test.
+
+Stop test after follow-up: `dotnet test --no-restore` passes (375 passing, 0 failed, 1 skipped Ollama E2E).
 
 **`ReviewBot.Llm.OpenAi/OpenAiLlmOptions.cs`:** Add:
 ```csharp

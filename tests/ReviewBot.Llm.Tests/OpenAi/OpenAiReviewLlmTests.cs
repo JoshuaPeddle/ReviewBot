@@ -43,6 +43,8 @@ public sealed class OpenAiReviewLlmTests
         client.Requests.Should().ContainSingle()
             .Which.UserMessages.Should().ContainSingle();
         client.Requests[0].ModelName.Should().Be("gpt-test");
+        client.Requests[0].ResponseFormat.Should().Be("json_object");
+        client.Requests[0].IncludeContextRequestsInJsonSchema.Should().BeFalse();
     }
 
     [Fact]
@@ -137,7 +139,7 @@ public sealed class OpenAiReviewLlmTests
             options.ApiKey = "test-key";
             options.ModelName = "gpt-test";
             options.BaseUrl = new Uri("http://localhost:11434/v1");
-            options.UseJsonMode = false;
+            options.ResponseFormat = "text";
         });
 
         using var provider = services.BuildServiceProvider();
@@ -147,7 +149,7 @@ public sealed class OpenAiReviewLlmTests
         var options = provider.GetRequiredService<OpenAiLlmOptions>();
         options.ModelName.Should().Be("gpt-test");
         options.BaseUrl.Should().Be(new Uri("http://localhost:11434/v1"));
-        options.UseJsonMode.Should().BeFalse();
+        options.ResponseFormat.Should().Be("text");
     }
 
     [Fact]
@@ -176,7 +178,7 @@ public sealed class OpenAiReviewLlmTests
                 ModelName = "gpt-test",
                 MaxTokens = 1234,
                 Temperature = 0.4f,
-                UseJsonMode = false
+                ResponseFormat = "text"
             },
             NullLogger<OpenAiReviewLlm>.Instance,
             client);
@@ -187,7 +189,117 @@ public sealed class OpenAiReviewLlmTests
         request.ModelName.Should().Be("gpt-test");
         request.MaxTokens.Should().Be(1234);
         request.Temperature.Should().Be(0.4f);
-        request.UseJsonMode.Should().BeFalse();
+        request.ResponseFormat.Should().Be("text");
+    }
+
+    [Fact]
+    public async Task ReviewAsyncSendsConfiguredJsonSchemaResponseFormat()
+    {
+        var client = new FakeOpenAiChatClient(
+            """
+            {
+              "summary": "Done.",
+              "comments": []
+            }
+            """);
+        var llm = new OpenAiReviewLlm(
+            new OpenAiLlmOptions
+            {
+                ApiKey = "test-key",
+                ModelName = "gpt-test",
+                ResponseFormat = "json_schema"
+            },
+            NullLogger<OpenAiReviewLlm>.Instance,
+            client);
+
+        await llm.ReviewAsync(CreateRequest(agenticContext: true), CancellationToken.None);
+
+        var request = client.Requests.Should().ContainSingle().Subject;
+        request.ResponseFormat.Should().Be("json_schema");
+        request.IncludeContextRequestsInJsonSchema.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ReviewAsyncSendsConfiguredTextResponseFormat()
+    {
+        var client = new FakeOpenAiChatClient(
+            """
+            {
+              "summary": "Done.",
+              "comments": []
+            }
+            """);
+        var llm = new OpenAiReviewLlm(
+            new OpenAiLlmOptions
+            {
+                ApiKey = "test-key",
+                ModelName = "gpt-test",
+                ResponseFormat = "text"
+            },
+            NullLogger<OpenAiReviewLlm>.Instance,
+            client);
+
+        await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        client.Requests.Should().ContainSingle()
+            .Which.ResponseFormat.Should().Be("text");
+    }
+
+    [Fact]
+    public async Task CompleteRawAsyncAlwaysUsesTextResponseFormat()
+    {
+        var client = new FakeOpenAiChatClient("""{"retained_indices":[0],"rationale":"ok"}""");
+        var llm = new OpenAiReviewLlm(
+            new OpenAiLlmOptions
+            {
+                ApiKey = "test-key",
+                ModelName = "gpt-test",
+                ResponseFormat = "json_schema"
+            },
+            NullLogger<OpenAiReviewLlm>.Instance,
+            client);
+
+        await llm.CompleteRawAsync(new PromptPayload("system", "user"), CancellationToken.None);
+
+        client.Requests.Should().ContainSingle()
+            .Which.ResponseFormat.Should().Be("text");
+    }
+
+    [Fact]
+    public void ResponseFormatRejectsUnsupportedValues()
+    {
+        var options = new OpenAiLlmOptions();
+
+        var act = () => options.ResponseFormat = "xml";
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*Accepted values: json_object, json_schema, text*");
+    }
+
+    [Theory]
+    [InlineData("json_object", true)]
+    [InlineData("json_schema", true)]
+    [InlineData("text", false)]
+    public void SdkClientCreatesExpectedResponseFormat(string responseFormat, bool expectedSdkFormat)
+    {
+        var format = OpenAiSdkChatClient.CreateResponseFormat(responseFormat, includeContextRequests: true);
+
+        (format is not null).Should().Be(expectedSdkFormat);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReviewJsonSchemaIncludesExpectedFields(bool includeContextRequests)
+    {
+        var schema = OpenAiSdkChatClient.BuildReviewJsonSchema(includeContextRequests);
+
+        schema.Should().Contain("\"summary\"");
+        schema.Should().Contain("\"comments\"");
+        schema.Should().Contain("\"confidence\"");
+        schema.Should().Contain("\"severity\"");
+        schema.Should().Contain("\"required\": [\"path\", \"line\", \"severity\", \"confidence\", \"body\"]");
+        schema.Contains("\"context_requests\"", StringComparison.Ordinal).Should().Be(includeContextRequests);
     }
 
     [Fact]
@@ -203,6 +315,8 @@ public sealed class OpenAiReviewLlmTests
         var request = client.Requests.Should().ContainSingle().Subject;
         request.SystemPrompt.Should().Be("critique system");
         request.UserMessages.Should().Equal("critique user");
+        request.ResponseFormat.Should().Be("text");
+        request.IncludeContextRequestsInJsonSchema.Should().BeFalse();
     }
 
     [Fact]
@@ -239,7 +353,7 @@ public sealed class OpenAiReviewLlmTests
             client,
             (delay, _) => delayAsync(delay));
 
-    private static ReviewRequest CreateRequest() =>
+    private static ReviewRequest CreateRequest(bool agenticContext = false) =>
         new(
             PrTitle: "Test PR",
             PrBody: "Adds a widget.",
@@ -259,7 +373,10 @@ public sealed class OpenAiReviewLlmTests
                     DeletionsCount: 0,
                     Status: FileChangeStatus.Modified)
             ],
-            Config: ReviewConfig.Default);
+            Config: ReviewConfig.Default with
+            {
+                Review = ReviewConfig.Default.Review with { AgenticContext = agenticContext }
+            });
 
     private sealed class FakeOpenAiChatClient(params object[] outcomes) : IOpenAiChatClient
     {

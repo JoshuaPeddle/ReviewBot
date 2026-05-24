@@ -59,7 +59,7 @@ Used when a repo's `.github/review-bot.yml` sets `model.provider: openai`. Suppo
 | `BaseUrl` | `REVIEWBOT__OpenAi__BaseUrl` | `Uri?` | `null` | Override base URL; `null` uses `api.openai.com`. Set to `http://localhost:11434/v1` for Ollama. |
 | `MaxTokens` | `REVIEWBOT__OpenAi__MaxTokens` | `int` | `4096` | Maximum tokens in the LLM response |
 | `Temperature` | `REVIEWBOT__OpenAi__Temperature` | `float` | `0.2` | Sampling temperature |
-| `UseJsonMode` | `REVIEWBOT__OpenAi__UseJsonMode` | `bool` | `true` | Enables OpenAI JSON mode (`response_format: json_object`). Disable for providers that do not support it. |
+| `ResponseFormat` | `REVIEWBOT__OpenAi__ResponseFormat` | `json_object \| json_schema \| text` | `json_object` | Controls the chat completions `response_format`. Use `text` for providers that do not support JSON mode. |
 
 ---
 
