@@ -25,18 +25,18 @@ Under **Repository permissions**, grant:
 | Permission | Level |
 |---|---|
 | **Contents** | Read |
+| **Issues** | Read |
 | **Metadata** | Read (automatically selected) |
 | **Pull requests** | Read & write |
 
-No other permissions are required.
+`Issues: Read` is required to receive `issue_comment` events, which powers the `/review` comment trigger.
 
 ## 3. Subscribe to events
 
 Under **Subscribe to events**, tick:
 
+- **Issue comment**
 - **Pull request**
-
-That is the only event ReviewBot processes.
 
 ## 4. Create the App
 
@@ -68,14 +68,8 @@ export REVIEWBOT__GitHubApp__PrivateKeyPem="$(cat your-app.YYYY-MM-DD.private-ke
 
 GitHub will show you the installation ID in the URL: `github.com/settings/installations/INSTALLATION_ID`. ReviewBot resolves this automatically from incoming webhook payloads — you do not need to configure it manually.
 
-## 8. Verify the bot slug
+## 8. Confirm the webhook is firing
 
-After installing, the bot appears as a user named `your-app-name[bot]` on GitHub. This is the value you set as `Webhook__BotSlug`. You can confirm it by:
+Open a pull request in an installed repository (or push a new commit to an existing one) and check **Settings → Developer settings → GitHub Apps → (your app) → Advanced → Recent deliveries**. You should see a `pull_request` event with a `202` response. If the response is `401`, the webhook secret does not match.
 
-1. Opening any PR in an installed repo.
-2. Clicking **Reviewers → Search**.
-3. Typing the app name — the suggestion shows the exact slug (e.g. `reviewbot[bot]`).
-
-## 9. Confirm the webhook is firing
-
-After assigning the bot as a reviewer on a PR, check **Settings → Developer settings → GitHub Apps → (your app) → Advanced → Recent deliveries**. You should see a `pull_request` event with a `200` or `202` response. If the response is `401`, the webhook secret does not match.
+To test the `/review` comment trigger, post a comment containing exactly `/review` on any open PR and look for an `issue_comment` delivery in the same Recent Deliveries view.

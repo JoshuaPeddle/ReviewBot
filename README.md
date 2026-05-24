@@ -1,6 +1,6 @@
 # ReviewBot
 
-A GitHub App that automatically reviews pull requests using any Anthropic or OpenAI-compatible LLM. Assign the bot as a reviewer on any PR and it posts an inline code review with a summary.
+A GitHub App that automatically reviews pull requests using any Anthropic or OpenAI-compatible LLM. Reviews fire when a PR is opened or updated, or on demand by commenting `/review`.
 
 ## How it works
 
@@ -13,7 +13,7 @@ GitHub ──webhook──► POST /webhook ──► Channel Queue ──► Re
               Event filtering                                └── ReviewPoster (inline comments + summary)
 ```
 
-1. GitHub sends a `pull_request` webhook when a review is requested (or on push, if enabled).
+1. GitHub sends a `pull_request` webhook when a PR is opened, reopened, or updated (push), or an `issue_comment` webhook when someone comments `/review`.
 2. The webhook endpoint validates the HMAC signature, deduplicates deliveries, and enqueues a `ReviewJob`.
 3. A background worker fetches the repo config, PR diff, and any per-repo ignore rules, then calls the configured LLM.
 4. The LLM response is parsed and posted back to GitHub as a pull request review with inline comments.
@@ -21,7 +21,7 @@ GitHub ──webhook──► POST /webhook ──► Channel Queue ──► Re
 ## Prerequisites
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- A registered [GitHub App](#github-app-setup) with PR read/write and Contents read permissions
+- A registered [GitHub App](#github-app-setup) with Contents read, Issues read, and Pull requests read/write permissions
 - An API key for Anthropic **or** a compatible OpenAI endpoint (Ollama, vLLM, OpenAI, etc.)
 
 ## Quick start
@@ -34,7 +34,6 @@ cd ReviewBot
 export REVIEWBOT__GitHubApp__AppId=12345
 export REVIEWBOT__GitHubApp__PrivateKeyPem="$(cat path/to/private-key.pem)"
 export REVIEWBOT__Webhook__Secret="your-webhook-secret"
-export REVIEWBOT__Webhook__BotSlug="your-bot[bot]"
 export REVIEWBOT__Anthropic__ApiKey="sk-ant-..."   # or set OpenAi options
 
 dotnet run --project src/ReviewBot.Api
@@ -44,11 +43,17 @@ The service starts on `http://localhost:5000` (HTTPS on 5001). Visit `/healthz` 
 
 > **Local development tip:** Use [smee.io](https://smee.io) or [ngrok](https://ngrok.com) to forward GitHub webhooks to your local machine.
 
-## Assigning the bot as a reviewer
+## Triggering reviews
 
-On any pull request, add your bot's GitHub username as a reviewer. GitHub fires a `review_requested` event and ReviewBot picks it up within seconds.
+ReviewBot fires automatically on three events — no manual setup needed per PR:
 
-Alternatively, enable `on_push` in your repo config file so the bot reviews every push automatically.
+| Trigger | When it fires |
+|---|---|
+| **PR opened / reopened** | A new pull request is opened or a closed one is re-opened |
+| **Push** | New commits are pushed to the PR branch (requires `on_push: true` in repo config — off by default) |
+| **`/review` comment** | Anyone posts a comment containing exactly `/review` on the PR |
+
+The review summary always ends with a reminder of the comment trigger, so contributors can re-request a review without leaving the PR page.
 
 ## Per-repo configuration
 
@@ -141,7 +146,6 @@ docker run -p 8080:8080 \
   -e REVIEWBOT__GitHubApp__AppId=12345 \
   -e REVIEWBOT__GitHubApp__PrivateKeyPem="$(cat private-key.pem)" \
   -e REVIEWBOT__Webhook__Secret=your-secret \
-  -e REVIEWBOT__Webhook__BotSlug="your-bot[bot]" \
   -e REVIEWBOT__Anthropic__ApiKey=sk-ant-... \
   reviewbot
 ```
@@ -158,7 +162,7 @@ See [docs/configuration.md](docs/configuration.md) for every option, its environ
 
 **401 on every webhook** — the `Webhook__Secret` in your config does not match the secret stored in the GitHub App settings.
 
-**Bot review request ignored** — `Webhook__BotSlug` must exactly match the GitHub username shown after the app is installed (usually `your-app-name[bot]`).
+**`/review` comment not triggering a review** — the GitHub App needs **Issues: Read** permission and must be subscribed to the **Issue comment** event. Check **App settings → Permissions & events**, then verify a delivery appears under **Advanced → Recent deliveries**.
 
 **422 when posting a review** — GitHub rejects comments on lines that do not appear in the diff. ReviewBot filters these automatically; if you still see 422s, check the `ReviewPostException` log entry — it includes the number of accepted and dropped comments.
 
