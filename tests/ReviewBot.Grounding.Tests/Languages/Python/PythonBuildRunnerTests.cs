@@ -64,6 +64,32 @@ public class PythonBuildRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task RunAsync_CustomBuildCommand_UsesConfiguredCommand()
+    {
+        var dir = CreateWorkspace(("module.py", "x = 1\n"));
+        var scriptPath = Path.Combine(dir, "custom build.py");
+        File.WriteAllText(scriptPath, """
+            import sys
+            print("custom build " + sys.argv[1])
+            print("warning: generated notice")
+            print("error: generated failure")
+            sys.exit(1)
+            """);
+        var config = DefaultConfig with
+        {
+            BuildCommand = $"python3 \"{scriptPath}\" \"two words\""
+        };
+
+        var runner = new PythonBuildRunner();
+        var result = await runner.RunAsync(dir, config, CancellationToken.None);
+
+        result.Success.Should().BeFalse();
+        result.Warnings.Should().Be(1);
+        result.Errors.Should().Be(1);
+        result.Output.Should().Contain("custom build two words");
+    }
+
+    [Fact]
     public async Task RunAsync_TimeoutExpires_ReturnsFailureWithoutThrowing()
     {
         var dir = CreateWorkspace(("module.py", "x = 1\n"));

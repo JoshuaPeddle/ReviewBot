@@ -34,9 +34,12 @@ public sealed class DotNetTestRunner : ITestRunner
 
         try
         {
+            if (!string.IsNullOrWhiteSpace(config.TestCommand))
+                return await RunConfiguredCommandAsync(workspacePath, config.TestCommand, linkedCts.Token);
+
             var (output, exitCode) = await CaptureAsync(
                 workspacePath,
-                ["test", "--no-build", "--no-restore", "-c", "Release"],
+                new ProcessCommand("dotnet", ["test", "--no-build", "--no-restore", "-c", "Release"]),
                 linkedCts.Token);
 
             var (passed, failed, skipped) = ParseSummary(output);
@@ -59,19 +62,35 @@ public sealed class DotNetTestRunner : ITestRunner
         }
     }
 
+    private async Task<TestResult> RunConfiguredCommandAsync(
+        string workspacePath, string commandLine, CancellationToken ct)
+    {
+        if (!ProcessCommand.TryParse(commandLine, out var command, out var error))
+            return new TestResult(0, 0, 0, $"Invalid test command: {error}");
+
+        var (output, exitCode) = await CaptureAsync(workspacePath, command!, ct);
+        var (passed, failed, skipped) = ParseSummary(output);
+
+        _logger.LogDebug(
+            "custom dotnet test command in {Path}: exit={ExitCode}, passed={Passed}, failed={Failed}, skipped={Skipped}",
+            workspacePath, exitCode, passed, failed, skipped);
+
+        return new TestResult(passed, failed, skipped, Truncate(output));
+    }
+
     private static async Task<(string Output, int ExitCode)> CaptureAsync(
-        string workingDir, string[] args, CancellationToken ct)
+        string workingDir, ProcessCommand command, CancellationToken ct)
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
         {
-            FileName = "dotnet",
+            FileName = command.FileName,
             WorkingDirectory = workingDir,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
         };
-        foreach (var arg in args)
+        foreach (var arg in command.Arguments)
             process.StartInfo.ArgumentList.Add(arg);
 
         process.Start();

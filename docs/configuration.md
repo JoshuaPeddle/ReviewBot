@@ -179,6 +179,8 @@ grounding:
 
   # Override the build command. null = auto-detect from language detector
   # (.NET → dotnet build; Python → mypy when configured, else compileall).
+  # Parsed into argv directly; shell operators and environment expansion are not
+  # evaluated. Use quotes for arguments containing spaces.
   # Default: null (auto-detect)
   # build_command: "dotnet build --no-restore -c Release"
 
@@ -202,8 +204,10 @@ grounding:
   # Default: false
   local_tests: false
 
-  # Parsed for future command override support. Built-in local test runners
-  # currently use the language-specific commands listed above.
+  # Override the local test command. null = auto-detect from language detector.
+  # Parsed into argv directly; shell operators and environment expansion are not
+  # evaluated. Use quotes for arguments containing spaces.
+  # Default: null (auto-detect)
   # test_command: "dotnet test"
 
   # Applies only to local test runners, not GitHub Checks/status fetching.

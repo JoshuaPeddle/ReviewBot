@@ -73,6 +73,33 @@ public class DotNetBuildRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task RunAsync_CustomBuildCommand_UsesConfiguredCommand()
+    {
+        var dir = CreateProject(csproj: MinimalCsproj(), cs: "namespace TestFixture;");
+        var scriptPath = Path.Combine(dir, "custom build.py");
+        File.WriteAllText(scriptPath, """
+            import sys
+            print("custom build " + sys.argv[1])
+            print("Build succeeded.")
+            print("    2 Warning(s)")
+            print("    0 Error(s)")
+            """);
+
+        var config = DefaultConfig with
+        {
+            BuildCommand = $"python3 \"{scriptPath}\" \"two words\""
+        };
+
+        var runner = new DotNetBuildRunner();
+        var result = await runner.RunAsync(dir, config, CancellationToken.None);
+
+        result.Success.Should().BeTrue();
+        result.Warnings.Should().Be(2);
+        result.Errors.Should().Be(0);
+        result.Output.Should().Contain("custom build two words");
+    }
+
+    [Fact]
     public async Task RunAsync_TimeoutExpires_ReturnsFailureWithoutThrowing()
     {
         // dotnet commands always take >1 second, so a 1-second timeout reliably fires

@@ -50,6 +50,30 @@ public class PythonTestRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task RunAsync_CustomTestCommand_UsesConfiguredCommandWithoutPytestConfig()
+    {
+        var dir = CreateWorkspace();
+        var scriptPath = Path.Combine(dir, "custom test.py");
+        File.WriteAllText(scriptPath, """
+            import sys
+            print("custom test " + sys.argv[1])
+            print("5 passed, 1 skipped in 0.01s")
+            """);
+        var config = DefaultConfig with
+        {
+            TestCommand = $"python3 \"{scriptPath}\" \"two words\""
+        };
+
+        var runner = new PythonTestRunner();
+        var result = await runner.RunAsync(dir, config, CancellationToken.None);
+
+        result.Passed.Should().Be(5);
+        result.Failed.Should().Be(0);
+        result.Skipped.Should().Be(1);
+        result.Output.Should().Contain("custom test two words");
+    }
+
+    [Fact]
     public async Task RunAsync_SkippedTests_ReturnsSkippedCount()
     {
         var dir = CreateWorkspace(
