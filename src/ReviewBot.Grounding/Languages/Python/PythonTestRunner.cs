@@ -25,7 +25,8 @@ public sealed class PythonTestRunner : ITestRunner
 
     public async Task<TestResult> RunAsync(string workspacePath, GroundingConfig config, CancellationToken ct)
     {
-        if (!HasPytestConfig(workspacePath))
+        var hasCustomCommand = !string.IsNullOrWhiteSpace(config.TestCommand);
+        if (!hasCustomCommand && !HasPytestConfig(workspacePath))
             return new TestResult(0, 0, 0, "no pytest configuration detected");
 
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(config.TestTimeoutSeconds));
@@ -33,9 +34,12 @@ public sealed class PythonTestRunner : ITestRunner
 
         try
         {
+            if (hasCustomCommand)
+                return await RunConfiguredCommandAsync(workspacePath, config.TestCommand!, linkedCts.Token);
+
             var (output, exitCode) = await CaptureAsync(
                 workspacePath,
-                ["-m", "pytest", "--tb=no", "-q", "--no-header"],
+                new ProcessCommand("python3", ["-m", "pytest", "--tb=no", "-q", "--no-header"]),
                 linkedCts.Token);
 
             var (passed, failed, skipped) = ParseSummary(output);
@@ -56,6 +60,22 @@ public sealed class PythonTestRunner : ITestRunner
                 config.TestTimeoutSeconds, workspacePath);
             return new TestResult(0, 0, 0, "pytest timed out");
         }
+    }
+
+    private async Task<TestResult> RunConfiguredCommandAsync(
+        string workspacePath, string commandLine, CancellationToken ct)
+    {
+        if (!ProcessCommand.TryParse(commandLine, out var command, out var error))
+            return new TestResult(0, 0, 0, $"Invalid test command: {error}");
+
+        var (output, exitCode) = await CaptureAsync(workspacePath, command!, ct);
+        var (passed, failed, skipped) = ParseSummary(output);
+
+        _logger.LogDebug(
+            "custom Python test command in {Path}: exit={ExitCode}, passed={Passed}, failed={Failed}, skipped={Skipped}",
+            workspacePath, exitCode, passed, failed, skipped);
+
+        return new TestResult(passed, failed, skipped, Truncate(output));
     }
 
     internal static bool HasPytestConfig(string workspacePath)
@@ -86,18 +106,18 @@ public sealed class PythonTestRunner : ITestRunner
     }
 
     private static async Task<(string Output, int ExitCode)> CaptureAsync(
-        string workingDir, string[] args, CancellationToken ct)
+        string workingDir, ProcessCommand command, CancellationToken ct)
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
         {
-            FileName = "python3",
+            FileName = command.FileName,
             WorkingDirectory = workingDir,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
         };
-        foreach (var arg in args)
+        foreach (var arg in command.Arguments)
             process.StartInfo.ArgumentList.Add(arg);
 
         process.StartInfo.Environment["PYTHONDONTWRITEBYTECODE"] = "1";

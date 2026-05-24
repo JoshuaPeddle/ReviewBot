@@ -26,8 +26,11 @@ public sealed class DotNetBuildRunner : IBuildRunner
 
         try
         {
+            if (!string.IsNullOrWhiteSpace(config.BuildCommand))
+                return await RunConfiguredCommandAsync(workspacePath, config.BuildCommand, linkedCts.Token);
+
             var (restoreOut, restoreCode) = await CaptureAsync(
-                workspacePath, ["restore", "--no-dependencies"], linkedCts.Token);
+                workspacePath, new ProcessCommand("dotnet", ["restore", "--no-dependencies"]), linkedCts.Token);
 
             if (restoreCode != 0)
             {
@@ -37,7 +40,7 @@ public sealed class DotNetBuildRunner : IBuildRunner
 
             var (buildOut, buildCode) = await CaptureAsync(
                 workspacePath,
-                ["build", "--no-restore", "-c", "Release", "--no-incremental"],
+                new ProcessCommand("dotnet", ["build", "--no-restore", "-c", "Release", "--no-incremental"]),
                 linkedCts.Token);
 
             var warnings = ParseCount(buildOut, "Warning");
@@ -61,19 +64,36 @@ public sealed class DotNetBuildRunner : IBuildRunner
         }
     }
 
+    private async Task<BuildResult> RunConfiguredCommandAsync(
+        string workspacePath, string commandLine, CancellationToken ct)
+    {
+        if (!ProcessCommand.TryParse(commandLine, out var command, out var error))
+            return new BuildResult(false, 0, 0, $"Invalid build command: {error}");
+
+        var (output, exitCode) = await CaptureAsync(workspacePath, command!, ct);
+        var warnings = ParseCount(output, "Warning");
+        var errors = ParseCount(output, "Error");
+
+        _logger.LogDebug(
+            "custom dotnet build command in {Path}: exit={ExitCode}, warnings={Warnings}, errors={Errors}",
+            workspacePath, exitCode, warnings, errors);
+
+        return new BuildResult(exitCode == 0, warnings, errors, Truncate(output));
+    }
+
     private static async Task<(string Output, int ExitCode)> CaptureAsync(
-        string workingDir, string[] args, CancellationToken ct)
+        string workingDir, ProcessCommand command, CancellationToken ct)
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
         {
-            FileName = "dotnet",
+            FileName = command.FileName,
             WorkingDirectory = workingDir,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
         };
-        foreach (var arg in args)
+        foreach (var arg in command.Arguments)
             process.StartInfo.ArgumentList.Add(arg);
 
         process.Start();

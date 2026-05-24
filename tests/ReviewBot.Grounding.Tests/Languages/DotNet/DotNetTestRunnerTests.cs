@@ -58,6 +58,31 @@ public class DotNetTestRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task RunAsync_CustomTestCommand_UsesConfiguredCommand()
+    {
+        var dir = CreateWorkspace();
+        var scriptPath = Path.Combine(dir, "custom test.py");
+        File.WriteAllText(scriptPath, """
+            import sys
+            print("custom test " + sys.argv[1])
+            print("Failed! - Failed: 1, Passed: 4, Skipped: 2")
+            sys.exit(1)
+            """);
+        var config = DefaultConfig with
+        {
+            TestCommand = $"python3 \"{scriptPath}\" \"two words\""
+        };
+
+        var runner = new DotNetTestRunner();
+        var result = await runner.RunAsync(dir, config, CancellationToken.None);
+
+        result.Passed.Should().Be(4);
+        result.Failed.Should().Be(1);
+        result.Skipped.Should().Be(2);
+        result.Output.Should().Contain("custom test two words");
+    }
+
+    [Fact]
     public async Task RunAsync_TimeoutExpires_ReturnsResultWithoutThrowing()
     {
         // dotnet test still takes >1 second even with --no-build due to test-host startup overhead.
@@ -118,6 +143,14 @@ public class DotNetTestRunnerTests : IDisposable
         File.WriteAllText(Path.Combine(dir, "Tests.cs"), testCode);
 
         await RunDotNetAsync(dir, ["build", "-c", "Release"]);
+        return dir;
+    }
+
+    private string CreateWorkspace()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"reviewbot-test-runner-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        dirsToCleanup.Add(dir);
         return dir;
     }
 

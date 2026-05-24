@@ -26,6 +26,9 @@ public sealed class PythonBuildRunner : IBuildRunner
 
         try
         {
+            if (!string.IsNullOrWhiteSpace(config.BuildCommand))
+                return await RunConfiguredCommandAsync(workspacePath, config.BuildCommand, linkedCts.Token);
+
             return HasMypyConfig(workspacePath)
                 ? await RunMypyAsync(workspacePath, linkedCts.Token)
                 : await RunCompileAllAsync(workspacePath, linkedCts.Token);
@@ -40,6 +43,22 @@ public sealed class PythonBuildRunner : IBuildRunner
                 config.BuildTimeoutSeconds, workspacePath);
             return new BuildResult(false, 0, 0, $"Build check timed out after {config.BuildTimeoutSeconds}s");
         }
+    }
+
+    private async Task<BuildResult> RunConfiguredCommandAsync(
+        string workspacePath, string commandLine, CancellationToken ct)
+    {
+        if (!ProcessCommand.TryParse(commandLine, out var command, out var error))
+            return new BuildResult(false, 0, 0, $"Invalid build command: {error}");
+
+        var (output, exitCode) = await CaptureAsync(workspacePath, command!, ct);
+        var errors = Regex.Matches(output, @"(?:\berror\b|SyntaxError)", RegexOptions.IgnoreCase).Count;
+        var warnings = Regex.Matches(output, @"\bwarning\b", RegexOptions.IgnoreCase).Count;
+
+        _logger.LogDebug("custom Python build command in {Path}: exit={ExitCode}, errors={Errors}, warnings={Warnings}",
+            workspacePath, exitCode, errors, warnings);
+
+        return new BuildResult(exitCode == 0, warnings, errors, Truncate(output));
     }
 
     internal static bool HasMypyConfig(string workspacePath)
@@ -72,7 +91,7 @@ public sealed class PythonBuildRunner : IBuildRunner
     {
         var (output, exitCode) = await CaptureAsync(
             workspacePath,
-            ["-m", "mypy", ".", "--no-error-summary", "--no-color-output"],
+            new ProcessCommand("python3", ["-m", "mypy", ".", "--no-error-summary", "--no-color-output"]),
             ct);
 
         var errors = Regex.Matches(output, @":\s+error:", RegexOptions.IgnoreCase).Count;
@@ -88,7 +107,7 @@ public sealed class PythonBuildRunner : IBuildRunner
     {
         var (output, exitCode) = await CaptureAsync(
             workspacePath,
-            ["-m", "compileall", "-q", "."],
+            new ProcessCommand("python3", ["-m", "compileall", "-q", "."]),
             ct);
 
         var errors = Regex.Matches(output, @"SyntaxError", RegexOptions.IgnoreCase).Count;
@@ -100,18 +119,18 @@ public sealed class PythonBuildRunner : IBuildRunner
     }
 
     private static async Task<(string Output, int ExitCode)> CaptureAsync(
-        string workingDir, string[] args, CancellationToken ct)
+        string workingDir, ProcessCommand command, CancellationToken ct)
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
         {
-            FileName = "python3",
+            FileName = command.FileName,
             WorkingDirectory = workingDir,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
         };
-        foreach (var arg in args)
+        foreach (var arg in command.Arguments)
             process.StartInfo.ArgumentList.Add(arg);
 
         process.StartInfo.Environment["PYTHONDONTWRITEBYTECODE"] = "1";
