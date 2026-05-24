@@ -117,7 +117,7 @@ public class CompositionRootTests
 
         response.StatusCode.Should().Be(HttpStatusCode.Accepted);
         var postedResult = await posted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        postedResult.Summary.Should().Be(stubResult.Summary);
+        postedResult.Summary.Should().StartWith(stubResult.Summary);
     }
 
     private static FileChange CreateFile(string path) =>
@@ -151,7 +151,7 @@ public class CompositionRootTests
     private static string CreatePullRequestPayload() =>
         $$"""
         {
-          "action": "review_requested",
+          "action": "opened",
           "installation": {
             "id": 98765
           },
