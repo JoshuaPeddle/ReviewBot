@@ -125,7 +125,7 @@ model:
 ```bash
 export REVIEWBOT__OpenAi__BaseUrl="http://localhost:11434/v1"
 export REVIEWBOT__OpenAi__ApiKey="ollama"        # value required but ignored
-export REVIEWBOT__OpenAi__UseJsonMode="false"    # Ollama may not support JSON mode
+export REVIEWBOT__OpenAi__ResponseFormat="text"  # Ollama may not support JSON mode
 ```
 
 ```yaml
