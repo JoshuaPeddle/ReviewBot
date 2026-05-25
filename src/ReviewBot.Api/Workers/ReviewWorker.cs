@@ -675,7 +675,7 @@ public sealed class ReviewWorker : BackgroundService
         {
             var enrichedPayload = PromptBuilder.BuildContextEnrichedRequest(request, initialResult, fetchedFiles);
             var contextSw = Stopwatch.StartNew();
-            var enrichedRaw = await llm.CompleteRawAsync(enrichedPayload, ct).ConfigureAwait(false);
+            var enrichedRaw = await llm.CompleteRawAsync(enrichedPayload, ct, "agentic_context").ConfigureAwait(false);
             contextSw.Stop();
             metrics.RecordLlmDuration(
                 contextSw.Elapsed.TotalMilliseconds,
@@ -734,7 +734,7 @@ public sealed class ReviewWorker : BackgroundService
         try
         {
             var critiqueSw = Stopwatch.StartNew();
-            var rawCritique = await llm.CompleteRawAsync(critiquePayload, ct).ConfigureAwait(false);
+            var rawCritique = await llm.CompleteRawAsync(critiquePayload, ct, "self_critique").ConfigureAwait(false);
             critiqueSw.Stop();
             metrics.RecordLlmDuration(
                 critiqueSw.Elapsed.TotalMilliseconds,

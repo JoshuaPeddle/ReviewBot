@@ -144,7 +144,7 @@ public sealed class ReviewBotHarness : IAsyncLifetime
                     ApiKey = "e2e-openai-key",
                     BaseUrl = new Uri($"{harness.LlmMock.Url}/v1"),
                     ModelName = "e2e-openai-model",
-                    UseJsonMode = true,
+                    ResponseFormat = "json_object",
                 });
             });
         }

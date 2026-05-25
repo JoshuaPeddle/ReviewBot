@@ -12,6 +12,8 @@ enabled: true
 model:
   # LLM provider. One of: "anthropic", "openai"
   # "openai" also works for any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
+  # Configure OpenAI-compatible response formatting on the ReviewBot host with
+  # REVIEWBOT__OpenAi__ResponseFormat=json_object|json_schema|text.
   # Default: anthropic
   provider: anthropic
 

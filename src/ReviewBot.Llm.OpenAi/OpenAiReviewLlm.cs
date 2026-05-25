@@ -7,7 +7,7 @@ namespace ReviewBot.Llm.OpenAi;
 
 public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
 {
-    private const string RetryInstruction = "Your previous response was not valid JSON. Respond again with ONLY the JSON object.";
+    private const int MaxLoggedRawResponseLength = 500;
     private static readonly TimeSpan[] TransientRetryDelays =
     [
         TimeSpan.FromMilliseconds(100),
@@ -47,30 +47,44 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
         ArgumentNullException.ThrowIfNull(request);
 
         var prompt = PromptBuilder.Build(request);
-        var firstResponse = await SendAsync(prompt, [prompt.UserPrompt], ct);
+        var responseFormat = OpenAiResponseFormats.Normalize(options.ResponseFormat);
+        var includeContextRequests = request.Config.Review.AgenticContext;
+        var firstResponse = await SendAsync(prompt, [prompt.UserPrompt], responseFormat, includeContextRequests, "review", ct);
         var firstParse = LlmResultParser.Parse(firstResponse, logger);
         if (firstParse is { Success: true, Value: not null })
         {
             return firstParse.Value;
         }
 
-        logger.LogWarning("OpenAI-compatible response was not valid review JSON; retrying once. Error: {Error}", firstParse.Error);
+        logger.LogWarning(
+            "OpenAI-compatible response was not valid review JSON; attempting repair. Error: {Error}; RawResponse: {RawResponse}",
+            firstParse.Error,
+            Truncate(firstResponse, MaxLoggedRawResponseLength));
+        ct.ThrowIfCancellationRequested();
 
-        var retryResponse = await SendAsync(prompt, [prompt.UserPrompt, RetryInstruction], ct);
-        var retryParse = LlmResultParser.Parse(retryResponse, logger);
-        if (retryParse is { Success: true, Value: not null })
+        var repairPrompt = BuildRepairPrompt(firstResponse, includeContextRequests);
+        var repairResponse = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], responseFormat, includeContextRequests, "review", ct);
+        var repairParse = LlmResultParser.Parse(repairResponse, logger);
+        if (repairParse is { Success: true, Value: not null })
         {
-            return retryParse.Value;
+            ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: true);
+            return repairParse.Value;
         }
 
-        throw new LlmResponseException(retryResponse, retryParse.Error);
+        logger.LogWarning(
+            "OpenAI-compatible response repair failed; returning empty review result. Error: {Error}; RawResponse: {RawResponse}",
+            repairParse.Error,
+            Truncate(repairResponse, MaxLoggedRawResponseLength));
+        ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: false);
+        return new ReviewResult(string.Empty, []);
     }
 
-    public Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct)
+    public Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review")
     {
         ArgumentNullException.ThrowIfNull(prompt);
+        ArgumentException.ThrowIfNullOrWhiteSpace(phase);
 
-        return SendAsync(prompt, [prompt.UserPrompt], ct);
+        return SendAsync(prompt, [prompt.UserPrompt], OpenAiResponseFormats.Text, includeContextRequestsInJsonSchema: false, phase, ct);
     }
 
     public IReviewLlm WithModelName(string modelName)
@@ -84,7 +98,13 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
             delayAsync);
     }
 
-    private async Task<string> SendAsync(PromptPayload prompt, IReadOnlyList<string> userMessages, CancellationToken ct)
+    private async Task<string> SendAsync(
+        PromptPayload prompt,
+        IReadOnlyList<string> userMessages,
+        string responseFormat,
+        bool includeContextRequestsInJsonSchema,
+        string phase,
+        CancellationToken ct)
     {
         var request = new OpenAiChatRequest(
             SystemPrompt: prompt.SystemPrompt,
@@ -92,13 +112,27 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
             ModelName: options.ModelName,
             MaxTokens: options.MaxTokens,
             Temperature: options.Temperature,
-            UseJsonMode: options.UseJsonMode);
+            ResponseFormat: responseFormat,
+            IncludeContextRequestsInJsonSchema: includeContextRequestsInJsonSchema);
 
         for (var retryAttempt = 0; ; retryAttempt++)
         {
             try
             {
-                return await GetClient().CompleteChatAsync(request, ct).ConfigureAwait(false);
+                var response = await GetClient().CompleteChatAsync(request, ct).ConfigureAwait(false);
+                if (response.Usage is not null)
+                {
+                    ReviewBotLlmMetrics.RecordTokenUsage(ProviderName, phase, response.Usage);
+                    if (response.Usage.CachedPromptTokens > 0)
+                    {
+                        logger.LogDebug(
+                            "OpenAI-compatible response reported {CachedTokens} cached prompt tokens for phase {Phase}",
+                            response.Usage.CachedPromptTokens,
+                            phase);
+                    }
+                }
+
+                return response.Content;
             }
             catch (HttpRequestException ex) when (retryAttempt < TransientRetryDelays.Length)
             {
@@ -114,4 +148,15 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
 
     private IOpenAiChatClient GetClient() =>
         configuredClient ?? (sdkClient ??= new OpenAiSdkChatClient(options));
+
+    private static PromptPayload BuildRepairPrompt(string failedResponse, bool includeContextRequests)
+    {
+        var schema = ReviewJsonSchema.Build(includeContextRequests);
+        return new PromptPayload(
+            $"Your previous response was not valid JSON. Return only a JSON object matching this schema: {schema}",
+            failedResponse);
+    }
+
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
 }

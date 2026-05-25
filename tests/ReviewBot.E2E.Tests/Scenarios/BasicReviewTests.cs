@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -105,6 +106,50 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         llmRequest.Should().Contain("private readonly IUserRepository _repository;");
         llmRequest!.IndexOf("### Full file: src/Services/UserService.cs", StringComparison.Ordinal)
             .Should().BeLessThan(llmRequest.IndexOf("@@ -8,6 +8,8 @@", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ReviewRequestedRepairsMalformedOpenAiResponseAndRecordsParseFailureMetric()
+    {
+        await harness.ResetAsync();
+        var parseFailures = new List<(string repaired, long value)>();
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == "ReviewBot" &&
+                instrument.Name == "reviewbot.llm.parse_failures_total")
+            {
+                l.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+        {
+            var repaired = tags.ToArray().FirstOrDefault(t => t.Key == "repaired").Value?.ToString() ?? "";
+            parseFailures.Add((repaired, value));
+        });
+        listener.Start();
+
+        ConfigureSuccessfulReviewWithRepair(
+            repoConfig: FixtureLoader.ReadText("repo-config-openai.yml"),
+            prFiles: FixtureLoader.ReadText("pr-files-dotnet.json"),
+            malformedReview: "not json",
+            repairedReviewJson: FixtureLoader.ReadText("llm-response-two-comments.json"));
+        using var client = harness.CreateClient();
+        var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
+
+        using var response = await sender.SendPullRequestAsync(
+            FixtureLoader.ReadText("webhook-pr-opened.json"),
+            deliveryId: "delivery-e2e-openai-repair");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        await WorkerSyncHelper.WaitForRequestAsync(
+            harness.GitHubMock,
+            IsReviewPostPath);
+
+        WorkerSyncHelper.CountMatchingRequests(harness.LlmMock, "POST", IsOpenAiChatPath).Should().Be(2);
+        parseFailures.Should().ContainSingle(measurement => measurement.repaired == "true" && measurement.value == 1);
+        using var reviewPayload = GetSingleRequestJson(harness.GitHubMock, "POST", IsReviewPostPath);
+        reviewPayload.RootElement.GetProperty("comments").GetArrayLength().Should().Be(2);
     }
 
     [Fact]
@@ -287,6 +332,22 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         StubPullRequestFiles(prFiles);
         StubDotNetGrounding(headSha);
         StubOpenAiReview(llmReviewJson);
+        StubReviewPost();
+    }
+
+    private void ConfigureSuccessfulReviewWithRepair(
+        string repoConfig,
+        string prFiles,
+        string malformedReview,
+        string repairedReviewJson,
+        string headSha = HeadSha)
+    {
+        StubInstallationToken();
+        StubRepoConfig(repoConfig, headSha);
+        StubPullRequest(headSha);
+        StubPullRequestFiles(prFiles);
+        StubDotNetGrounding(headSha);
+        StubOpenAiReviewWithRepair(malformedReview, repairedReviewJson);
         StubReviewPost();
     }
 
@@ -550,6 +611,25 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
                 .WithStatusCode(200)
                 .WithHeader("Content-Type", "application/json")
                 .WithBody(OpenAiChatResponse(reviewJson)));
+    }
+
+    private void StubOpenAiReviewWithRepair(string malformedReview, string repairedReviewJson)
+    {
+        var callCount = 0;
+        harness.LlmMock
+            .Given(Request.Create()
+                .WithPath("/v1/chat/completions")
+                .UsingPost())
+            .RespondWith(Response.Create()
+                .WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody(_ =>
+                {
+                    var response = Interlocked.Increment(ref callCount) == 1
+                        ? malformedReview
+                        : repairedReviewJson;
+                    return OpenAiChatResponse(response);
+                }));
     }
 
     private void StubOpenAiReviewWithSelfCritique(string primaryReviewJson, string critiqueJson)

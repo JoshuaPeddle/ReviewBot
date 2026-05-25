@@ -37,9 +37,10 @@ public sealed class StubReviewLlm : IReviewLlm
         return Task.FromResult(review(request));
     }
 
-    public Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct)
+    public Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review")
     {
         ArgumentNullException.ThrowIfNull(prompt);
+        ArgumentException.ThrowIfNullOrWhiteSpace(phase);
 
         ct.ThrowIfCancellationRequested();
 

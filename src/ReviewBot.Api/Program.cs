@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using OpenTelemetry.Metrics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
@@ -89,6 +90,10 @@ builder.Services.AddGrounding()
     .AddTestRunner<DotNetTestRunner>()
     .AddTestRunner<PythonTestRunner>();
 builder.Services.AddSingleton<ReviewBotMetrics>();
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(m => m
+        .AddMeter(ReviewBotMetrics.MeterName)
+        .AddPrometheusExporter());
 builder.Services.AddHostedService<ReviewWorker>();
 builder.Services.AddHostedService<DeliveryStoreCleanupService>();
 builder.Services.AddHealthChecks()
@@ -112,6 +117,7 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 
 app.MapWebhookEndpoint();
+app.MapPrometheusScrapingEndpoint();
 app.MapHealthChecks("/healthz", new HealthCheckOptions());
 app.MapGet("/", () =>
 {

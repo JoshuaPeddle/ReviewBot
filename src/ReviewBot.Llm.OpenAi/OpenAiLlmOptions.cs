@@ -14,7 +14,13 @@ public sealed record OpenAiLlmOptions
 
     public float Temperature { get; set; } = 0.2f;
 
-    public bool UseJsonMode { get; set; } = true;
+    private string responseFormat = OpenAiResponseFormats.JsonObject;
+
+    public string ResponseFormat
+    {
+        get => responseFormat;
+        set => responseFormat = OpenAiResponseFormats.Normalize(value);
+    }
 
     public int TimeoutSeconds { get; set; } = 600;
 }

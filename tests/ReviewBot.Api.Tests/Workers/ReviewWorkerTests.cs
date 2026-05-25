@@ -1124,7 +1124,7 @@ public class ReviewWorkerTests
         await fixture.PullRequestFetcher.DidNotReceiveWithAnyArgs()
             .GetFileContentsAsync(default!, default!, default!, default!, default, default!, default);
         await fixture.Llm.DidNotReceiveWithAnyArgs()
-            .CompleteRawAsync(default!, default);
+            .CompleteRawAsync(default!, default, default!);
     }
 
     [Fact]
@@ -1137,6 +1137,7 @@ public class ReviewWorkerTests
         };
         IReadOnlyList<ContextRequest>? fetchedRequests = null;
         PromptPayload? enrichedPrompt = null;
+        string? enrichedPhase = null;
         ReviewResult? postedResult = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -1162,10 +1163,11 @@ public class ReviewWorkerTests
                     ("src/Base.cs", "public abstract class Base { }")
                 };
             });
-        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>())
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
             .Returns(call =>
             {
                 enrichedPrompt = call.Arg<PromptPayload>();
+                enrichedPhase = call.ArgAt<string>(2);
                 return """
                 {
                   "summary": "Final summary.",
@@ -1197,6 +1199,7 @@ public class ReviewWorkerTests
 
         fetchedRequests!.Select(request => request.Path).Should().Equal("src/IFoo.cs", "src/Base.cs");
         enrichedPrompt.Should().NotBeNull();
+        enrichedPhase.Should().Be("agentic_context");
         enrichedPrompt!.UserPrompt.Should().Contain("public interface IFoo");
         enrichedPrompt.UserPrompt.Should().Contain("Initial comment.");
         postedResult!.Summary.Should().StartWith("Final summary.");
@@ -1262,7 +1265,7 @@ public class ReviewWorkerTests
 
         fetchedRequests!.Select(request => request.Path).Should().Equal("src/Good.cs", "src/Second.cs");
         await fixture.Llm.DidNotReceiveWithAnyArgs()
-            .CompleteRawAsync(default!, default);
+            .CompleteRawAsync(default!, default, default!);
         postedResult!.Comments.Should().ContainSingle()
             .Which.Body.Should().Be("Initial stays.");
     }
@@ -1303,7 +1306,7 @@ public class ReviewWorkerTests
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         await fixture.Llm.DidNotReceiveWithAnyArgs()
-            .CompleteRawAsync(default!, default);
+            .CompleteRawAsync(default!, default, default!);
         postedResult!.Comments.Should().ContainSingle()
             .Which.Body.Should().Be("Initial survives.");
     }
@@ -1330,7 +1333,7 @@ public class ReviewWorkerTests
                 [new ContextRequest("src/IFoo.cs", null)]));
         fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
             .ReturnsForAnyArgs([("src/IFoo.cs", "public interface IFoo {}")]);
-        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>())
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
             .ThrowsAsync(new InvalidOperationException("context LLM failed"));
         fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(call =>
@@ -1376,7 +1379,7 @@ public class ReviewWorkerTests
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         await fixture.Llm.DidNotReceiveWithAnyArgs()
-            .CompleteRawAsync(default!, default);
+            .CompleteRawAsync(default!, default, default!);
     }
 
     [Fact]
@@ -1410,7 +1413,7 @@ public class ReviewWorkerTests
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         await fixture.Llm.DidNotReceiveWithAnyArgs()
-            .CompleteRawAsync(default!, default);
+            .CompleteRawAsync(default!, default, default!);
     }
 
     [Fact]
@@ -1423,6 +1426,7 @@ public class ReviewWorkerTests
         };
         ReviewResult? postedResult = null;
         PromptPayload? critiquePrompt = null;
+        string? critiquePhase = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
@@ -1438,10 +1442,11 @@ public class ReviewWorkerTests
                     new InlineComment("src/App.cs", 3, "RIGHT", "Low dropped.", Severity.Info, Confidence.Low),
                     new InlineComment("src/App.cs", 4, "RIGHT", "Medium kept too.", Severity.Warning, Confidence.Medium)
                 ]));
-        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>())
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
             .Returns(call =>
             {
                 critiquePrompt = call.Arg<PromptPayload>();
+                critiquePhase = call.ArgAt<string>(2);
                 return """{"retained_indices":[0,2],"rationale":"drop low-confidence duplicate"}""";
             });
         fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
@@ -1460,6 +1465,7 @@ public class ReviewWorkerTests
         postedResult!.Comments.Select(c => c.Body)
             .Should().Equal("High stays.", "Medium kept.", "Medium kept too.");
         critiquePrompt.Should().NotBeNull();
+        critiquePhase.Should().Be("self_critique");
         critiquePrompt!.UserPrompt.Should().Contain("0. src/App.cs:2");
         critiquePrompt.UserPrompt.Should().Contain("1. src/App.cs:3");
         critiquePrompt.UserPrompt.Should().Contain("2. src/App.cs:4");
@@ -1488,7 +1494,7 @@ public class ReviewWorkerTests
                     new InlineComment("src/App.cs", 1, "RIGHT", "High stays.", Severity.Error, Confidence.High),
                     new InlineComment("src/App.cs", 2, "RIGHT", "Medium survives failure.", Severity.Warning, Confidence.Medium)
                 ]));
-        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>())
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
             .ThrowsAsync(new InvalidOperationException("critique unavailable"));
         fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(call =>
@@ -1536,7 +1542,7 @@ public class ReviewWorkerTests
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         await fixture.Llm.DidNotReceiveWithAnyArgs()
-            .CompleteRawAsync(default!, default);
+            .CompleteRawAsync(default!, default, default!);
     }
 
     [Fact]

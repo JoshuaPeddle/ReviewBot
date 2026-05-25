@@ -1,6 +1,7 @@
 using OpenAI;
 using OpenAI.Chat;
 using System.ClientModel;
+using ReviewBot.Core.Llm;
 
 namespace ReviewBot.Llm.OpenAi;
 
@@ -22,7 +23,7 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
         clientOptions = CreateClientOptions(options.BaseUrl, options.TimeoutSeconds);
     }
 
-    public async Task<string> CompleteChatAsync(OpenAiChatRequest request, CancellationToken ct)
+    public async Task<OpenAiChatResult> CompleteChatAsync(OpenAiChatRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -39,9 +40,7 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
         {
             MaxOutputTokenCount = request.MaxTokens,
             Temperature = request.Temperature,
-            ResponseFormat = request.UseJsonMode
-                ? ChatResponseFormat.CreateJsonObjectFormat()
-                : null
+            ResponseFormat = CreateResponseFormat(request.ResponseFormat, request.IncludeContextRequestsInJsonSchema)
         };
 
         var completion = await client.CompleteChatAsync(messages, options, ct);
@@ -49,7 +48,14 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
             .Where(part => !string.IsNullOrEmpty(part.Text))
             .Select(part => part.Text);
 
-        return string.Concat(textParts);
+        var usage = completion.Value.Usage is null
+            ? null
+            : new LlmTokenUsage(
+                PromptTokens: completion.Value.Usage.InputTokenCount,
+                CompletionTokens: completion.Value.Usage.OutputTokenCount,
+                CachedPromptTokens: completion.Value.Usage.InputTokenDetails?.CachedTokenCount ?? 0);
+
+        return new OpenAiChatResult(string.Concat(textParts), usage);
     }
 
     internal static OpenAIClientOptions CreateClientOptions(Uri? baseUrl, int timeoutSeconds) =>
@@ -58,4 +64,22 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
             Endpoint = baseUrl,
             NetworkTimeout = TimeSpan.FromSeconds(timeoutSeconds)
         };
+
+    internal static ChatResponseFormat? CreateResponseFormat(string responseFormat, bool includeContextRequests)
+    {
+        var normalized = OpenAiResponseFormats.Normalize(responseFormat);
+        return normalized switch
+        {
+            OpenAiResponseFormats.JsonObject => ChatResponseFormat.CreateJsonObjectFormat(),
+            OpenAiResponseFormats.JsonSchema => ChatResponseFormat.CreateJsonSchemaFormat(
+                jsonSchemaFormatName: "review_response",
+                jsonSchema: BinaryData.FromString(BuildReviewJsonSchema(includeContextRequests)),
+                jsonSchemaIsStrict: false),
+            OpenAiResponseFormats.Text => null,
+            _ => throw new InvalidOperationException($"Unexpected OpenAI response format '{normalized}'."),
+        };
+    }
+
+    internal static string BuildReviewJsonSchema(bool includeContextRequests) =>
+        ReviewJsonSchema.Build(includeContextRequests);
 }

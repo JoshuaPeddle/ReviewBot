@@ -1,10 +1,11 @@
 using System.Diagnostics.Metrics;
+using ReviewBot.Core.Llm;
 
 namespace ReviewBot.Api.Workers;
 
 public sealed class ReviewBotMetrics : IDisposable
 {
-    public const string MeterName = "ReviewBot";
+    public const string MeterName = ReviewBotLlmMetrics.MeterName;
 
     private readonly Meter meter;
     private readonly Counter<long> jobsProcessed;
