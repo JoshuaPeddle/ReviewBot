@@ -7,5 +7,5 @@ public interface IReviewLlm
 {
     Task<ReviewResult> ReviewAsync(ReviewRequest request, CancellationToken ct);
 
-    Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct);
+    Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review");
 }

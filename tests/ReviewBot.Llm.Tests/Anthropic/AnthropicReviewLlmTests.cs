@@ -46,7 +46,7 @@ public sealed class AnthropicReviewLlmTests
     }
 
     [Fact]
-    public async Task ReviewAsyncRetriesOnceWhenFirstResponseIsMalformed()
+    public async Task ReviewAsyncRepairsMalformedFirstResponse()
     {
         var client = new FakeAnthropicClient(
             "not json",
@@ -62,22 +62,21 @@ public sealed class AnthropicReviewLlmTests
 
         result.Summary.Should().Be("Recovered.");
         client.Requests.Should().HaveCount(2);
-        client.Requests[1].UserMessages.Should().HaveCount(2);
-        client.Requests[1].UserMessages[1].Should().Be("Your previous response was not valid JSON. Respond again with ONLY the JSON object.");
+        client.Requests[1].SystemPrompt.Should().StartWith("Your previous response was not valid JSON.");
+        client.Requests[1].SystemPrompt.Should().Contain("\"summary\"");
+        client.Requests[1].SystemPrompt.Should().Contain("\"comments\"");
+        client.Requests[1].UserMessages.Should().Equal("not json");
     }
 
     [Fact]
-    public async Task ReviewAsyncThrowsLlmResponseExceptionWhenRetryIsMalformed()
+    public async Task ReviewAsyncReturnsEmptyResultWhenRepairIsMalformed()
     {
         var client = new FakeAnthropicClient("not json", "still not json");
         var llm = CreateLlm(client);
 
-        var act = () => llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+        var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
 
-        var exception = await act.Should().ThrowAsync<LlmResponseException>();
-        exception.Which.ParseError.Should().Be("Response did not contain a JSON object.");
-        exception.Which.RawResponse.Should().Be("still not json");
-        exception.Which.Message.Should().Contain("still not json");
+        result.Should().BeEquivalentTo(new ReviewResult(string.Empty, []));
         client.Requests.Should().HaveCount(2);
     }
 

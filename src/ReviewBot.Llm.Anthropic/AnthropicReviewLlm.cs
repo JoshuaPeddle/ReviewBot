@@ -7,7 +7,7 @@ namespace ReviewBot.Llm.Anthropic;
 
 public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
 {
-    private const string RetryInstruction = "Your previous response was not valid JSON. Respond again with ONLY the JSON object.";
+    private const int MaxLoggedRawResponseLength = 500;
     private static readonly TimeSpan[] TransientRetryDelays =
     [
         TimeSpan.FromMilliseconds(100),
@@ -57,21 +57,33 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
             return firstParse.Value;
         }
 
-        logger.LogWarning("Anthropic response was not valid review JSON; retrying once. Error: {Error}", firstParse.Error);
+        logger.LogWarning(
+            "Anthropic response was not valid review JSON; attempting repair. Error: {Error}; RawResponse: {RawResponse}",
+            firstParse.Error,
+            Truncate(firstResponse, MaxLoggedRawResponseLength));
+        ct.ThrowIfCancellationRequested();
 
-        var retryResponse = await SendAsync(prompt, [prompt.UserPrompt, RetryInstruction], ct);
-        var retryParse = LlmResultParser.Parse(retryResponse, logger);
-        if (retryParse is { Success: true, Value: not null })
+        var repairPrompt = BuildRepairPrompt(firstResponse, request.Config.Review.AgenticContext);
+        var repairResponse = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], ct);
+        var repairParse = LlmResultParser.Parse(repairResponse, logger);
+        if (repairParse is { Success: true, Value: not null })
         {
-            return retryParse.Value;
+            ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: true);
+            return repairParse.Value;
         }
 
-        throw new LlmResponseException(retryResponse, retryParse.Error);
+        logger.LogWarning(
+            "Anthropic response repair failed; returning empty review result. Error: {Error}; RawResponse: {RawResponse}",
+            repairParse.Error,
+            Truncate(repairResponse, MaxLoggedRawResponseLength));
+        ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: false);
+        return new ReviewResult(string.Empty, []);
     }
 
-    public Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct)
+    public Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review")
     {
         ArgumentNullException.ThrowIfNull(prompt);
+        ArgumentException.ThrowIfNullOrWhiteSpace(phase);
 
         return SendAsync(prompt, [prompt.UserPrompt], ct);
     }
@@ -116,4 +128,15 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
 
     private IAnthropicClient GetClient() =>
         configuredClient ?? (sdkClient ??= new AnthropicSdkClient(options));
+
+    private static PromptPayload BuildRepairPrompt(string failedResponse, bool includeContextRequests)
+    {
+        var schema = ReviewJsonSchema.Build(includeContextRequests);
+        return new PromptPayload(
+            $"Your previous response was not valid JSON. Return only a JSON object matching this schema: {schema}",
+            failedResponse);
+    }
+
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
 }

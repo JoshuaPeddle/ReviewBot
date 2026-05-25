@@ -1,4 +1,5 @@
 using FluentAssertions;
+using System.Diagnostics.Metrics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -48,7 +49,7 @@ public sealed class OpenAiReviewLlmTests
     }
 
     [Fact]
-    public async Task ReviewAsyncRetriesOnceWhenFirstResponseIsMalformed()
+    public async Task ReviewAsyncRepairsMalformedFirstResponse()
     {
         var client = new FakeOpenAiChatClient(
             "not json",
@@ -64,23 +65,96 @@ public sealed class OpenAiReviewLlmTests
 
         result.Summary.Should().Be("Recovered.");
         client.Requests.Should().HaveCount(2);
-        client.Requests[1].UserMessages.Should().HaveCount(2);
-        client.Requests[1].UserMessages[1].Should().Be("Your previous response was not valid JSON. Respond again with ONLY the JSON object.");
+        client.Requests[1].SystemPrompt.Should().StartWith("Your previous response was not valid JSON.");
+        client.Requests[1].SystemPrompt.Should().Contain("\"summary\"");
+        client.Requests[1].SystemPrompt.Should().Contain("\"comments\"");
+        client.Requests[1].UserMessages.Should().Equal("not json");
     }
 
     [Fact]
-    public async Task ReviewAsyncThrowsLlmResponseExceptionWhenRetryIsMalformed()
+    public async Task ReviewAsyncReturnsEmptyResultWhenRepairIsMalformed()
     {
         var client = new FakeOpenAiChatClient("not json", "still not json");
         var llm = CreateLlm(client);
 
-        var act = () => llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+        var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
 
-        var exception = await act.Should().ThrowAsync<LlmResponseException>();
-        exception.Which.ParseError.Should().Be("Response did not contain a JSON object.");
-        exception.Which.RawResponse.Should().Be("still not json");
-        exception.Which.Message.Should().Contain("still not json");
+        result.Should().BeEquivalentTo(new ReviewResult(string.Empty, []));
         client.Requests.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncRecordsParseFailureMetricWithRepairOutcome()
+    {
+        var measurements = new List<(string provider, string repaired, long value)>();
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == ReviewBotLlmMetrics.MeterName &&
+                instrument.Name == "reviewbot.llm.parse_failures_total")
+            {
+                l.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+        {
+            var tagArray = tags.ToArray();
+            measurements.Add((
+                tagArray.FirstOrDefault(t => t.Key == "provider").Value?.ToString() ?? "",
+                tagArray.FirstOrDefault(t => t.Key == "repaired").Value?.ToString() ?? "",
+                value));
+        });
+        listener.Start();
+        var client = new FakeOpenAiChatClient(
+            "not json",
+            """
+            {
+              "summary": "Recovered.",
+              "comments": []
+            }
+            """);
+        var llm = CreateLlm(client);
+
+        await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        measurements.Should().ContainSingle(measurement => measurement.provider == "openai")
+            .Which.Should().Be(("openai", "true", 1L));
+    }
+
+    [Fact]
+    public async Task CompleteRawAsyncRecordsTokenUsageWithPhase()
+    {
+        var measurements = new List<(string direction, string phase, int value)>();
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == ReviewBotLlmMetrics.MeterName &&
+                instrument.Name == "reviewbot.llm.tokens")
+            {
+                l.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<int>((_, value, tags, _) =>
+        {
+            var tagArray = tags.ToArray();
+            measurements.Add((
+                tagArray.FirstOrDefault(t => t.Key == "direction").Value?.ToString() ?? "",
+                tagArray.FirstOrDefault(t => t.Key == "phase").Value?.ToString() ?? "",
+                value));
+        });
+        listener.Start();
+        var client = new FakeOpenAiChatClient(new OpenAiChatResult(
+            """{"retained_indices":[0],"rationale":"ok"}""",
+            new LlmTokenUsage(PromptTokens: 11, CompletionTokens: 7)));
+        var llm = CreateLlm(client);
+
+        await llm.CompleteRawAsync(new PromptPayload("system", "user"), CancellationToken.None, "self_critique");
+
+        measurements.Should().BeEquivalentTo(
+        [
+            ("prompt", "self_critique", 11),
+            ("completion", "self_critique", 7)
+        ]);
     }
 
     [Fact]
@@ -386,7 +460,7 @@ public sealed class OpenAiReviewLlmTests
 
         public List<CancellationToken> CancellationTokens { get; } = [];
 
-        public Task<string> CompleteChatAsync(OpenAiChatRequest request, CancellationToken ct)
+        public Task<OpenAiChatResult> CompleteChatAsync(OpenAiChatRequest request, CancellationToken ct)
         {
             Requests.Add(request);
             CancellationTokens.Add(ct);
@@ -399,8 +473,9 @@ public sealed class OpenAiReviewLlmTests
             var outcome = outcomes.Dequeue();
             return outcome switch
             {
-                string response => Task.FromResult(response),
-                Exception exception => Task.FromException<string>(exception),
+                string response => Task.FromResult(new OpenAiChatResult(response, null)),
+                OpenAiChatResult response => Task.FromResult(response),
+                Exception exception => Task.FromException<OpenAiChatResult>(exception),
                 _ => throw new InvalidOperationException($"Unsupported fake outcome type {outcome.GetType().FullName}."),
             };
         }

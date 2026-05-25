@@ -1,8 +1,8 @@
 # ReviewBot Development Plan
 
-## Current state (v6, 2026-05-24)
+## Current state (v7, 2026-05-24)
 
-Phases 1–18 complete (Steps 1–50 + command-override follow-up). Phase 19 Step 51 complete, including the `UseJsonMode` removal follow-up. Stop test: `dotnet test --no-restore` → 375 passing, 0 failed, 1 skipped (Ollama E2E).
+Phases 1–19 complete (Steps 1–52 + command-override follow-up). Phase 19 Step 51 includes the `UseJsonMode` removal follow-up. Stop test: `dotnet test --no-restore` → 378 passing, 0 failed, 1 skipped (Ollama E2E).
 
 **Capabilities shipped:**
 - GitHub App webhook handling, signature validation, idempotent delivery tracking (SQLite)
@@ -17,6 +17,8 @@ Phases 1–18 complete (Steps 1–50 + command-override follow-up). Phase 19 Ste
 - Review-state escalation from surviving comment severity: opt-in `review.request_changes_on_error` maps error-severity comments to `REQUEST_CHANGES`; opt-in `review.approve_if_clean` maps clean reviews to `APPROVE`
 - Full-file context for small changed files: opt-in `review.full_file_max_bytes` fetches non-deleted changed files under the threshold and prepends full text before each diff in the review prompt
 - OpenAI-compatible adapter response-format selection: `OpenAi.ResponseFormat` supports `json_object`, `json_schema`, and `text`; raw self-critique/agentic passes always use text mode
+- Parse-failure repair: OpenAI-compatible and Anthropic review passes perform one schema-guided repair call on malformed review JSON and return an empty review if repair also fails
+- OpenAI-compatible token usage telemetry: records `reviewbot.llm.tokens` by prompt/completion direction and review/self-critique/agentic-context phase; parse failures record `reviewbot.llm.parse_failures_total`
 
 **Key implementation decisions:**
 - EF Core migrations must be generated via `dotnet ef migrations add`; hand-crafted snapshots fail with `PendingModelChangesWarning` promoted to error.
@@ -30,6 +32,8 @@ Phases 1–18 complete (Steps 1–50 + command-override follow-up). Phase 19 Ste
 - Full-file context is carried on `ReviewRequest` because LLM adapters own prompt construction through `PromptBuilder.Build(request)`.
 - `review.full_file_max_bytes` is a non-negative integer: `0` is a valid disabled value, unlike other positive-only review limits.
 - `OpenAi.ResponseFormat` is the only OpenAI-compatible response-format switch; the old `OpenAi.UseJsonMode` flag was removed because ReviewBot is not deployed outside this repo yet.
+- LLM telemetry lives in `ReviewBot.Core` on the shared `ReviewBot` meter because LLM adapter projects cannot depend on `ReviewBot.Api`; API metrics reuse the same meter name.
+- `CompleteRawAsync` carries an optional phase label so OpenAI-compatible token metrics distinguish `review`, `self_critique`, and `agentic_context` calls.
 
 ---
 
@@ -42,7 +46,6 @@ Phases 1–18 complete (Steps 1–50 + command-override follow-up). Phase 19 Ste
 - Anthropic E2E base URL not injectable; all WireMock scenarios use OpenAI-compatible provider.
 - Local build/test execution requires SDKs on the worker; keep SDK-dependent E2E tests behind `[Trait("Category", "RequiresSdk")]`.
 - Branch-protection "required" check context not distinguished; `CheckRunFetcher` treats any completed failing check/status as failed.
-- OpenAI-compatible parse repair and token usage metrics are still pending (Step 52); malformed review responses can still fail after the existing retry path.
 
 ---
 
@@ -171,7 +174,7 @@ Corrected assumptions discovered during implementation:
 
 Risk register update:
 - No new risk opened. JSON-mode incompatibility is now mitigated by `ResponseFormat: text` and `ResponseFormat: json_schema`.
-- Remaining Phase 19 risk: parse repair and token usage metrics are still pending in Step 52.
+- Follow-up risk from Step 51 was closed in Step 52 by parse repair and token usage metrics.
 
 Stop test: `dotnet test --no-restore` passes (376 passing, 0 failed, 1 skipped Ollama E2E).
 
@@ -199,29 +202,31 @@ Config key: `OpenAi__ResponseFormat` env var or `OpenAi.ResponseFormat` in appse
 
 **Tests:** request serialization under each mode; existing tests pass with `json_object` default.
 
-### Step 52: Parse-failure repair and token usage metrics
+### Step 52 — complete (2026-05-24)
 
-**Parse repair** in `OpenAiReviewLlm.ReviewAsync` (and `AnthropicReviewLlm` for consistency):
+Implemented end-to-end:
+- Replaced the old malformed-response retry in `OpenAiReviewLlm` and `AnthropicReviewLlm` with a schema-guided repair call: system prompt contains the review JSON schema, user prompt is the failed raw response.
+- Repair is skipped when cancellation has already been requested after the first parse failure.
+- First parse failures log the parse error and raw response truncated to 500 characters; second repair failures log and return an empty `ReviewResult` instead of throwing.
+- Added `ReviewBotLlmMetrics` on the shared `ReviewBot` meter with `reviewbot.llm.parse_failures_total` and `reviewbot.llm.tokens`.
+- Changed the internal OpenAI chat client result to carry optional token usage; the SDK adapter records prompt/completion token histograms and logs cached prompt tokens at Debug when non-zero.
+- Added phase labels for raw completions (`self_critique`, `agentic_context`) by extending `CompleteRawAsync` with an optional phase parameter and passing explicit phases from the worker.
+- Reused a shared review JSON schema builder for OpenAI structured-output requests and repair prompts.
+- Unit tests cover OpenAI and Anthropic repair success/failure behavior, OpenAI parse-failure metrics, token metrics, and worker phase labels.
+- E2E test stubs malformed OpenAI-compatible output followed by repaired valid JSON, then asserts a review is posted and the parse-failure metric is emitted.
 
-On `LlmResultParser.Parse` failure:
-1. Log Warning with raw response truncated to 500 chars.
-2. Build repair payload: system = "Your previous response was not valid JSON. Return only a JSON object matching this schema: {schema}"; user = failed raw response.
-3. Call API once more; parse result.
-4. On second failure: log Warning "Repair failed"; return empty result.
+Corrected assumptions discovered during implementation:
+- The existing adapters already retried malformed JSON, but the retry reused the original prompt plus a terse instruction and threw on second failure; Step 52 needed a separate repair prompt and non-throwing fallback.
+- There is no HTTP metrics endpoint in the current app. Existing tests verify `System.Diagnostics.Metrics` with `MeterListener`, so the E2E repair test follows that pattern instead of asserting via an endpoint.
+- Token usage is only available from the OpenAI-compatible chat completion response in the current adapter shape; Anthropic repair was implemented for consistency, but Anthropic token telemetry was not added.
+- `parse_failures_total` records one malformed-review incident by final repair outcome (`repaired=true|false`), not one count for each invalid response body.
 
-Repair is skipped when cancellation is already requested.
+Risk register update:
+- Closed: malformed primary OpenAI-compatible review responses no longer fail the job after the old retry path; one repair attempt is made and repair failure degrades to an empty review.
+- Closed: OpenAI-compatible token usage is no longer invisible when the provider returns `usage`.
+- No new risk opened. Metrics endpoint exposure remains intentionally absent; tests continue to observe the shared meter directly.
 
-**Token usage metrics:** parse `usage` from every chat completion response:
-- Emit `reviewbot.llm.tokens` histogram with labels `direction=prompt|completion` and `phase=review|self_critique|agentic_context`
-- Log `cached_tokens` (from `usage.prompt_tokens_details.cached_tokens`) at Debug when non-zero — indicator of server-side KV cache hits on vLLM
-- Counter `reviewbot.llm.parse_failures_total` with label `repaired=true|false`
-
-**Tests:**
-- Repair: first parse fails → repair call made → success → result returned; second parse also fails → Warning, empty result.
-- Token metrics: response with `usage` → histogram recorded; missing `usage` → no exception.
-- `parse_failures_total` incremented correctly.
-
-**E2E:** stub LLM to return malformed JSON on first call, valid JSON on repair call; assert review is posted and `parse_failures_total` counter is non-zero via metrics endpoint.
+Stop test: `dotnet test --no-restore` passes (378 passing, 0 failed, 1 skipped Ollama E2E).
 
 ---
 

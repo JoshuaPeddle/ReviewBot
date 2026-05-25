@@ -1,6 +1,7 @@
 using OpenAI;
 using OpenAI.Chat;
 using System.ClientModel;
+using ReviewBot.Core.Llm;
 
 namespace ReviewBot.Llm.OpenAi;
 
@@ -22,7 +23,7 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
         clientOptions = CreateClientOptions(options.BaseUrl, options.TimeoutSeconds);
     }
 
-    public async Task<string> CompleteChatAsync(OpenAiChatRequest request, CancellationToken ct)
+    public async Task<OpenAiChatResult> CompleteChatAsync(OpenAiChatRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -47,7 +48,14 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
             .Where(part => !string.IsNullOrEmpty(part.Text))
             .Select(part => part.Text);
 
-        return string.Concat(textParts);
+        var usage = completion.Value.Usage is null
+            ? null
+            : new LlmTokenUsage(
+                PromptTokens: completion.Value.Usage.InputTokenCount,
+                CompletionTokens: completion.Value.Usage.OutputTokenCount,
+                CachedPromptTokens: completion.Value.Usage.InputTokenDetails?.CachedTokenCount ?? 0);
+
+        return new OpenAiChatResult(string.Concat(textParts), usage);
     }
 
     internal static OpenAIClientOptions CreateClientOptions(Uri? baseUrl, int timeoutSeconds) =>
@@ -72,50 +80,6 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
         };
     }
 
-    internal static string BuildReviewJsonSchema(bool includeContextRequests)
-    {
-        var contextRequestsSchema = includeContextRequests
-            ? """
-              ,
-                    "context_requests": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "path": { "type": "string" },
-                          "reason": { "type": "string" }
-                        },
-                        "required": ["path"],
-                        "additionalProperties": false
-                      }
-                    }
-              """
-            : string.Empty;
-
-        return $$"""
-               {
-                 "type": "object",
-                 "properties": {
-                   "summary": { "type": "string" },
-                   "comments": {
-                     "type": "array",
-                     "items": {
-                       "type": "object",
-                       "properties": {
-                         "path": { "type": "string" },
-                         "line": { "type": "integer" },
-                         "severity": { "type": "string", "enum": ["info", "warning", "error"] },
-                         "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
-                         "body": { "type": "string" }
-                       },
-                       "required": ["path", "line", "severity", "confidence", "body"],
-                       "additionalProperties": false
-                     }
-                   }{{contextRequestsSchema}}
-                 },
-                 "required": ["summary", "comments"],
-                 "additionalProperties": false
-               }
-               """;
-    }
+    internal static string BuildReviewJsonSchema(bool includeContextRequests) =>
+        ReviewJsonSchema.Build(includeContextRequests);
 }
