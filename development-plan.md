@@ -167,8 +167,6 @@ Per your own assessment, latency is the felt pain. The 9B local model is the dom
 
 ### The harder wins (defer to after Phase 22)
 
-**Skip the prompt entirely on near-empty PRs.** If the entire diff is one file, fewer than 20 changed lines, and contains only formatting changes (whitespace, brace style), short-circuit to "no comments" without an LLM call. Risk: false negatives on the rare interesting one-liner. Mitigate by requiring a heuristic match (only whitespace tokens changed). Saves the entire review cost on noise-PRs.
-
 **Smaller specialized model for self-critique.** The critique pass is a binary classification task per comment (keep or drop). It doesn't need the same model as the review pass. A cheaper/faster model would let you self-critique on every review without latency cost. Wire in once Phase 22 stabilizes the prompt structure.
 
 ### Measurement
