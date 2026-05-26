@@ -139,7 +139,7 @@ dotnet run --project tests/ReviewBot.Evals -- score --fixture <dir> --result <ll
 dotnet run --project tests/ReviewBot.Evals -- score --fixtures <dir> --results <dir> [--out <run.json>]
 ```
 
-Completed 2026-05-25: the score command can now aggregate a fixture set against a directory of canned LLM results. Each immediate fixture subdirectory is matched to `<fixture-directory-name>.json` in the results directory, and the output run JSON includes fixture pass/fail, aggregate precision, recall, F1, and confusion counts. This unblocks multi-fixture rubric calibration before wiring the live `IReviewLlm` runner, judge pass, compare command, and `make eval-quick`.
+Completed 2026-05-25: the score command can now aggregate a fixture set against a directory of canned LLM results. Each immediate fixture subdirectory is matched to `<fixture-directory-name>.json` in the results directory, and the output run JSON includes fixture pass/fail, aggregate precision, recall, F1, and confusion counts. This unblocks multi-fixture rubric calibration before wiring the live `IReviewLlm` runner, judge pass, and compare command.
 
 Completed 2026-05-25: the compare command is now available:
 
@@ -148,6 +148,14 @@ dotnet run --project tests/ReviewBot.Evals -- compare <baseline-run.json> <candi
 ```
 
 It reads two aggregate run JSON files, matches fixture rows by fixture directory slug, prints a regression/improvement table, optionally writes comparison JSON, and exits nonzero when any fixture regresses. Correction discovered while implementing it: fixture metadata names are display labels and full fixture paths can differ across machines, so comparison keys should use the fixture directory slug from `fixturePath`.
+
+Completed 2026-05-25: `make eval-quick` now runs a checked-in three-fixture smoke corpus in under a minute:
+
+```
+make eval-quick
+```
+
+The quick corpus covers one security-boundary leak, one correctness/off-by-one regression, and one clean documentation-only PR. Each fixture includes the planned `fixture.yaml`, `diff.patch`, `repo-state/`, and `expected.yaml` shape, with canned results under `tests/ReviewBot.Evals/CannedResults/quick/`. Correction discovered while adding the target: eval run JSON is generated output, so `runs/` is now ignored instead of becoming accidental source control noise.
 
 ### Calibration first, then everything else
 
@@ -387,7 +395,7 @@ What's explicitly out of scope for v1: multi-tenant auth, per-user permissions, 
 
 ## Risks
 
-The eval harness is the load-bearing piece of this plan. If it isn't built carefully (judge prompt drift, fixture distribution skewed toward easy bugs, scoring rules too forgiving), the rest of the work optimizes against a bad metric. Budget at least three days for rubric-tuning after the initial implementation, comparing harness scores against your own hand-review of the same fixtures. If the harness and your eye disagree on more than 20 percent of fixtures, the rubric needs work, not the bot. The 2026-05-25 rule-scoring slice closes the risk that the fixture schema is only aspirational, but opens a calibration risk: the first implementation counts any unmatched, non-allowed comment as a false positive. Revisit that strictness after the first 5 to 10 fixtures are scored by hand. The set-level score runner lowers the fixture-calibration risk by making multi-fixture runs reproducible, but it adds one convention to document: canned result files must be named after their fixture directory. The compare command closes the immediate "eyeball two JSON blobs" regression risk for prompt work, but opens a corpus-change interpretation risk: added and removed fixtures are reported, not treated as regressions, so baseline comparisons should generally use the same fixture corpus.
+The eval harness is the load-bearing piece of this plan. If it isn't built carefully (judge prompt drift, fixture distribution skewed toward easy bugs, scoring rules too forgiving), the rest of the work optimizes against a bad metric. Budget at least three days for rubric-tuning after the initial implementation, comparing harness scores against your own hand-review of the same fixtures. If the harness and your eye disagree on more than 20 percent of fixtures, the rubric needs work, not the bot. The 2026-05-25 rule-scoring slice closes the risk that the fixture schema is only aspirational, but opens a calibration risk: the first implementation counts any unmatched, non-allowed comment as a false positive. Revisit that strictness after the first 5 to 10 fixtures are scored by hand. The set-level score runner lowers the fixture-calibration risk by making multi-fixture runs reproducible, but it adds one convention to document: canned result files must be named after their fixture directory. The compare command closes the immediate "eyeball two JSON blobs" regression risk for prompt work, but opens a corpus-change interpretation risk: added and removed fixtures are reported, not treated as regressions, so baseline comparisons should generally use the same fixture corpus. The quick eval corpus closes the immediate dev-loop risk that `eval-quick` existed only as a plan item, while leaving the larger calibration risk open until the corpus grows beyond three fixtures and real model outputs are scored.
 
 Retrieval in Phase 22 has integration surface area: tree-sitter native binaries on multiple OS targets, sqlite-vec extension loading, disk cache management. Plan for two weeks of "make it actually work on Linux containers, Mac dev machines, Windows runners" after the happy-path implementation. Selfhosters will hit these.
 
