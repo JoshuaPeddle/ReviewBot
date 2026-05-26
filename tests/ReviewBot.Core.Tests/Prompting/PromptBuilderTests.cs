@@ -21,7 +21,8 @@ public class PromptBuilderTests
         payload.SystemPrompt.Should().Contain("- tests");
         payload.SystemPrompt.Should().Contain("\"summary\": \"string, markdown allowed, 1-3 short paragraphs\"");
         payload.SystemPrompt.Should().Contain("\"comments\": [");
-        payload.SystemPrompt.Should().Contain("\"line\": \"integer, use the NNN from the diff line annotation prefix\"");
+        payload.SystemPrompt.Should().Contain(
+            "\"line\": \"integer, copy the NNN from the diff line annotation prefix verbatim; never count lines yourself\"");
     }
 
     [Fact]
@@ -162,7 +163,7 @@ public class WithContext
         var payload = PromptBuilder.Build(request);
 
         payload.SystemPrompt.Should().Be("""
-You are a senior code reviewer. Review the pull request with particular focus on: correctness, security.
+You are a senior code reviewer reviewing a pull request.
 
 Focus areas:
 - correctness
@@ -171,10 +172,22 @@ Focus areas:
 Additional instructions:
 Be concise and only comment on actionable issues.
 
+Assign a severity level to each comment:
+- "error": a correctness, security, or data-loss bug that should block merge
+- "warning": a likely defect, reliability hazard, or maintainability concern worth fixing before merge
+- "info": a minor style, naming, or nit that is safe to ignore
+
 Assign a confidence level to each comment based on how certain you are:
 - "high": you have seen the code in question and are certain this is a real issue
 - "medium": likely an issue but depends on context outside the diff
 - "low": weak but evidence-backed; you would not block a merge on this alone
+
+What a good comment looks like:
+GOOD (specific, ties to a visible line, names the value, gives a fix direction):
+  "`request.Email` on line 47 is interpolated into the SQL string. It originates from the HTTP body, so treat it as untrusted and use a parameter."
+BAD (speculative, asks for vague confirmation about code not in the diff):
+  "Make sure the email is validated somewhere before this point."
+Omit comments that read like the BAD example.
 
 Comment quality rules:
 - Only report actionable concerns. Do not leave praise, positive feedback, confirmations that code is correct, or comments whose purpose is to validate that a change looks good.
@@ -199,14 +212,14 @@ Schema:
   "comments": [
     {
       "path": "string, must match one of the changed files",
-      "line": "integer, use the NNN from the diff line annotation prefix",
+      "line": "integer, copy the NNN from the diff line annotation prefix verbatim; never count lines yourself",
       "severity": "info|warning|error",
       "confidence": "high|medium|low",
       "body": "string, markdown allowed; concise review comment, no copied diff code"
     }
   ]
 }
-Omit a comment entirely rather than pick a guessed line or provide positive feedback, and keep total comments under 25.
+Omit a comment entirely rather than pick a guessed line or provide positive feedback. Aim for the 3 to 7 highest-impact issues; never exceed 15. When in doubt, omit.
 """);
 
         payload.UserPrompt.Should().Be("""
@@ -450,7 +463,7 @@ public interface IReviewStore
         var payload = PromptBuilder.Build(request);
 
         payload.SystemPrompt.Should().Contain(
-            "- Build: SUCCESS (0 warnings, 0 errors) — all syntax in changed files is confirmed valid");
+            "- Build: SUCCESS (0 warnings, 0 errors), code compiles");
     }
 
     [Fact]
@@ -467,7 +480,7 @@ public interface IReviewStore
         var payload = PromptBuilder.Build(request);
 
         payload.SystemPrompt.Should().Contain(
-            "- Build: FAILED (3 errors) — see build output below");
+            "- Build: FAILED (3 errors), see build output below");
     }
 
     [Fact]
@@ -520,7 +533,7 @@ public interface IReviewStore
         var payload = PromptBuilder.Build(request);
 
         payload.SystemPrompt.Should().Contain("- Tests: FAILED (38 passed, 4 failed, 0 skipped)");
-        payload.SystemPrompt.Should().Contain("existing behavior may have regressed");
+        payload.SystemPrompt.Should().Contain("existing tests are now failing");
     }
 
     [Fact]
