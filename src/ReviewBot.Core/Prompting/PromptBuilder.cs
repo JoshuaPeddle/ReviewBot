@@ -244,7 +244,15 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
         prompt.Append(request.PrTitle);
         prompt.Append("\n\nPR Body:\n");
         prompt.Append(request.PrBody);
-        prompt.Append("\n\nChanged Files:\n");
+
+        if (AppendRepositoryContext(prompt, request.RepositoryContext))
+        {
+            prompt.Append("\nChanged Files:\n");
+        }
+        else
+        {
+            prompt.Append("\n\nChanged Files:\n");
+        }
 
         var orderedFiles = request.Files.OrderBy(file => file.Path, StringComparer.Ordinal);
         foreach (var file in orderedFiles)
@@ -273,6 +281,35 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
         }
 
         return prompt.ToString().TrimEnd();
+    }
+
+    private static bool AppendRepositoryContext(
+        StringBuilder prompt,
+        IReadOnlyList<RepositoryContextSnippet>? repositoryContext)
+    {
+        if (repositoryContext is null || repositoryContext.Count == 0)
+        {
+            return false;
+        }
+
+        prompt.Append("\n\n## Repository context\n");
+        foreach (var snippet in repositoryContext
+            .OrderBy(snippet => snippet.Path, StringComparer.Ordinal)
+            .ThenBy(snippet => snippet.StartLine)
+            .ThenBy(snippet => snippet.EndLine))
+        {
+            prompt.Append("### ");
+            prompt.Append(snippet.Path);
+            prompt.Append(" lines ");
+            prompt.Append(snippet.StartLine);
+            prompt.Append('-');
+            prompt.Append(snippet.EndLine);
+            prompt.Append("\n```\n");
+            prompt.Append(SanitizeFetchedContent(snippet.Content));
+            prompt.Append("\n```\n");
+        }
+
+        return true;
     }
 
     private static string BuildContextEnrichedUserPrompt(

@@ -5,4 +5,5 @@ internal sealed record AnthropicMessageRequest(
     IReadOnlyList<string> UserMessages,
     string ModelName,
     int MaxTokens,
-    decimal Temperature);
+    decimal Temperature,
+    bool EnablePromptCaching);

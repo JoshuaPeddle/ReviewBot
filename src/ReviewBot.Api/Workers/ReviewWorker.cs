@@ -318,20 +318,44 @@ public sealed class ReviewWorker : BackgroundService
             job.DeliveryId);
         metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
 
-        result = await ApplyAgenticContextAsync(
-                llm,
-                request,
-                result,
-                config,
-                job,
-                metadata.HeadSha,
-                installationToken.Token,
-                ct)
-            .ConfigureAwait(false);
+        var initialResult = result;
+        var initialCandidateComments = FilterCandidateComments(initialResult, config);
+        var speculativeSelfCritique = StartSelfCritiqueIfNeeded(llm, files, initialCandidateComments, config, ct);
+
+        try
+        {
+            result = await ApplyAgenticContextAsync(
+                    llm,
+                    request,
+                    result,
+                    config,
+                    job,
+                    metadata.HeadSha,
+                    installationToken.Token,
+                    ct)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            CancelSelfCritique(speculativeSelfCritique);
+            throw;
+        }
         result = AppendFilesSkippedNote(result, patchBudgetResult.SkippedPaths);
-        var candidateComments = FilterCandidateComments(result, config);
-        candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
-            .ConfigureAwait(false);
+        IReadOnlyList<InlineComment> candidateComments;
+        if (ReferenceEquals(result, initialResult))
+        {
+            candidateComments = speculativeSelfCritique is null
+                ? initialCandidateComments
+                : await AwaitSelfCritiqueAsync(speculativeSelfCritique).ConfigureAwait(false);
+        }
+        else
+        {
+            CancelSelfCritique(speculativeSelfCritique);
+            candidateComments = FilterCandidateComments(result, config);
+            candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
+                .ConfigureAwait(false);
+        }
+
         result = ApplyOutputConfig(result, candidateComments, config);
         if (config.Review.Summary)
         {
@@ -354,6 +378,69 @@ public sealed class ReviewWorker : BackgroundService
     }
 
     private enum JobProcessStatus { Success, Skipped }
+
+    private SelfCritiqueRun? StartSelfCritiqueIfNeeded(
+        IReviewLlm llm,
+        IReadOnlyList<FileChange> files,
+        IReadOnlyList<InlineComment> candidateComments,
+        ReviewConfig config,
+        CancellationToken ct)
+    {
+        if (!ShouldRunSelfCritique(candidateComments, config))
+        {
+            return null;
+        }
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var task = ApplySelfCritiqueAsync(llm, files, candidateComments, config, cts.Token);
+        return new SelfCritiqueRun(task, cts);
+    }
+
+    private static async Task<IReadOnlyList<InlineComment>> AwaitSelfCritiqueAsync(SelfCritiqueRun run)
+    {
+        try
+        {
+            return await run.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            run.Cancellation.Dispose();
+        }
+    }
+
+    private void CancelSelfCritique(SelfCritiqueRun? run)
+    {
+        if (run is null)
+        {
+            return;
+        }
+
+        run.Cancellation.Cancel();
+        _ = LogAndDisposeBackgroundTaskAsync(run.Task, run.Cancellation, "speculative self-critique");
+    }
+
+    private async Task LogAndDisposeBackgroundTaskAsync(
+        Task task,
+        CancellationTokenSource cts,
+        string operationName)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // The speculative call was superseded by a later review result.
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "{OperationName} failed after the review job no longer needed its result", operationName);
+        }
+        finally
+        {
+            cts.Dispose();
+        }
+    }
 
     private void LogIfBackgroundTaskFails(Task? task, string operationName)
     {
@@ -778,7 +865,7 @@ public sealed class ReviewWorker : BackgroundService
         ReviewConfig config,
         CancellationToken ct)
     {
-        if (!config.Review.SelfCritique || candidateComments.Count == 0)
+        if (!ShouldRunSelfCritique(candidateComments, config))
         {
             return candidateComments;
         }
@@ -789,11 +876,6 @@ public sealed class ReviewWorker : BackgroundService
         var critiqueCandidates = candidateComments
             .Where(c => c.Confidence != Confidence.High)
             .ToArray();
-
-        if (critiqueCandidates.Length == 0)
-        {
-            return candidateComments;
-        }
 
         var critiquePayload = SelfCritiquePromptBuilder.Build(files, critiqueCandidates);
         try
@@ -830,6 +912,10 @@ public sealed class ReviewWorker : BackgroundService
             return candidateComments;
         }
     }
+
+    private static bool ShouldRunSelfCritique(IReadOnlyList<InlineComment> candidateComments, ReviewConfig config) =>
+        config.Review.SelfCritique &&
+        candidateComments.Any(c => c.Confidence != Confidence.High);
 
     private static IReadOnlyList<InlineComment> FilterCandidateComments(ReviewResult result, ReviewConfig config)
     {
@@ -1201,4 +1287,8 @@ public sealed class ReviewWorker : BackgroundService
     private sealed record ContextRequestValidationResult(
         IReadOnlyList<ContextRequest> Requests,
         IReadOnlyDictionary<string, int> DropCounts);
+
+    private sealed record SelfCritiqueRun(
+        Task<IReadOnlyList<InlineComment>> Task,
+        CancellationTokenSource Cancellation);
 }

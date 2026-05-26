@@ -50,7 +50,7 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         ArgumentNullException.ThrowIfNull(request);
 
         var prompt = PromptBuilder.Build(request);
-        var firstResponse = await SendAsync(prompt, [prompt.UserPrompt], ct);
+        var firstResponse = await SendAsync(prompt, [prompt.UserPrompt], enablePromptCaching: true, ct);
         var firstParse = LlmResultParser.Parse(firstResponse, logger);
         if (firstParse is { Success: true, Value: not null })
         {
@@ -64,7 +64,7 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         ct.ThrowIfCancellationRequested();
 
         var repairPrompt = BuildRepairPrompt(firstResponse, request.Config.Review.AgenticContext);
-        var repairResponse = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], ct);
+        var repairResponse = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], enablePromptCaching: false, ct);
         var repairParse = LlmResultParser.Parse(repairResponse, logger);
         if (repairParse is { Success: true, Value: not null })
         {
@@ -85,7 +85,7 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         ArgumentNullException.ThrowIfNull(prompt);
         ArgumentException.ThrowIfNullOrWhiteSpace(phase);
 
-        return SendAsync(prompt, [prompt.UserPrompt], ct);
+        return SendAsync(prompt, [prompt.UserPrompt], enablePromptCaching: true, ct);
     }
 
     public IReviewLlm WithModelName(string modelName)
@@ -99,14 +99,19 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
             delayAsync);
     }
 
-    private async Task<string> SendAsync(PromptPayload prompt, IReadOnlyList<string> userMessages, CancellationToken ct)
+    private async Task<string> SendAsync(
+        PromptPayload prompt,
+        IReadOnlyList<string> userMessages,
+        bool enablePromptCaching,
+        CancellationToken ct)
     {
         var request = new AnthropicMessageRequest(
             SystemPrompt: prompt.SystemPrompt,
             UserMessages: userMessages,
             ModelName: options.ModelName,
             MaxTokens: options.MaxTokens,
-            Temperature: options.Temperature);
+            Temperature: options.Temperature,
+            EnablePromptCaching: enablePromptCaching && options.PromptCachingEnabled);
 
         for (var retryAttempt = 0; ; retryAttempt++)
         {

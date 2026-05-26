@@ -26,20 +26,7 @@ internal sealed class AnthropicSdkClient : IAnthropicClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var parameters = new MessageParameters
-        {
-            MaxTokens = request.MaxTokens,
-            Model = request.ModelName,
-            Stream = false,
-            Temperature = request.Temperature,
-            System =
-            [
-                new SystemMessage(request.SystemPrompt, cacheControl: null)
-            ],
-            Messages = request.UserMessages
-                .Select(userMessage => new Message(RoleType.User, userMessage, cacheControl: null))
-                .ToList()
-        };
+        var parameters = BuildParameters(request);
 
         var response = await client.Messages.GetClaudeMessageAsync(parameters, ct);
         var textParts = response.Content?
@@ -54,5 +41,32 @@ internal sealed class AnthropicSdkClient : IAnthropicClient
         }
 
         return response.Message.ToString();
+    }
+
+    internal static MessageParameters BuildParameters(AnthropicMessageRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var cacheControl = request.EnablePromptCaching
+            ? new CacheControl { Type = CacheControlType.ephemeral }
+            : null;
+
+        var parameters = new MessageParameters
+        {
+            MaxTokens = request.MaxTokens,
+            Model = request.ModelName,
+            Stream = false,
+            Temperature = request.Temperature,
+            PromptCaching = request.EnablePromptCaching ? PromptCacheType.FineGrained : PromptCacheType.None,
+            System =
+            [
+                new SystemMessage(request.SystemPrompt, cacheControl)
+            ],
+            Messages = request.UserMessages
+                .Select(userMessage => new Message(RoleType.User, userMessage, cacheControl: null))
+                .ToList()
+        };
+
+        return parameters;
     }
 }

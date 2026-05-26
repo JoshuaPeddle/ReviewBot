@@ -190,6 +190,8 @@ Completed 2026-05-26: `ReviewWorker.ProcessAsync` now overlaps repo config and P
 
 **Anthropic prompt caching.** Anthropic supports prompt caching where unchanged prompt prefixes are cached server-side and re-sent at a discount. The system prompt for a review is identical across all PRs in the same repo (focus, instructions, schema), and the grounding section is identical for the duration of a SHA. Mark the system prompt + grounding block as `cache_control: ephemeral` on the request. First review of a SHA pays full price, subsequent reviews (re-runs, self-critique passes, agentic-context second passes) hit the cache. Self-critique on a single review can save 50 to 70 percent of system-prompt tokens because the system prompt is reused. Worth the small adapter change.
 
+Completed 2026-05-26: Anthropic requests now enable SDK fine-grained prompt caching by default and mark the system prompt with `cache_control: ephemeral`; `Anthropic:PromptCachingEnabled=false` disables it. Review and raw completion requests are cacheable, while malformed-response repair requests remain uncached because their system prompt embeds the failed model output. The stop test passes: Anthropic LLM tests prove normal review/self-critique requests opt in, repair opts out, the config flag disables caching, and the SDK request maps enabled caching to `PromptCacheType.FineGrained` plus an ephemeral system-message cache point. Correction discovered while implementing: the current prompt builder composes verified grounding into the single system prompt rather than a separate grounding message, so the adapter caches the combined system prompt. Also, Anthropic.SDK 5.10.0 represents disabled prompt caching as `PromptCacheType.None`, not a null/unset property.
+
 **Skip self-critique when it can't help.** Today self-critique runs whenever `review.self_critique: true` and any comment exists. If every comment is high-confidence already, the critique pass has nothing to do (high-confidence comments are retained unconditionally). Short-circuit: if `candidateComments.All(c => c.Confidence == Confidence.High)`, skip the critique entirely. Same final result, one fewer LLM call.
 
 Correction confirmed 2026-05-26: this optimization had already shipped before the current Phase 21 slice. `ReviewWorker` critiques only lower-confidence candidate comments, returns immediately when no lower-confidence comments remain, and `ReviewWorkerTests` covers the high-confidence-only stop case.
@@ -199,6 +201,8 @@ Correction confirmed 2026-05-26: this optimization had already shipped before th
 Completed 2026-05-26: full-file context now excludes non-deleted files whose additions are more than 90 percent of changed lines before applying the small-patch byte filter. The stop test passes: mostly-new files are not requested for full-file context, exactly-90-percent and mixed files still are, and the LLM receives only fetched non-mostly-new file contents. Correction discovered while adding coverage: the worker test helper represented every synthetic modified file as 1 addition / 0 deletions, which made ordinary modified-file fixtures look like mostly-new files. The helper now defaults modified files to a mixed add/delete change and allows tests to set explicit additions/deletions.
 
 **Stream-and-fork the LLM call for self-critique on large PRs.** Not actually streaming the response (the JSON has to be complete before parsing), but: kick off the self-critique LLM call as soon as the first pass returns, in parallel with the agentic-context branch decision. Today these are sequential.
+
+Completed 2026-05-26: the worker now starts self-critique speculatively as soon as the first review result is parsed, so it can overlap with agentic-context request filtering and file fetching when the initial result remains the final result. The stop test passes: worker tests prove self-critique starts while agentic context fetching is still in flight, and prove that an enriched agentic-context result gets a fresh critique instead of accidentally reusing the speculative critique for the initial comments. Correction discovered while implementing: the optimization cannot blindly reuse the first-pass critique after a successful agentic second pass, because the comment set may be replaced. The worker now cancels and observes the speculative critique in that case, then critiques the enriched comments with the existing behavior.
 
 ### The harder wins (defer to after Phase 22)
 
@@ -272,6 +276,8 @@ retrieval:
   embeddings: false                    # v0 ships with this off
   index_cache_dir: /var/cache/reviewbot/index
 ```
+
+Completed 2026-05-26: the first Phase 22 retrieval slice now has a typed config and prompt surface. `ReviewConfig` carries a `RetrievalConfig`, repo YAML parses `retrieval.enabled`, `max_bytes`, `symbol_lookup_depth`, `embeddings`, and `index_cache_dir`, and `ReviewRequest` can carry deterministic repository snippets that `PromptBuilder` renders before the diff under `## Repository context`. The stop test passes: config tests cover full, partial, and invalid retrieval YAML, and prompt tests prove snippets are ordered, sanitized, and inserted before changed files. Correction discovered while implementing: `retrieval.enabled` should default to `false` until an actual retrieval provider/indexer is wired into the worker, even though the end-state config should default true once shipped. Also, `review.full_file_max_bytes` remains active for now; it is not safe to remove until retrieval can actually replace it end-to-end.
 
 ### What this replaces
 
@@ -405,8 +411,14 @@ The eval harness is the load-bearing piece of this plan. If it isn't built caref
 
 Retrieval in Phase 22 has integration surface area: tree-sitter native binaries on multiple OS targets, sqlite-vec extension loading, disk cache management. Plan for two weeks of "make it actually work on Linux containers, Mac dev machines, Windows runners" after the happy-path implementation. Selfhosters will hit these.
 
+Phase 22's first retrieval slice closes the risk that later retrieval work has no typed config or prompt injection point. Residual risk: the worker still does not populate repository snippets, so `retrieval.enabled` is intentionally documented and implemented as default-off until the symbol extractor, repo index, and context-selection provider are wired and measured. Keeping `review.full_file_max_bytes` active avoids a behavior regression, but means there will be a future deprecation/migration decision once retrieval can subsume it.
+
 Anthropic SDK 5.x is still unofficial. The risk hasn't changed since the v4 plan, but the surface area grows when Phase 21 adds prompt caching. Worth investigating whether the official Anthropic .NET SDK has shipped or is close; if so, migrate. If not, pin the version and document.
+
+Phase 21 Anthropic prompt caching closes the immediate implementation risk for cache-control wiring in the current SDK. Residual risk: provider-side cache hit behavior and token savings are not yet measured in eval/trace output, and Anthropic.SDK remains a version-sensitive dependency for this feature.
 
 Phase 21 full-file trimming closed the immediate wasted-context risk for mostly-new files without adding configuration surface. Residual risk: the fixed 90 percent threshold is heuristic, so future eval/trace data should confirm it does not remove useful context for generated files or unusual patch shapes.
 
 Phase 21 pipeline parallelization closes the obvious sequential-worker latency risk for event-triggered reviews with known head SHAs. Residual risk: speculative metadata fetches can spend one extra GitHub request on jobs that config later skips; monitor rate-limit pressure before parallelizing more aggressively, especially for disabled repos with frequent webhook traffic.
+
+Phase 21 speculative self-critique closes the remaining sequential branch risk for reviews where agentic context falls back to the initial result. Residual risk: if agentic context successfully replaces the review result, the initially-started self-critique may be canceled after the provider request has already begun, so cloud providers may still bill for some discarded work. Measure how often agentic second passes succeed before deciding whether to gate speculation to large PRs or specific providers.

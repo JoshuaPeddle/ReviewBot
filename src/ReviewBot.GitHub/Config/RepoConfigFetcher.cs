@@ -198,6 +198,7 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
                 path));
 
         var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
+        var retrieval = MergeRetrieval(fileConfig.Retrieval, defaults.Retrieval, owner, repo, sha, path);
 
         return new ReviewConfig(
             fileConfig.Enabled ?? defaults.Enabled,
@@ -206,7 +207,8 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
             fileConfig.Ignore ?? defaults.Ignore,
             fileConfig.Focus ?? defaults.Focus,
             MergeString(fileConfig.Instructions?.Trim(), defaults.Instructions),
-            grounding);
+            grounding,
+            retrieval);
     }
 
     private GroundingConfig MergeGrounding(GroundingConfigFile? file, GroundingConfig defaults)
@@ -227,6 +229,34 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
             file.TestTimeoutSeconds ?? defaults.TestTimeoutSeconds,
             file.BuildCommand ?? defaults.BuildCommand,
             file.TestCommand ?? defaults.TestCommand);
+    }
+
+    private RetrievalConfig MergeRetrieval(
+        RetrievalConfigFile? file,
+        RetrievalConfig defaults,
+        string owner,
+        string repo,
+        string sha,
+        string path)
+    {
+        if (file is null)
+        {
+            return defaults;
+        }
+
+        return new RetrievalConfig(
+            file.Enabled ?? defaults.Enabled,
+            MergePositiveInt(
+                file.MaxBytes,
+                defaults.MaxBytes,
+                "retrieval.max_bytes",
+                owner,
+                repo,
+                sha,
+                path),
+            ParseSymbolLookupDepth(file.SymbolLookupDepth, owner, repo, sha, path),
+            file.Embeddings ?? defaults.Embeddings,
+            MergeString(file.IndexCacheDir, defaults.IndexCacheDir));
     }
 
     private string MergeProvider(string? provider, string owner, string repo, string sha, string path)
@@ -343,6 +373,30 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         return Confidence.Low;
     }
 
+    private string ParseSymbolLookupDepth(string? value, string owner, string repo, string sha, string path)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return RetrievalConfig.Default.SymbolLookupDepth;
+        }
+
+        var normalized = value.Trim().ToLowerInvariant();
+        if (normalized is RetrievalConfig.DefinitionsDepth or RetrievalConfig.CallersDepth or RetrievalConfig.BothDepth)
+        {
+            return normalized;
+        }
+
+        logger.LogWarning(
+            "Unknown ReviewBot retrieval.symbol_lookup_depth value {Value} in {Path} for {Owner}/{Repo} at {Sha}; using default {DefaultValue}",
+            value,
+            path,
+            owner,
+            repo,
+            sha,
+            RetrievalConfig.Default.SymbolLookupDepth);
+        return RetrievalConfig.Default.SymbolLookupDepth;
+    }
+
     private static string MergeString(string? value, string defaultValue) =>
         string.IsNullOrWhiteSpace(value) ? defaultValue : value;
 
@@ -391,6 +445,8 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public string? Instructions { get; set; }
 
         public GroundingConfigFile? Grounding { get; set; }
+
+        public RetrievalConfigFile? Retrieval { get; set; }
     }
 
     private sealed class ModelConfigFile
@@ -471,5 +527,22 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public string? BuildCommand { get; set; }
 
         public string? TestCommand { get; set; }
+    }
+
+    private sealed class RetrievalConfigFile
+    {
+        public RetrievalConfigFile()
+        {
+        }
+
+        public bool? Enabled { get; set; }
+
+        public int? MaxBytes { get; set; }
+
+        public string? SymbolLookupDepth { get; set; }
+
+        public bool? Embeddings { get; set; }
+
+        public string? IndexCacheDir { get; set; }
     }
 }

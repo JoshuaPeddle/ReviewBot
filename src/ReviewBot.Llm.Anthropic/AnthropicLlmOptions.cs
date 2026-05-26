@@ -11,4 +11,6 @@ public sealed record AnthropicLlmOptions
     public int MaxTokens { get; set; } = 4096;
 
     public decimal Temperature { get; set; } = 0.2m;
+
+    public bool PromptCachingEnabled { get; set; } = true;
 }

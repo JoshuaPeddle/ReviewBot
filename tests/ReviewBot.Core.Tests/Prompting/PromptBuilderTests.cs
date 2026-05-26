@@ -134,6 +134,58 @@ public class WithContext
     }
 
     [Fact]
+    public void RepositoryContextIsInsertedBeforeChangedFiles()
+    {
+        var request = CreateRequest(
+            repositoryContext:
+            [
+                new RepositoryContextSnippet(
+                    Path: "src/Zeta.cs",
+                    StartLine: 40,
+                    EndLine: 44,
+                    Content: "public sealed class Zeta\0\n{\n}"),
+                new RepositoryContextSnippet(
+                    Path: "src/Alpha.cs",
+                    StartLine: 10,
+                    EndLine: 12,
+                    Content: "public interface IAlpha\n{\n}")
+            ]);
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.UserPrompt.Should().Contain("""
+## Repository context
+### src/Alpha.cs lines 10-12
+```
+public interface IAlpha
+{
+}
+```
+### src/Zeta.cs lines 40-44
+```
+public sealed class Zeta
+{
+}
+```
+
+Changed Files:
+""");
+        payload.UserPrompt.Should().NotContain("\0");
+        payload.UserPrompt.IndexOf("## Repository context", StringComparison.Ordinal)
+            .Should().BeLessThan(payload.UserPrompt.IndexOf("Changed Files:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void EmptyRepositoryContextIsOmitted()
+    {
+        var request = CreateRequest(repositoryContext: []);
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.UserPrompt.Should().NotContain("## Repository context");
+    }
+
+    [Fact]
     public void BuildReturnsDeterministicSnapshot()
     {
         var config = ReviewConfig.Default with
@@ -559,7 +611,8 @@ public interface IReviewStore
         string body = "Please review the changes.",
         ReviewConfig? config = null,
         IReadOnlyList<FileChange>? files = null,
-        IReadOnlyDictionary<string, string>? fullFileContents = null) =>
+        IReadOnlyDictionary<string, string>? fullFileContents = null,
+        IReadOnlyList<RepositoryContextSnippet>? repositoryContext = null) =>
         new(
             PrTitle: title,
             PrBody: body,
@@ -567,7 +620,8 @@ public interface IReviewStore
             HeadSha: "head",
             Files: files ?? [CreateFile(path: "src/ReviewBot.Core/Review.cs")],
             Config: config ?? ReviewConfig.Default,
-            FullFileContents: fullFileContents);
+            FullFileContents: fullFileContents,
+            RepositoryContext: repositoryContext);
 
     private static FileChange CreateFile(
         string path,

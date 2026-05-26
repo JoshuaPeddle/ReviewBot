@@ -43,6 +43,7 @@ Used when a repo's `.github/review-bot.yml` sets `model.provider: anthropic`.
 | `ModelName` | `REVIEWBOT__Anthropic__ModelName` | `string` | `claude-opus-4-7` | Model to use |
 | `MaxTokens` | `REVIEWBOT__Anthropic__MaxTokens` | `int` | `4096` | Maximum tokens in the LLM response |
 | `Temperature` | `REVIEWBOT__Anthropic__Temperature` | `decimal` | `0.2` | Sampling temperature |
+| `PromptCachingEnabled` | `REVIEWBOT__Anthropic__PromptCachingEnabled` | `bool` | `true` | Enables Anthropic fine-grained prompt caching for reusable system prompts |
 
 `ApiKey` is validated lazily — the host starts even with an empty key, but the first review that uses the Anthropic provider will fail.
 
@@ -157,6 +158,24 @@ review:
 
     # Review on every push to the PR branch.
     on_push: false
+
+retrieval:
+  # Deterministic repository-context retrieval. The config and prompt lane are
+  # present for Phase 22, but the worker does not fetch retrieval snippets yet.
+  # Default: false until the retrieval provider is wired end-to-end.
+  enabled: false
+
+  # Maximum retrieved context bytes to include in a review once retrieval is active.
+  max_bytes: 102400
+
+  # Symbol lookup mode: callers, definitions, or both.
+  symbol_lookup_depth: callers
+
+  # Embedding retrieval lane. Reserved for the post-v0 retrieval pass.
+  embeddings: false
+
+  # Disk location for the per-SHA repository index cache.
+  index_cache_dir: /var/cache/reviewbot/index
 
 # Glob patterns for files to exclude from the review.
 # Uses Microsoft.Extensions.FileSystemGlobbing syntax (forward slashes, ** for any depth).
