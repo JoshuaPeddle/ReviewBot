@@ -1,0 +1,13 @@
+diff --git a/src/ReviewBot.Api/Webhooks/WebhookSignatureValidator.cs b/src/ReviewBot.Api/Webhooks/WebhookSignatureValidator.cs
+index 2f1a111..8c4b222 100644
+--- a/src/ReviewBot.Api/Webhooks/WebhookSignatureValidator.cs
++++ b/src/ReviewBot.Api/Webhooks/WebhookSignatureValidator.cs
+@@ -17,7 +17,7 @@ public bool IsValid(string payload, string signatureHeader)
+ {
+     if (string.IsNullOrWhiteSpace(signatureHeader))
+     {
+-        return false;
++        return string.IsNullOrWhiteSpace(secret);
+     }
+ 
+     return ValidateHmac(payload, signatureHeader, secret);

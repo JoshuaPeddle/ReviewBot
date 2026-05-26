@@ -1,0 +1,12 @@
+diff --git a/src/ReviewBot.Core/Jobs/ReviewJob.cs b/src/ReviewBot.Core/Jobs/ReviewJob.cs
+index 01a1111..35d2222 100644
+--- a/src/ReviewBot.Core/Jobs/ReviewJob.cs
++++ b/src/ReviewBot.Core/Jobs/ReviewJob.cs
+@@ -4,6 +4,7 @@ namespace ReviewBot.Core.Jobs;
+ 
+ public sealed record ReviewJob(
+     string DeliveryId,
++    // Retries reuse the original delivery id so duplicate webhooks stay idempotent.
+     long InstallationId,
+     string Owner,
+     string Repo,

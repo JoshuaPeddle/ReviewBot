@@ -1,0 +1,12 @@
+diff --git a/src/ReviewBot.Core/Diff/LineRange.cs b/src/ReviewBot.Core/Diff/LineRange.cs
+index 6ef1111..bc92222 100644
+--- a/src/ReviewBot.Core/Diff/LineRange.cs
++++ b/src/ReviewBot.Core/Diff/LineRange.cs
+@@ -9,7 +9,7 @@ public sealed record LineRange(int StartLine, int EndLine)
+ {
+     public bool Contains(int line)
+     {
+-        return line >= StartLine && line <= EndLine;
++        return line > StartLine && line < EndLine;
+     }
+ }
