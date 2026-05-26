@@ -28,7 +28,9 @@ Remove comments that:
 - express pure style preference with no correctness, security, reliability, or maintainability implication
 - depend on missing context instead of evidence visible in the diff
 - say an implementation is not visible, cannot be verified, or should be checked elsewhere
+- speculate about a referenced method's return type, async behavior, side effects, or contract
 - praise, validate, or confirm that code is correct instead of identifying an actionable concern
+- discuss whether a fixture, expected finding, or expected.yaml correctly models or requires a result
 - merely say a call could throw without a changed error-handling boundary, visible contract violation, or observable reliability regression
 - duplicate the same root cause already covered by a clearer comment
 - paste or restate code already visible in the diff instead of giving concise review guidance

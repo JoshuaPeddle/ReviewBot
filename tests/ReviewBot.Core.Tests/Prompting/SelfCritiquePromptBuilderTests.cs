@@ -51,7 +51,9 @@ public class SelfCritiquePromptBuilderTests
         payload.SystemPrompt.Should().Contain("evaluating a junior reviewer's proposed pull request comments");
         payload.SystemPrompt.Should().Contain("depend on missing context instead of evidence visible in the diff");
         payload.SystemPrompt.Should().Contain("say an implementation is not visible, cannot be verified");
+        payload.SystemPrompt.Should().Contain("speculate about a referenced method's return type");
         payload.SystemPrompt.Should().Contain("praise, validate, or confirm that code is correct");
+        payload.SystemPrompt.Should().Contain("expected.yaml correctly models or requires");
         payload.SystemPrompt.Should().Contain("merely say a call could throw");
         payload.SystemPrompt.Should().Contain("duplicate the same root cause already covered by a clearer comment");
         payload.SystemPrompt.Should().Contain("paste or restate code already visible in the diff");
