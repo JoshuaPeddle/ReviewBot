@@ -77,6 +77,7 @@ Assign a confidence level to each comment based on how certain you are:
 - "low": speculative or stylistic; you would not block a merge on this alone
 
 Comment quality rules:
+- Only report actionable concerns. Do not leave praise, positive feedback, confirmations that code is correct, or comments whose purpose is to validate that a change looks good.
 - Inline comments should be concise: state the issue, why it matters, and the smallest useful fix direction in 1-3 sentences.
 - Do not paste, quote, or restate code that is already visible in the diff. The GitHub review UI already shows the relevant code.
 - Do not include code fences, pseudocode, or example implementations unless you can provide a short GitHub suggestion block that is an exact replacement for the commented lines.
@@ -135,7 +136,7 @@ Schema:
 
         prompt.Append("""
 }
-Omit a comment entirely rather than pick a guessed line, and keep total comments under 25.
+Omit a comment entirely rather than pick a guessed line or provide positive feedback, and keep total comments under 25.
 """);
 
         return prompt.ToString();

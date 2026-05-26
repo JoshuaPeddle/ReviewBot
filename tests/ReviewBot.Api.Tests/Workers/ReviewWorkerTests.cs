@@ -25,8 +25,8 @@ public class ReviewWorkerTests
         await using var fixture = new WorkerFixture();
         var files = new[] { CreateFile("src/B.cs"), CreateFile("src/A.cs") };
         var result = new ReviewResult(
-            "Looks good.",
-            [new InlineComment("src/A.cs", 2, "RIGHT", "Nice guard.", Severity.Info)]);
+            "Found one issue.",
+            [new InlineComment("src/A.cs", 2, "RIGHT", "This should handle null input before dereferencing the value.", Severity.Warning)]);
         ReviewRequest? capturedRequest = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -830,8 +830,8 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs([CreateFile("src/A.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult(
-                "Looks good.",
-                [new InlineComment("src/A.cs", 1, "RIGHT", "Nice.", Severity.Info)]));
+                "Found one issue.",
+                [new InlineComment("src/A.cs", 1, "RIGHT", "This should handle null input before dereferencing the value.", Severity.Warning)]));
         fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(_ =>
             {
@@ -1147,6 +1147,43 @@ public class ReviewWorkerTests
 
         postedResult!.Comments.Should().ContainSingle()
             .Which.Confidence.Should().Be(Confidence.High);
+    }
+
+    [Fact]
+    public async Task PraiseOnlyCommentsAndCleanSummariesAreDroppedBeforePosting()
+    {
+        await using var fixture = new WorkerFixture();
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Looks good.",
+                [
+                    new InlineComment("src/App.cs", 1, "RIGHT", "Nice guard.", Severity.Info, Confidence.High),
+                    new InlineComment("src/App.cs", 2, "RIGHT", "The test correctly validates the important behavior.", Severity.Info, Confidence.Medium),
+                    new InlineComment("src/App.cs", 3, "RIGHT", "This should handle null input before dereferencing the value.", Severity.Warning, Confidence.High)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
+        postedResult.Summary.Should().NotContain("Looks good.");
     }
 
     [Fact]

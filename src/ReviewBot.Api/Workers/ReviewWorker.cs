@@ -786,13 +786,9 @@ public sealed class ReviewWorker : BackgroundService
             return Array.Empty<InlineComment>();
         }
 
-        if (config.Review.MinConfidence == Confidence.Low)
-        {
-            return result.Comments;
-        }
-
         return result.Comments
             .Where(c => c.Confidence >= config.Review.MinConfidence)
+            .Where(c => !IsPraiseOnlyComment(c.Body))
             .ToArray();
     }
 
@@ -802,11 +798,134 @@ public sealed class ReviewWorker : BackgroundService
         ReviewConfig config)
     {
         var summary = config.Review.Summary ? result.Summary : string.Empty;
+        if (IsPositiveOnlySummary(summary))
+        {
+            summary = string.Empty;
+        }
 
         return summary == result.Summary && ReferenceEquals(comments, result.Comments)
             ? result
             : new ReviewResult(summary, comments, result.ContextRequests);
     }
+
+    private static bool IsPraiseOnlyComment(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeForTextHeuristics(body);
+        return ContainsAny(normalized, PraiseCommentPhrases) &&
+            !ContainsAny(normalized, ActionableConcernPhrases);
+    }
+
+    private static bool IsPositiveOnlySummary(string summary)
+    {
+        if (string.IsNullOrWhiteSpace(summary))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeForTextHeuristics(summary);
+        return ContainsAny(normalized, PositiveSummaryPhrases) &&
+            !ContainsAny(normalized, ActionableConcernPhrases);
+    }
+
+    private static string NormalizeForTextHeuristics(string value)
+    {
+        var sb = new StringBuilder(value.Length + 2);
+        sb.Append(' ');
+        foreach (var character in value)
+        {
+            sb.Append(char.IsLetterOrDigit(character) ? char.ToLowerInvariant(character) : ' ');
+        }
+
+        sb.Append(' ');
+        return sb.ToString();
+    }
+
+    private static bool ContainsAny(string normalizedText, IReadOnlyList<string> phrases) =>
+        phrases.Any(phrase => normalizedText.Contains(phrase, StringComparison.Ordinal));
+
+    private static readonly string[] PraiseCommentPhrases =
+    [
+        " appropriate ",
+        " appropriately ",
+        " correct ",
+        " correctly ",
+        " correctly validates ",
+        " excellent ",
+        " good coverage ",
+        " good guard ",
+        " good test ",
+        " great ",
+        " guards against ",
+        " helpful ",
+        " looks good ",
+        " nice ",
+        " properly ",
+        " reasonable ",
+        " solid ",
+        " useful ",
+        " validates that ",
+        " well done ",
+        " well written "
+    ];
+
+    private static readonly string[] PositiveSummaryPhrases =
+    [
+        " clean ",
+        " good overall ",
+        " looks good ",
+        " looks solid ",
+        " no actionable ",
+        " no concerns ",
+        " no issues ",
+        " nothing to flag ",
+        " solid "
+    ];
+
+    private static readonly string[] ActionableConcernPhrases =
+    [
+        " add ",
+        " avoid ",
+        " breaks ",
+        " bug ",
+        " but ",
+        " change ",
+        " consider ",
+        " could ",
+        " deadlock ",
+        " does not ",
+        " doesn t ",
+        " exception ",
+        " fail ",
+        " fails ",
+        " fix ",
+        " however ",
+        " incorrect ",
+        " issue ",
+        " leak ",
+        " may ",
+        " might ",
+        " missing ",
+        " needs ",
+        " not ",
+        " null ",
+        " problem ",
+        " race ",
+        " regress ",
+        " remove ",
+        " restore ",
+        " risk ",
+        " should ",
+        " throw ",
+        " unsafe ",
+        " unless ",
+        " vulnerable ",
+        " wrong "
+    ];
 
     private static ContextRequestValidationResult FilterContextRequests(
         IReadOnlyList<ContextRequest> requests,
