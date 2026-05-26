@@ -202,6 +202,8 @@ Completed 2026-05-26: full-file context now excludes non-deleted files whose add
 
 **Stream-and-fork the LLM call for self-critique on large PRs.** Not actually streaming the response (the JSON has to be complete before parsing), but: kick off the self-critique LLM call as soon as the first pass returns, in parallel with the agentic-context branch decision. Today these are sequential.
 
+Completed 2026-05-26: the worker now starts self-critique speculatively as soon as the first review result is parsed, so it can overlap with agentic-context request filtering and file fetching when the initial result remains the final result. The stop test passes: worker tests prove self-critique starts while agentic context fetching is still in flight, and prove that an enriched agentic-context result gets a fresh critique instead of accidentally reusing the speculative critique for the initial comments. Correction discovered while implementing: the optimization cannot blindly reuse the first-pass critique after a successful agentic second pass, because the comment set may be replaced. The worker now cancels and observes the speculative critique in that case, then critiques the enriched comments with the existing behavior.
+
 ### The harder wins (defer to after Phase 22)
 
 **Smaller specialized model for self-critique.** The critique pass is a binary classification task per comment (keep or drop). It doesn't need the same model as the review pass. A cheaper/faster model would let you self-critique on every review without latency cost. Wire in once Phase 22 stabilizes the prompt structure.
@@ -414,3 +416,5 @@ Phase 21 Anthropic prompt caching closes the immediate implementation risk for c
 Phase 21 full-file trimming closed the immediate wasted-context risk for mostly-new files without adding configuration surface. Residual risk: the fixed 90 percent threshold is heuristic, so future eval/trace data should confirm it does not remove useful context for generated files or unusual patch shapes.
 
 Phase 21 pipeline parallelization closes the obvious sequential-worker latency risk for event-triggered reviews with known head SHAs. Residual risk: speculative metadata fetches can spend one extra GitHub request on jobs that config later skips; monitor rate-limit pressure before parallelizing more aggressively, especially for disabled repos with frequent webhook traffic.
+
+Phase 21 speculative self-critique closes the remaining sequential branch risk for reviews where agentic context falls back to the initial result. Residual risk: if agentic context successfully replaces the review result, the initially-started self-critique may be canceled after the provider request has already begun, so cloud providers may still bill for some discarded work. Measure how often agentic second passes succeed before deciding whether to gate speculation to large PRs or specific providers.

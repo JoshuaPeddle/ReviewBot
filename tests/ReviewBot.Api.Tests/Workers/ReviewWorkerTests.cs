@@ -1659,6 +1659,158 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task SelfCritiqueStartsWhileAgenticContextFetchIsInFlightWhenInitialResultSurvives()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                AgenticContext = true,
+                SelfCritique = true
+            }
+        };
+        var agenticFetchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var critiqueStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<IReadOnlyList<(string Path, string Content)>> FetchEmptyContextAfterCritiqueStartsAsync()
+        {
+            agenticFetchStarted.SetResult();
+            await critiqueStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            return [];
+        }
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Initial.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "Medium survives.", Severity.Warning, Confidence.Medium)],
+                [new ContextRequest("src/Missing.cs", null)]));
+        fixture.PullRequestFetcher
+            .GetFileContentsAsync(
+                Arg.Any<string>(),
+                Arg.Any<string>(),
+                Arg.Any<IReadOnlyList<ContextRequest>>(),
+                Arg.Any<string>(),
+                Arg.Any<int>(),
+                Arg.Any<string>(),
+                Arg.Any<CancellationToken>())
+            .Returns(_ => FetchEmptyContextAfterCritiqueStartsAsync());
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
+            .ReturnsForAnyArgs(async call =>
+            {
+                call.ArgAt<string>(2).Should().Be("self_critique");
+                critiqueStarted.SetResult();
+                await agenticFetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                return """{"retained_indices":[0],"rationale":"keep"}""";
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task EnrichedAgenticResultGetsItsOwnSelfCritique()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                AgenticContext = true,
+                SelfCritique = true
+            }
+        };
+        var initialCritiqueStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Initial.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "Initial medium.", Severity.Warning, Confidence.Medium)],
+                [new ContextRequest("src/IFoo.cs", null)]));
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs([("src/IFoo.cs", "public interface IFoo {}")]);
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
+            .ReturnsForAnyArgs(async call =>
+            {
+                var phase = call.ArgAt<string>(2);
+                var prompt = call.Arg<PromptPayload>();
+                if (phase == "agentic_context")
+                {
+                    return """
+                    {
+                      "summary": "Final summary.",
+                      "comments": [
+                        {
+                          "path": "src/App.cs",
+                          "line": 1,
+                          "side": "RIGHT",
+                          "severity": "warning",
+                          "confidence": "medium",
+                          "body": "Final medium kept."
+                        },
+                        {
+                          "path": "src/App.cs",
+                          "line": 2,
+                          "side": "RIGHT",
+                          "severity": "info",
+                          "confidence": "low",
+                          "body": "Final low dropped."
+                        }
+                      ]
+                    }
+                    """;
+                }
+
+                phase.Should().Be("self_critique");
+                if (prompt.UserPrompt.Contains("Initial medium.", StringComparison.Ordinal))
+                {
+                    initialCritiqueStarted.SetResult();
+                    await Task.Delay(Timeout.InfiniteTimeSpan, call.ArgAt<CancellationToken>(1));
+                    return """{"retained_indices":[0],"rationale":"canceled"}""";
+                }
+
+                prompt.UserPrompt.Should().Contain("Final medium kept.");
+                prompt.UserPrompt.Should().Contain("Final low dropped.");
+                return """{"retained_indices":[0],"rationale":"keep final warning only"}""";
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await initialCritiqueStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("Final medium kept.");
+    }
+
+    [Fact]
     public async Task SelfCritiqueDisabledDoesNotCallRawCompletion()
     {
         await using var fixture = new WorkerFixture();
