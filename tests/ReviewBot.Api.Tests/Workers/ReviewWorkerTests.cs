@@ -1,5 +1,6 @@
 using System.Diagnostics.Metrics;
 using FluentAssertions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
@@ -25,8 +26,8 @@ public class ReviewWorkerTests
         await using var fixture = new WorkerFixture();
         var files = new[] { CreateFile("src/B.cs"), CreateFile("src/A.cs") };
         var result = new ReviewResult(
-            "Looks good.",
-            [new InlineComment("src/A.cs", 2, "RIGHT", "Nice guard.", Severity.Info)]);
+            "Found one issue.",
+            [new InlineComment("src/A.cs", 2, "RIGHT", "This should handle null input before dereferencing the value.", Severity.Warning)]);
         ReviewRequest? capturedRequest = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -73,7 +74,7 @@ public class ReviewWorkerTests
     }
 
     [Fact]
-    public async Task DisabledConfigShortCircuitsBeforeFetchingPullRequest()
+    public async Task DisabledConfigShortCircuitsBeforeFetchingFiles()
     {
         await using var fixture = new WorkerFixture();
         var configFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -93,10 +94,40 @@ public class ReviewWorkerTests
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
         await fixture.PullRequestFetcher.DidNotReceiveWithAnyArgs()
-            .FetchMetadataAsync(default!, default!, default, default!, default);
+            .FetchFilesAsync(default!, default!, default, default!, default, default, default);
+        await fixture.GroundingProvider.DidNotReceiveWithAnyArgs()
+            .GetContextAsync(default!, default);
         fixture.LlmFactory.DidNotReceiveWithAnyArgs().Create(default!);
         await fixture.ReviewPoster.DidNotReceiveWithAnyArgs()
             .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task DisabledConfigLogsSpeculativeMetadataFailures()
+    {
+        var logger = new CapturingLogger<ReviewWorker>();
+        await using var fixture = new WorkerFixture(logger: logger);
+        var configFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var metadata = new TaskCompletionSource<PullRequestMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                configFetched.SetResult();
+                return ReviewConfig.Default with { Enabled = false };
+            });
+        fixture.PullRequestFetcher.FetchMetadataAsync(default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(metadata.Task);
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await configFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        metadata.SetException(new InvalidOperationException("metadata failed"));
+
+        var logEntry = await logger.WarningLogged.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        logEntry.Message.Should().Contain("PR metadata fetch failed");
+        logEntry.Exception.Should().BeOfType<InvalidOperationException>();
     }
 
     [Fact]
@@ -119,8 +150,97 @@ public class ReviewWorkerTests
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
         await fixture.PullRequestFetcher.DidNotReceiveWithAnyArgs()
-            .FetchMetadataAsync(default!, default!, default, default!, default);
+            .FetchFilesAsync(default!, default!, default, default!, default, default, default);
+        await fixture.GroundingProvider.DidNotReceiveWithAnyArgs()
+            .GetContextAsync(default!, default);
         fixture.LlmFactory.DidNotReceiveWithAnyArgs().Create(default!);
+    }
+
+    [Fact]
+    public async Task EventHeadShaStartsConfigAndMetadataFetchesInParallel()
+    {
+        await using var fixture = new WorkerFixture();
+        var metadataStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(async _ =>
+            {
+                await metadataStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                return ReviewConfig.Default;
+            });
+        fixture.PullRequestFetcher.FetchMetadataAsync(default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                metadataStarted.SetResult();
+                return CreateMetadata();
+            });
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("Parallel.", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task FullFileContextAndGroundingRunInParallelBeforeLlm()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { FullFileMaxBytes = 10_000 }
+        };
+        var groundingStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fileContentFetchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseBoth = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(async _ =>
+            {
+                fileContentFetchStarted.SetResult();
+                await groundingStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                await releaseBoth.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                return [("src/App.cs", "public class App { }")];
+            });
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+            .Returns(async _ =>
+            {
+                groundingStarted.SetResult();
+                await fileContentFetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                await releaseBoth.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                return new GroundingContext(new LanguageMetadata("dotnet", "10.0", null, []), null, null);
+            });
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("Parallel context.", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await groundingStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await fileContentFetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        releaseBoth.SetResult();
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
     }
 
     [Fact]
@@ -830,8 +950,8 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs([CreateFile("src/A.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult(
-                "Looks good.",
-                [new InlineComment("src/A.cs", 1, "RIGHT", "Nice.", Severity.Info)]));
+                "Found one issue.",
+                [new InlineComment("src/A.cs", 1, "RIGHT", "This should handle null input before dereferencing the value.", Severity.Warning)]));
         fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(_ =>
             {
@@ -1147,6 +1267,137 @@ public class ReviewWorkerTests
 
         postedResult!.Comments.Should().ContainSingle()
             .Which.Confidence.Should().Be(Confidence.High);
+    }
+
+    [Fact]
+    public async Task PraiseOnlyCommentsAndCleanSummariesAreDroppedBeforePosting()
+    {
+        await using var fixture = new WorkerFixture();
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Looks good.",
+                [
+                    new InlineComment("src/App.cs", 1, "RIGHT", "Nice guard.", Severity.Info, Confidence.High),
+                    new InlineComment("src/App.cs", 2, "RIGHT", "The test correctly validates the important behavior.", Severity.Info, Confidence.Medium),
+                    new InlineComment("src/App.cs", 3, "RIGHT", "This should handle null input before dereferencing the value.", Severity.Warning, Confidence.High)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
+        postedResult.Summary.Should().NotContain("Looks good.");
+    }
+
+    [Fact]
+    public async Task SpeculativeMissingContractCommentsAreDroppedBeforePosting()
+    {
+        await using var fixture = new WorkerFixture();
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review complete.",
+                [
+                    new InlineComment(
+                        "src/App.cs",
+                        1,
+                        "RIGHT",
+                        "Transaction signing and execution are performed synchronously without awaiting the sign operation. If _walletManager.SignTransaction() is async, this will block the thread. Verify the signature method's return type and ensure proper async/await usage to avoid deadlocks in hosted environments.",
+                        Severity.Warning,
+                        Confidence.High),
+                    new InlineComment(
+                        "src/App.cs",
+                        2,
+                        "RIGHT",
+                        "This should handle null input before dereferencing the value.",
+                        Severity.Warning,
+                        Confidence.High)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
+    }
+
+    [Fact]
+    public async Task EvalFixtureMetaCommentsAreDroppedBeforePosting()
+    {
+        await using var fixture = new WorkerFixture();
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("tests/ReviewBot.Evals/Fixtures/001/repo-state/src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review complete.",
+                [
+                    new InlineComment(
+                        "tests/ReviewBot.Evals/Fixtures/001/repo-state/src/App.cs",
+                        1,
+                        "RIGHT",
+                        "The fixture correctly models a security boundary leak: returning whether the secret is blank leaks configuration state across the webhook trust boundary. The expected.yaml requires mentioning 'leak', 'trust boundary', or 'secret'.",
+                        Severity.Warning,
+                        Confidence.High),
+                    new InlineComment(
+                        "tests/ReviewBot.Evals/Fixtures/001/repo-state/src/App.cs",
+                        2,
+                        "RIGHT",
+                        "This should handle null input before dereferencing the value.",
+                        Severity.Warning,
+                        Confidence.High)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
     }
 
     [Fact]
@@ -1909,7 +2160,7 @@ public class ReviewWorkerTests
     {
         private readonly ReviewWorker worker;
 
-        public WorkerFixture(int concurrency = 1)
+        public WorkerFixture(int concurrency = 1, ILogger<ReviewWorker>? logger = null)
         {
             Queue = new ChannelReviewJobQueue();
             TokenProvider = Substitute.For<IInstallationTokenProvider>();
@@ -1945,7 +2196,7 @@ public class ReviewWorkerTests
                 PrReviewStateStore,
                 Metrics,
                 Microsoft.Extensions.Options.Options.Create(new WorkerOptions { Concurrency = concurrency }),
-                NullLogger<ReviewWorker>.Instance);
+                logger ?? NullLogger<ReviewWorker>.Instance);
         }
 
         public ChannelReviewJobQueue Queue { get; }
@@ -1978,6 +2229,32 @@ public class ReviewWorkerTests
             await worker.StopAsync(CancellationToken.None);
             worker.Dispose();
             Metrics.Dispose();
+        }
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public TaskCompletionSource<(LogLevel Level, string Message, Exception? Exception)> WarningLogged { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public IDisposable BeginScope<TState>(TState state)
+            where TState : notnull =>
+            NullLogger.Instance.BeginScope(state);
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception);
+            if (logLevel == LogLevel.Warning)
+            {
+                WarningLogged.TrySetResult((logLevel, message, exception));
+            }
         }
     }
 }

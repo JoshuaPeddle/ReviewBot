@@ -174,14 +174,17 @@ Be concise and only comment on actionable issues.
 Assign a confidence level to each comment based on how certain you are:
 - "high": you have seen the code in question and are certain this is a real issue
 - "medium": likely an issue but depends on context outside the diff
-- "low": speculative or stylistic; you would not block a merge on this alone
+- "low": weak but evidence-backed; you would not block a merge on this alone
 
 Comment quality rules:
+- Only report actionable concerns. Do not leave praise, positive feedback, confirmations that code is correct, or comments whose purpose is to validate that a change looks good.
+- Review the pull request behavior, not the review/eval harness. Do not comment that a fixture, expected finding, or expected.yaml correctly models or requires a result.
 - Inline comments should be concise: state the issue, why it matters, and the smallest useful fix direction in 1-3 sentences.
 - Do not paste, quote, or restate code that is already visible in the diff. The GitHub review UI already shows the relevant code.
 - Do not include code fences, pseudocode, or example implementations unless you can provide a short GitHub suggestion block that is an exact replacement for the commented lines.
 - If a concern depends on code that is not present, request that file through the additional context mechanism when available. If you cannot request or see the needed context, omit the comment.
 - Do not leave "not visible in this diff", "cannot verify", or "make sure this is handled elsewhere" comments.
+- Do not speculate about a referenced method's return type, async behavior, side effects, or contract. If that contract is needed and unavailable, request context when available; otherwise omit the comment.
 - Do not flag that a call "could throw" unless the diff changed an error-handling boundary, removed existing handling, violates a visible contract, or creates an observable reliability regression.
 - If several lines share the same root cause, leave one comment at the best line instead of repeating the same concern on each call site.
 
@@ -203,7 +206,7 @@ Schema:
     }
   ]
 }
-Omit a comment entirely rather than pick a guessed line, and keep total comments under 25.
+Omit a comment entirely rather than pick a guessed line or provide positive feedback, and keep total comments under 25.
 """);
 
         payload.UserPrompt.Should().Be("""
@@ -243,7 +246,7 @@ Changed Files:
         payload.SystemPrompt.Should().Contain("Assign a confidence level to each comment");
         payload.SystemPrompt.Should().Contain("\"high\": you have seen the code in question");
         payload.SystemPrompt.Should().Contain("\"medium\": likely an issue but depends on context");
-        payload.SystemPrompt.Should().Contain("\"low\": speculative or stylistic");
+        payload.SystemPrompt.Should().Contain("\"low\": weak but evidence-backed");
         payload.SystemPrompt.Should().Contain("\"confidence\": \"high|medium|low\"");
 
         var confidenceIndex = payload.SystemPrompt.IndexOf("Assign a confidence level", StringComparison.Ordinal);
@@ -259,9 +262,12 @@ Changed Files:
         var payload = PromptBuilder.Build(request);
 
         payload.SystemPrompt.Should().Contain("Comment quality rules:");
+        payload.SystemPrompt.Should().Contain("Only report actionable concerns");
+        payload.SystemPrompt.Should().Contain("not the review/eval harness");
         payload.SystemPrompt.Should().Contain("Do not paste, quote, or restate code that is already visible in the diff");
         payload.SystemPrompt.Should().Contain("request that file through the additional context mechanism when available");
         payload.SystemPrompt.Should().Contain("Do not leave \"not visible in this diff\", \"cannot verify\"");
+        payload.SystemPrompt.Should().Contain("Do not speculate about a referenced method's return type");
         payload.SystemPrompt.Should().Contain("Do not flag that a call \"could throw\"");
         payload.SystemPrompt.Should().Contain("If several lines share the same root cause");
         payload.SystemPrompt.Should().Contain("\"body\": \"string, markdown allowed; concise review comment, no copied diff code\"");

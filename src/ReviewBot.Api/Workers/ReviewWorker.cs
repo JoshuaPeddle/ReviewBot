@@ -141,9 +141,10 @@ public sealed class ReviewWorker : BackgroundService
         var installationToken = await tokenProvider.GetTokenAsync(job.InstallationId, ct).ConfigureAwait(false);
 
         // Comment-triggered reviews arrive without a head SHA; resolve it from the API before
-        // fetching config. For push/open triggers the SHA comes from the event payload, so we
-        // defer the metadata call until after the cheap enabled/trigger checks.
+        // fetching config. For push/open triggers the SHA comes from the event payload, so the
+        // repo config and current PR metadata can be fetched concurrently after token resolution.
         PullRequestMetadata? prefetchedMetadata = null;
+        Task<PullRequestMetadata>? metadataTask = null;
         var configSha = job.HeadSha;
         if (configSha is null)
         {
@@ -152,13 +153,28 @@ public sealed class ReviewWorker : BackgroundService
                 .ConfigureAwait(false);
             configSha = prefetchedMetadata.HeadSha;
         }
+        else
+        {
+            metadataTask = pullRequestFetcher
+                .FetchMetadataAsync(job.Owner, job.Repo, job.PrNumber, installationToken.Token, ct);
+        }
 
-        var config = await repoConfigFetcher
-            .FetchAsync(job.Owner, job.Repo, configSha, installationToken.Token, ct)
-            .ConfigureAwait(false);
+        var configTask = repoConfigFetcher
+            .FetchAsync(job.Owner, job.Repo, configSha, installationToken.Token, ct);
+        ReviewConfig config;
+        try
+        {
+            config = await configTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            LogIfBackgroundTaskFails(metadataTask, "PR metadata fetch");
+            throw;
+        }
 
         if (!config.Enabled)
         {
+            LogIfBackgroundTaskFails(metadataTask, "PR metadata fetch");
             logger.LogInformation(
                 "Skipping review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} because ReviewBot is disabled by repo config",
                 job.DeliveryId,
@@ -172,6 +188,7 @@ public sealed class ReviewWorker : BackgroundService
         if (string.Equals(job.Reason, SynchronizeReason, StringComparison.Ordinal) &&
             !config.Review.Trigger.OnPush)
         {
+            LogIfBackgroundTaskFails(metadataTask, "PR metadata fetch");
             logger.LogInformation(
                 "Skipping synchronize review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} because on_push is disabled",
                 job.DeliveryId,
@@ -183,13 +200,10 @@ public sealed class ReviewWorker : BackgroundService
         }
 
         var repoFullName = $"{job.Owner}/{job.Repo}";
-        var lastSha = await prReviewStateStore
-            .GetLastShaAsync(job.InstallationId, repoFullName, job.PrNumber, ct)
-            .ConfigureAwait(false);
-
-        var metadata = prefetchedMetadata ?? await pullRequestFetcher
-            .FetchMetadataAsync(job.Owner, job.Repo, job.PrNumber, installationToken.Token, ct)
-            .ConfigureAwait(false);
+        var lastShaTask = prReviewStateStore
+            .GetLastShaAsync(job.InstallationId, repoFullName, job.PrNumber, ct);
+        var metadata = prefetchedMetadata ?? await metadataTask!.ConfigureAwait(false);
+        var lastSha = await lastShaTask.ConfigureAwait(false);
 
         IReadOnlySet<string>? allowlist = null;
         var incrementalType = "first_review";
@@ -265,14 +279,13 @@ public sealed class ReviewWorker : BackgroundService
             return JobProcessStatus.Skipped;
         }
 
-        var fullFileContents = await FetchFullFileContentsAsync(
+        var fullFileContentsTask = FetchFullFileContentsAsync(
                 files,
                 config,
                 job,
                 metadata.HeadSha,
                 installationToken.Token,
-                ct)
-            .ConfigureAwait(false);
+                ct);
 
         var groundingRequest = new GroundingRequest(
             Owner: job.Owner,
@@ -280,25 +293,10 @@ public sealed class ReviewWorker : BackgroundService
             HeadSha: metadata.HeadSha,
             InstallationToken: installationToken.Token,
             Config: config.Grounding);
-        var groundingSw = Stopwatch.StartNew();
-        var grounding = await groundingProvider.GetContextAsync(groundingRequest, ct).ConfigureAwait(false);
-        groundingSw.Stop();
-        var groundingResult = grounding.Tests is not null
-            ? (grounding.Tests.Failed == 0 ? "checks_success" : "checks_failed")
-            : grounding.Build is not null
-            ? (grounding.Build.Success ? "build_success" : "build_failed")
-            : grounding.Language is not null ? "tier1" : "none";
-        metrics.RecordGroundingDuration(groundingSw.Elapsed.TotalMilliseconds, groundingResult);
-
-        if (grounding.Language is { } language)
-        {
-            logger.LogDebug(
-                "Grounding detected {LanguageId} {LanguageVersion} for {Owner}/{Repo}",
-                language.LanguageId,
-                language.LanguageVersion,
-                job.Owner,
-                job.Repo);
-        }
+        var groundingTask = GetGroundingContextAsync(groundingRequest, job, ct);
+        await Task.WhenAll(fullFileContentsTask, groundingTask).ConfigureAwait(false);
+        var fullFileContents = await fullFileContentsTask.ConfigureAwait(false);
+        var grounding = await groundingTask.ConfigureAwait(false);
 
         var request = new ReviewRequest(
             metadata.Title,
@@ -356,6 +354,60 @@ public sealed class ReviewWorker : BackgroundService
     }
 
     private enum JobProcessStatus { Success, Skipped }
+
+    private void LogIfBackgroundTaskFails(Task? task, string operationName)
+    {
+        if (task is null)
+        {
+            return;
+        }
+
+        _ = LogIfBackgroundTaskFailsAsync(task, operationName);
+    }
+
+    private async Task LogIfBackgroundTaskFailsAsync(Task task, string operationName)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // The review job is already exiting; cancellation is expected and does not need a warning.
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "{OperationName} failed after the review job no longer needed its result", operationName);
+        }
+    }
+
+    private async Task<GroundingContext> GetGroundingContextAsync(
+        GroundingRequest request,
+        ReviewJob job,
+        CancellationToken ct)
+    {
+        var groundingSw = Stopwatch.StartNew();
+        var grounding = await groundingProvider.GetContextAsync(request, ct).ConfigureAwait(false);
+        groundingSw.Stop();
+        var groundingResult = grounding.Tests is not null
+            ? (grounding.Tests.Failed == 0 ? "checks_success" : "checks_failed")
+            : grounding.Build is not null
+            ? (grounding.Build.Success ? "build_success" : "build_failed")
+            : grounding.Language is not null ? "tier1" : "none";
+        metrics.RecordGroundingDuration(groundingSw.Elapsed.TotalMilliseconds, groundingResult);
+
+        if (grounding.Language is { } language)
+        {
+            logger.LogDebug(
+                "Grounding detected {LanguageId} {LanguageVersion} for {Owner}/{Repo}",
+                language.LanguageId,
+                language.LanguageVersion,
+                job.Owner,
+                job.Repo);
+        }
+
+        return grounding;
+    }
 
     private async Task<IReadOnlyDictionary<string, string>?> FetchFullFileContentsAsync(
         IReadOnlyList<FileChange> files,
@@ -786,13 +838,11 @@ public sealed class ReviewWorker : BackgroundService
             return Array.Empty<InlineComment>();
         }
 
-        if (config.Review.MinConfidence == Confidence.Low)
-        {
-            return result.Comments;
-        }
-
         return result.Comments
             .Where(c => c.Confidence >= config.Review.MinConfidence)
+            .Where(c => !IsPraiseOnlyComment(c.Body))
+            .Where(c => !IsMetaReviewComment(c.Body))
+            .Where(c => !IsSpeculativeMissingContextComment(c.Body))
             .ToArray();
     }
 
@@ -802,11 +852,210 @@ public sealed class ReviewWorker : BackgroundService
         ReviewConfig config)
     {
         var summary = config.Review.Summary ? result.Summary : string.Empty;
+        if (IsPositiveOnlySummary(summary))
+        {
+            summary = string.Empty;
+        }
 
         return summary == result.Summary && ReferenceEquals(comments, result.Comments)
             ? result
             : new ReviewResult(summary, comments, result.ContextRequests);
     }
+
+    private static bool IsPraiseOnlyComment(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeForTextHeuristics(body);
+        return ContainsAny(normalized, PraiseCommentPhrases) &&
+            !ContainsAny(normalized, ActionableConcernPhrases);
+    }
+
+    private static bool IsPositiveOnlySummary(string summary)
+    {
+        if (string.IsNullOrWhiteSpace(summary))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeForTextHeuristics(summary);
+        return ContainsAny(normalized, PositiveSummaryPhrases) &&
+            !ContainsAny(normalized, ActionableConcernPhrases);
+    }
+
+    private static bool IsMetaReviewComment(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeForTextHeuristics(body);
+        var referencesEvalArtifact = ContainsAny(normalized, EvalArtifactPhrases);
+        var validatesExpectedOutcome = ContainsAny(normalized, ExpectedOutcomePhrases);
+
+        return referencesEvalArtifact && validatesExpectedOutcome;
+    }
+
+    private static bool IsSpeculativeMissingContextComment(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeForTextHeuristics(body);
+        var asksToVerifyMissingContract = ContainsAny(normalized, MissingContractDirectivePhrases);
+        var usesSpeculativeLanguage = ContainsAny(normalized, SpeculativeLanguagePhrases);
+        var referencesUnseenContract = ContainsAny(normalized, UnseenContractPhrases);
+
+        return asksToVerifyMissingContract && usesSpeculativeLanguage && referencesUnseenContract;
+    }
+
+    private static string NormalizeForTextHeuristics(string value)
+    {
+        var sb = new StringBuilder(value.Length + 2);
+        sb.Append(' ');
+        foreach (var character in value)
+        {
+            sb.Append(char.IsLetterOrDigit(character) ? char.ToLowerInvariant(character) : ' ');
+        }
+
+        sb.Append(' ');
+        return sb.ToString();
+    }
+
+    private static bool ContainsAny(string normalizedText, IReadOnlyList<string> phrases) =>
+        phrases.Any(phrase => normalizedText.Contains(phrase, StringComparison.Ordinal));
+
+    private static readonly string[] PraiseCommentPhrases =
+    [
+        " appropriate ",
+        " appropriately ",
+        " correct ",
+        " correctly ",
+        " correctly validates ",
+        " excellent ",
+        " good coverage ",
+        " good guard ",
+        " good test ",
+        " great ",
+        " guards against ",
+        " helpful ",
+        " looks good ",
+        " nice ",
+        " properly ",
+        " reasonable ",
+        " solid ",
+        " useful ",
+        " validates that ",
+        " well done ",
+        " well written "
+    ];
+
+    private static readonly string[] PositiveSummaryPhrases =
+    [
+        " clean ",
+        " good overall ",
+        " looks good ",
+        " looks solid ",
+        " no actionable ",
+        " no concerns ",
+        " no issues ",
+        " nothing to flag ",
+        " solid "
+    ];
+
+    private static readonly string[] EvalArtifactPhrases =
+    [
+        " expected yaml ",
+        " expected finding ",
+        " expected findings ",
+        " fixture ",
+        " fixtures "
+    ];
+
+    private static readonly string[] ExpectedOutcomePhrases =
+    [
+        " correctly models ",
+        " expected yaml requires ",
+        " requires mentioning ",
+        " requires that ",
+        " should expect "
+    ];
+
+    private static readonly string[] MissingContractDirectivePhrases =
+    [
+        " check whether ",
+        " confirm ",
+        " ensure ",
+        " make sure ",
+        " verify "
+    ];
+
+    private static readonly string[] SpeculativeLanguagePhrases =
+    [
+        " could ",
+        " depending on ",
+        " if ",
+        " may ",
+        " might "
+    ];
+
+    private static readonly string[] UnseenContractPhrases =
+    [
+        " async behavior ",
+        " async await ",
+        " contract ",
+        " is async ",
+        " method s return type ",
+        " return type ",
+        " side effects "
+    ];
+
+    private static readonly string[] ActionableConcernPhrases =
+    [
+        " add ",
+        " avoid ",
+        " breaks ",
+        " bug ",
+        " but ",
+        " change ",
+        " consider ",
+        " could ",
+        " deadlock ",
+        " does not ",
+        " doesn t ",
+        " exception ",
+        " fail ",
+        " fails ",
+        " fix ",
+        " however ",
+        " incorrect ",
+        " issue ",
+        " leak ",
+        " may ",
+        " might ",
+        " missing ",
+        " needs ",
+        " not ",
+        " null ",
+        " problem ",
+        " race ",
+        " regress ",
+        " remove ",
+        " restore ",
+        " risk ",
+        " should ",
+        " throw ",
+        " unsafe ",
+        " unless ",
+        " vulnerable ",
+        " wrong "
+    ];
 
     private static ContextRequestValidationResult FilterContextRequests(
         IReadOnlyList<ContextRequest> requests,
