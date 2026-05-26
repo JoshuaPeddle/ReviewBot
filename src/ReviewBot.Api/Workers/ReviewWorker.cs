@@ -168,13 +168,13 @@ public sealed class ReviewWorker : BackgroundService
         }
         catch
         {
-            ObserveBackgroundFault(metadataTask);
+            LogIfBackgroundTaskFails(metadataTask, "PR metadata fetch");
             throw;
         }
 
         if (!config.Enabled)
         {
-            ObserveBackgroundFault(metadataTask);
+            LogIfBackgroundTaskFails(metadataTask, "PR metadata fetch");
             logger.LogInformation(
                 "Skipping review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} because ReviewBot is disabled by repo config",
                 job.DeliveryId,
@@ -188,7 +188,7 @@ public sealed class ReviewWorker : BackgroundService
         if (string.Equals(job.Reason, SynchronizeReason, StringComparison.Ordinal) &&
             !config.Review.Trigger.OnPush)
         {
-            ObserveBackgroundFault(metadataTask);
+            LogIfBackgroundTaskFails(metadataTask, "PR metadata fetch");
             logger.LogInformation(
                 "Skipping synchronize review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} because on_push is disabled",
                 job.DeliveryId,
@@ -355,18 +355,30 @@ public sealed class ReviewWorker : BackgroundService
 
     private enum JobProcessStatus { Success, Skipped }
 
-    private static void ObserveBackgroundFault(Task? task)
+    private void LogIfBackgroundTaskFails(Task? task, string operationName)
     {
         if (task is null)
         {
             return;
         }
 
-        _ = task.ContinueWith(
-            completedTask => _ = completedTask.Exception,
-            CancellationToken.None,
-            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
+        _ = LogIfBackgroundTaskFailsAsync(task, operationName);
+    }
+
+    private async Task LogIfBackgroundTaskFailsAsync(Task task, string operationName)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // The review job is already exiting; cancellation is expected and does not need a warning.
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "{OperationName} failed after the review job no longer needed its result", operationName);
+        }
     }
 
     private async Task<GroundingContext> GetGroundingContextAsync(

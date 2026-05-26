@@ -1,5 +1,6 @@
 using System.Diagnostics.Metrics;
 using FluentAssertions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
@@ -99,6 +100,34 @@ public class ReviewWorkerTests
         fixture.LlmFactory.DidNotReceiveWithAnyArgs().Create(default!);
         await fixture.ReviewPoster.DidNotReceiveWithAnyArgs()
             .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task DisabledConfigLogsSpeculativeMetadataFailures()
+    {
+        var logger = new CapturingLogger<ReviewWorker>();
+        await using var fixture = new WorkerFixture(logger: logger);
+        var configFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var metadata = new TaskCompletionSource<PullRequestMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                configFetched.SetResult();
+                return ReviewConfig.Default with { Enabled = false };
+            });
+        fixture.PullRequestFetcher.FetchMetadataAsync(default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(metadata.Task);
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await configFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        metadata.SetException(new InvalidOperationException("metadata failed"));
+
+        var logEntry = await logger.WarningLogged.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        logEntry.Message.Should().Contain("PR metadata fetch failed");
+        logEntry.Exception.Should().BeOfType<InvalidOperationException>();
     }
 
     [Fact]
@@ -2131,7 +2160,7 @@ public class ReviewWorkerTests
     {
         private readonly ReviewWorker worker;
 
-        public WorkerFixture(int concurrency = 1)
+        public WorkerFixture(int concurrency = 1, ILogger<ReviewWorker>? logger = null)
         {
             Queue = new ChannelReviewJobQueue();
             TokenProvider = Substitute.For<IInstallationTokenProvider>();
@@ -2167,7 +2196,7 @@ public class ReviewWorkerTests
                 PrReviewStateStore,
                 Metrics,
                 Microsoft.Extensions.Options.Options.Create(new WorkerOptions { Concurrency = concurrency }),
-                NullLogger<ReviewWorker>.Instance);
+                logger ?? NullLogger<ReviewWorker>.Instance);
         }
 
         public ChannelReviewJobQueue Queue { get; }
@@ -2200,6 +2229,32 @@ public class ReviewWorkerTests
             await worker.StopAsync(CancellationToken.None);
             worker.Dispose();
             Metrics.Dispose();
+        }
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public TaskCompletionSource<(LogLevel Level, string Message, Exception? Exception)> WarningLogged { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public IDisposable BeginScope<TState>(TState state)
+            where TState : notnull =>
+            NullLogger.Instance.BeginScope(state);
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception);
+            if (logLevel == LogLevel.Warning)
+            {
+                WarningLogged.TrySetResult((logLevel, message, exception));
+            }
         }
     }
 }
