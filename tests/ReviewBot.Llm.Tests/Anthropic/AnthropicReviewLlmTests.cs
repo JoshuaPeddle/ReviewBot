@@ -1,4 +1,5 @@
 using FluentAssertions;
+using Anthropic.SDK.Messaging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -43,6 +44,7 @@ public sealed class AnthropicReviewLlmTests
         client.Requests.Should().ContainSingle()
             .Which.UserMessages.Should().ContainSingle();
         client.Requests[0].ModelName.Should().Be("claude-test");
+        client.Requests[0].EnablePromptCaching.Should().BeTrue();
     }
 
     [Fact]
@@ -66,6 +68,7 @@ public sealed class AnthropicReviewLlmTests
         client.Requests[1].SystemPrompt.Should().Contain("\"summary\"");
         client.Requests[1].SystemPrompt.Should().Contain("\"comments\"");
         client.Requests[1].UserMessages.Should().Equal("not json");
+        client.Requests[1].EnablePromptCaching.Should().BeFalse();
     }
 
     [Fact]
@@ -175,19 +178,87 @@ public sealed class AnthropicReviewLlmTests
         var request = client.Requests.Should().ContainSingle().Subject;
         request.SystemPrompt.Should().Be("critique system");
         request.UserMessages.Should().Equal("critique user");
+        request.EnablePromptCaching.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ReviewAsyncHonorsDisabledPromptCachingOption()
+    {
+        var client = new FakeAnthropicClient(
+            """
+            {
+              "summary": "Done.",
+              "comments": []
+            }
+            """);
+        var llm = CreateLlm(client, promptCachingEnabled: false);
+
+        await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        client.Requests.Should().ContainSingle()
+            .Which.EnablePromptCaching.Should().BeFalse();
+    }
+
+    [Fact]
+    public void BuildParametersEnablesFineGrainedPromptCachingOnSystemPrompt()
+    {
+        var request = new AnthropicMessageRequest(
+            SystemPrompt: "system",
+            UserMessages: ["user"],
+            ModelName: "claude-test",
+            MaxTokens: 123,
+            Temperature: 0.1m,
+            EnablePromptCaching: true);
+
+        var parameters = AnthropicSdkClient.BuildParameters(request);
+
+        parameters.PromptCaching.Should().Be(PromptCacheType.FineGrained);
+        parameters.System.Should().ContainSingle()
+            .Which.CacheControl.Should().BeEquivalentTo(new CacheControl { Type = CacheControlType.ephemeral });
+        parameters.Messages.Should().ContainSingle()
+            .Which.Content.Should().ContainSingle()
+            .Which.CacheControl.Should().BeNull();
+    }
+
+    [Fact]
+    public void BuildParametersLeavesPromptCachingUnsetWhenDisabled()
+    {
+        var request = new AnthropicMessageRequest(
+            SystemPrompt: "system",
+            UserMessages: ["user"],
+            ModelName: "claude-test",
+            MaxTokens: 123,
+            Temperature: 0.1m,
+            EnablePromptCaching: false);
+
+        var parameters = AnthropicSdkClient.BuildParameters(request);
+
+        parameters.PromptCaching.Should().Be(PromptCacheType.None);
+        parameters.System.Should().ContainSingle()
+            .Which.CacheControl.Should().BeNull();
     }
 
     private static AnthropicReviewLlm CreateLlm(FakeAnthropicClient client) =>
         CreateLlm(client, _ => Task.CompletedTask);
 
+    private static AnthropicReviewLlm CreateLlm(FakeAnthropicClient client, bool promptCachingEnabled) =>
+        CreateLlm(client, _ => Task.CompletedTask, promptCachingEnabled);
+
     private static AnthropicReviewLlm CreateLlm(
         FakeAnthropicClient client,
         Func<TimeSpan, Task> delayAsync) =>
+        CreateLlm(client, delayAsync, promptCachingEnabled: true);
+
+    private static AnthropicReviewLlm CreateLlm(
+        FakeAnthropicClient client,
+        Func<TimeSpan, Task> delayAsync,
+        bool promptCachingEnabled) =>
         new(
             new AnthropicLlmOptions
             {
                 ApiKey = "test-key",
-                ModelName = "claude-test"
+                ModelName = "claude-test",
+                PromptCachingEnabled = promptCachingEnabled
             },
             NullLogger<AnthropicReviewLlm>.Instance,
             client,

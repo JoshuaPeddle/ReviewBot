@@ -43,6 +43,7 @@ Used when a repo's `.github/review-bot.yml` sets `model.provider: anthropic`.
 | `ModelName` | `REVIEWBOT__Anthropic__ModelName` | `string` | `claude-opus-4-7` | Model to use |
 | `MaxTokens` | `REVIEWBOT__Anthropic__MaxTokens` | `int` | `4096` | Maximum tokens in the LLM response |
 | `Temperature` | `REVIEWBOT__Anthropic__Temperature` | `decimal` | `0.2` | Sampling temperature |
+| `PromptCachingEnabled` | `REVIEWBOT__Anthropic__PromptCachingEnabled` | `bool` | `true` | Enables Anthropic fine-grained prompt caching for reusable system prompts |
 
 `ApiKey` is validated lazily — the host starts even with an empty key, but the first review that uses the Anthropic provider will fail.
 
