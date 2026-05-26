@@ -33,7 +33,7 @@ public static class PromptBuilder
             SystemPrompt: BuildSystemPrompt(
                 finalPassConfig,
                 request.Grounding,
-                "This is the final review pass after additional context was fetched. Re-emit all valid comments from the first pass plus any new comments informed by the additional context. Omit any first-pass comments disproven by the added files."),
+                "This is the final review pass after additional context was fetched. For each numbered initial comment, decide keep, revise, or drop based on the new context: keep means re-emit unchanged; revise means re-emit with updated wording (only one version, not both); drop means omit because the added files disprove the concern. Then add any new comments the new context now supports. Do not return the same concern twice."),
             UserPrompt: BuildContextEnrichedUserPrompt(request, initialResult, fetchedFiles));
     }
 
@@ -44,9 +44,7 @@ public static class PromptBuilder
     {
         var prompt = new StringBuilder();
 
-        prompt.Append("You are a senior code reviewer. Review the pull request with particular focus on: ");
-        prompt.AppendJoin(", ", config.Focus);
-        prompt.Append(".\n\n");
+        prompt.Append("You are a senior code reviewer reviewing a pull request.\n\n");
 
         prompt.Append("Focus areas:\n");
         foreach (var focusArea in config.Focus)
@@ -71,10 +69,22 @@ public static class PromptBuilder
 
         prompt.Append("""
 
+Assign a severity level to each comment:
+- "error": a correctness, security, or data-loss bug that should block merge
+- "warning": a likely defect, reliability hazard, or maintainability concern worth fixing before merge
+- "info": a minor style, naming, or nit that is safe to ignore
+
 Assign a confidence level to each comment based on how certain you are:
 - "high": you have seen the code in question and are certain this is a real issue
 - "medium": likely an issue but depends on context outside the diff
 - "low": weak but evidence-backed; you would not block a merge on this alone
+
+What a good comment looks like:
+GOOD (specific, ties to a visible line, names the value, gives a fix direction):
+  "`request.Email` on line 47 is interpolated into the SQL string. It originates from the HTTP body, so treat it as untrusted and use a parameter."
+BAD (speculative, asks for vague confirmation about code not in the diff):
+  "Make sure the email is validated somewhere before this point."
+Omit comments that read like the BAD example.
 
 Comment quality rules:
 - Only report actionable concerns. Do not leave praise, positive feedback, confirmations that code is correct, or comments whose purpose is to validate that a change looks good.
@@ -97,7 +107,7 @@ Each non-deleted diff line is prefixed with its exact new-file line number (form
         {
             prompt.Append($"""
 
-You may request up to {config.Review.MaxContextRequests} additional files to review. Include a context_requests array in your response if you need to see referenced types, interfaces, base classes, or helper implementations before making a comment. Only request files you are confident are relevant.
+You may request up to {config.Review.MaxContextRequests} additional files to review. Include a context_requests array in your response if you need to see referenced types, interfaces, base classes, or helper implementations before making a comment. Only request files you are confident are relevant. Still emit any comments you can make confidently from the current diff in this same response. For concerns whose validity depends on a requested file, omit the comment from this pass; you will see the file content in the next pass and can decide then.
 """);
         }
 
@@ -117,7 +127,7 @@ Schema:
   "comments": [
     {
       "path": "string, must match one of the changed files",
-      "line": "integer, use the NNN from the diff line annotation prefix",
+      "line": "integer, copy the NNN from the diff line annotation prefix verbatim; never count lines yourself",
       "severity": "info|warning|error",
       "confidence": "high|medium|low",
       "body": "string, markdown allowed; concise review comment, no copied diff code"
@@ -138,7 +148,7 @@ Schema:
 
         prompt.Append("""
 }
-Omit a comment entirely rather than pick a guessed line or provide positive feedback, and keep total comments under 25.
+Omit a comment entirely rather than pick a guessed line or provide positive feedback. Aim for the 3 to 7 highest-impact issues; never exceed 15. When in doubt, omit.
 """);
 
         return prompt.ToString();
@@ -177,8 +187,8 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
             if (build is not null)
             {
                 var buildLine = build.Success
-                    ? $"Build: SUCCESS ({build.Warnings} warnings, {build.Errors} errors) — all syntax in changed files is confirmed valid"
-                    : $"Build: FAILED ({build.Errors} errors) — see build output below";
+                    ? $"Build: SUCCESS ({build.Warnings} warnings, {build.Errors} errors), code compiles"
+                    : $"Build: FAILED ({build.Errors} errors), see build output below";
                 sb.Append($"- {buildLine}\n");
             }
             else
@@ -200,8 +210,8 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
             : "Tests";
         var status = tests.Failed == 0 ? "PASSED" : "FAILED";
         var detail = tests.Failed == 0
-            ? "existing behavior confirmed"
-            : "existing behavior may have regressed";
+            ? "no existing test regressed"
+            : "existing tests are now failing";
 
         sb.Append("- ");
         sb.Append(label);
@@ -213,7 +223,7 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
         sb.Append(tests.Failed);
         sb.Append(" failed, ");
         sb.Append(tests.Skipped);
-        sb.Append(" skipped) — ");
+        sb.Append(" skipped), ");
         sb.Append(detail);
         sb.Append('\n');
 
