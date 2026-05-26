@@ -190,7 +190,11 @@ Per your own assessment, latency is the felt pain. The 9B local model is the dom
 
 **Skip self-critique when it can't help.** Today self-critique runs whenever `review.self_critique: true` and any comment exists. If every comment is high-confidence already, the critique pass has nothing to do (high-confidence comments are retained unconditionally). Short-circuit: if `candidateComments.All(c => c.Confidence == Confidence.High)`, skip the critique entirely. Same final result, one fewer LLM call.
 
+Correction confirmed 2026-05-26: this optimization had already shipped before the current Phase 21 slice. `ReviewWorker` critiques only lower-confidence candidate comments, returns immediately when no lower-confidence comments remain, and `ReviewWorkerTests` covers the high-confidence-only stop case.
+
 **Skip full-file context when the file is mostly new.** `review.full_file_max_bytes` currently fetches small modified files in full. But if `f.AdditionsCount / (f.AdditionsCount + f.DeletionsCount) > 0.9`, the diff already contains essentially the whole file. Fetching it is wasted bytes.
+
+Completed 2026-05-26: full-file context now excludes non-deleted files whose additions are more than 90 percent of changed lines before applying the small-patch byte filter. The stop test passes: mostly-new files are not requested for full-file context, exactly-90-percent and mixed files still are, and the LLM receives only fetched non-mostly-new file contents. Correction discovered while adding coverage: the worker test helper represented every synthetic modified file as 1 addition / 0 deletions, which made ordinary modified-file fixtures look like mostly-new files. The helper now defaults modified files to a mixed add/delete change and allows tests to set explicit additions/deletions.
 
 **Stream-and-fork the LLM call for self-critique on large PRs.** Not actually streaming the response (the JSON has to be complete before parsing), but: kick off the self-critique LLM call as soon as the first pass returns, in parallel with the agentic-context branch decision. Today these are sequential.
 
@@ -400,3 +404,5 @@ The eval harness is the load-bearing piece of this plan. If it isn't built caref
 Retrieval in Phase 22 has integration surface area: tree-sitter native binaries on multiple OS targets, sqlite-vec extension loading, disk cache management. Plan for two weeks of "make it actually work on Linux containers, Mac dev machines, Windows runners" after the happy-path implementation. Selfhosters will hit these.
 
 Anthropic SDK 5.x is still unofficial. The risk hasn't changed since the v4 plan, but the surface area grows when Phase 21 adds prompt caching. Worth investigating whether the official Anthropic .NET SDK has shipped or is close; if so, migrate. If not, pin the version and document.
+
+Phase 21 full-file trimming closed the immediate wasted-context risk for mostly-new files without adding configuration surface. Residual risk: the fixed 90 percent threshold is heuristic, so future eval/trace data should confirm it does not remove useful context for generated files or unusual patch shapes.

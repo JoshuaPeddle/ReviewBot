@@ -18,6 +18,7 @@ namespace ReviewBot.Api.Workers;
 public sealed class ReviewWorker : BackgroundService
 {
     private const string SynchronizeReason = "synchronize";
+    private const double MostlyNewFileAdditionRatioThreshold = 0.9;
 
     private readonly IReviewJobQueue queue;
     private readonly IInstallationTokenProvider tokenProvider;
@@ -371,6 +372,7 @@ public sealed class ReviewWorker : BackgroundService
 
         var requests = files
             .Where(file => file.Status != FileChangeStatus.Removed)
+            .Where(file => !IsMostlyNewFile(file))
             .Where(file => EstimatePatchBytes(file) <= config.Review.FullFileMaxBytes)
             .Select(file => new ContextRequest(file.Path, "full-file context for small changed file"))
             .ToArray();
@@ -378,7 +380,7 @@ public sealed class ReviewWorker : BackgroundService
         if (requests.Length == 0)
         {
             logger.LogDebug(
-                "Full-file context enabled for {Owner}/{Repo}#{PrNumber}, but no changed files were under {MaxBytes} bytes",
+                "Full-file context enabled for {Owner}/{Repo}#{PrNumber}, but no changed files needed fetching under the {MaxBytes} byte limit",
                 job.Owner,
                 job.Repo,
                 job.PrNumber,
@@ -429,6 +431,17 @@ public sealed class ReviewWorker : BackgroundService
     }
 
     private static int EstimatePatchBytes(FileChange file) => Encoding.UTF8.GetByteCount(file.Patch);
+
+    private static bool IsMostlyNewFile(FileChange file)
+    {
+        var changedLines = file.AdditionsCount + file.DeletionsCount;
+        if (changedLines <= 0)
+        {
+            return false;
+        }
+
+        return (double)file.AdditionsCount / changedLines > MostlyNewFileAdditionRatioThreshold;
+    }
 
     private static PullRequestReviewEvent DetermineReviewEvent(
         IReadOnlyList<InlineComment> finalComments,
