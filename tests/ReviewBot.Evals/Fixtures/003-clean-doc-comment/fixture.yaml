@@ -1,0 +1,6 @@
+name: Clean XML documentation clarification
+category: clean_pr
+difficulty: low
+description: |
+  A documentation-only update clarifies retry behavior without changing runtime
+  semantics. The reviewer should stay quiet.

@@ -1,0 +1,8 @@
+must_flag:
+  - path: src/ReviewBot.Core/Diff/LineRange.cs
+    line_range: [11, 11]
+    severity_at_least: warning
+    topic: excludes_range_boundaries
+    must_mention_any: ["boundary", "first", "last", "inclusive", "off-by-one"]
+max_total_comments: 2
+expected_review_state: REQUEST_CHANGES

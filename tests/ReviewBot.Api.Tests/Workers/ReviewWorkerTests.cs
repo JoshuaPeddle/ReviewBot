@@ -394,6 +394,61 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task FullFileContextSkipsMostlyNewFiles()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { FullFileMaxBytes = 10_000 }
+        };
+        var files = new[]
+        {
+            CreateFile("src/MostlyNew.cs", additionsCount: 10, deletionsCount: 0),
+            CreateFile("src/Mixed.cs", additionsCount: 9, deletionsCount: 1),
+            CreateFile("src/Existing.cs", additionsCount: 4, deletionsCount: 2)
+        };
+        IReadOnlyList<ContextRequest>? fetchedRequests = null;
+        ReviewRequest? capturedRequest = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                fetchedRequests = call.ArgAt<IReadOnlyList<ContextRequest>>(2);
+                return
+                [
+                    ("src/Mixed.cs", "public class Mixed { }"),
+                    ("src/Existing.cs", "public class Existing { }")
+                ];
+            });
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedRequest = call.Arg<ReviewRequest>();
+                return new ReviewResult("Reviewed.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        fetchedRequests!.Select(request => request.Path).Should().Equal("src/Mixed.cs", "src/Existing.cs");
+        capturedRequest!.FullFileContents.Should().ContainKeys("src/Mixed.cs", "src/Existing.cs");
+        capturedRequest.FullFileContents.Should().NotContainKey("src/MostlyNew.cs");
+    }
+
+    [Fact]
     public async Task FullFileContextDisabledDoesNotFetchFileContents()
     {
         await using var fixture = new WorkerFixture();
@@ -1815,12 +1870,14 @@ public class ReviewWorkerTests
     private static PullRequestMetadata CreateMetadata() =>
         new PullRequestMetadata("Improve parser", "Adds coverage.", "base-sha", "snapshot-head");
 
-    private static FileChange CreateFile(string path)
+    private static FileChange CreateFile(string path, long? additionsCount = null, long? deletionsCount = null)
     {
         return CreateFile(
             path,
             patch: "@@ -1,2 +1,2 @@\n line\n+added",
-            commentableLines: new HashSet<int> { 1, 2 });
+            commentableLines: new HashSet<int> { 1, 2 },
+            additionsCount: additionsCount,
+            deletionsCount: deletionsCount);
     }
 
     private static FileChange CreateFile(string path, int patchLines)
@@ -1835,14 +1892,16 @@ public class ReviewWorkerTests
         string path,
         string patch,
         IReadOnlySet<int> commentableLines,
-        FileChangeStatus status = FileChangeStatus.Modified)
+        FileChangeStatus status = FileChangeStatus.Modified,
+        long? additionsCount = null,
+        long? deletionsCount = null)
     {
         return new FileChange(
             path,
             patch,
             commentableLines,
-            AdditionsCount: 1,
-            DeletionsCount: 0,
+            AdditionsCount: additionsCount ?? (status == FileChangeStatus.Removed ? 0 : 1),
+            DeletionsCount: deletionsCount ?? (status == FileChangeStatus.Added ? 0 : 1),
             status);
     }
 

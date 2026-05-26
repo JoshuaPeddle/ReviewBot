@@ -1,0 +1,12 @@
+{
+  "summary": "The range helper now drops boundary lines.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Core/Diff/LineRange.cs",
+      "line": 11,
+      "severity": "warning",
+      "confidence": "high",
+      "body": "This changes the check from inclusive to exclusive, so the first and last lines in the range no longer match. Keep the boundary comparison inclusive to avoid an off-by-one rejection."
+    }
+  ]
+}

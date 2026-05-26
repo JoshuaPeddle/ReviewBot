@@ -1,0 +1,6 @@
+name: Line range check excludes boundary lines
+category: correctness
+difficulty: medium
+description: |
+  A line-range containment helper now uses strict comparisons, so comments at
+  the first or last line in a range are incorrectly rejected.

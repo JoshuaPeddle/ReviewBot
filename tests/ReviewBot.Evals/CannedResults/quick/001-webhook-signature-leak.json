@@ -1,0 +1,12 @@
+{
+  "summary": "The webhook signature fallback introduces a security issue.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Api/Webhooks/WebhookSignatureValidator.cs",
+      "line": 21,
+      "severity": "error",
+      "confidence": "high",
+      "body": "Returning whether the secret is blank leaks configuration state across the webhook trust boundary. Missing or malformed signatures should fail closed without revealing anything about the secret."
+    }
+  ]
+}

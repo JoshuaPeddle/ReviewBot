@@ -1,0 +1,7 @@
+name: Webhook signature validator leaks secret state
+category: security_boundary
+difficulty: high
+description: |
+  A malformed signature header now returns whether the webhook secret is blank.
+  The reviewer should flag this as a trust-boundary leak instead of treating it
+  as a harmless validation fallback.

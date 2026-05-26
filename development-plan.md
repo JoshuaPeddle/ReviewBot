@@ -139,7 +139,7 @@ dotnet run --project tests/ReviewBot.Evals -- score --fixture <dir> --result <ll
 dotnet run --project tests/ReviewBot.Evals -- score --fixtures <dir> --results <dir> [--out <run.json>]
 ```
 
-Completed 2026-05-25: the score command can now aggregate a fixture set against a directory of canned LLM results. Each immediate fixture subdirectory is matched to `<fixture-directory-name>.json` in the results directory, and the output run JSON includes fixture pass/fail, aggregate precision, recall, F1, and confusion counts. This unblocks multi-fixture rubric calibration before wiring the live `IReviewLlm` runner, judge pass, compare command, and `make eval-quick`.
+Completed 2026-05-25: the score command can now aggregate a fixture set against a directory of canned LLM results. Each immediate fixture subdirectory is matched to `<fixture-directory-name>.json` in the results directory, and the output run JSON includes fixture pass/fail, aggregate precision, recall, F1, and confusion counts. This unblocks multi-fixture rubric calibration before wiring the live `IReviewLlm` runner, judge pass, and compare command.
 
 Completed 2026-05-25: the compare command is now available:
 
@@ -148,6 +148,14 @@ dotnet run --project tests/ReviewBot.Evals -- compare <baseline-run.json> <candi
 ```
 
 It reads two aggregate run JSON files, matches fixture rows by fixture directory slug, prints a regression/improvement table, optionally writes comparison JSON, and exits nonzero when any fixture regresses. Correction discovered while implementing it: fixture metadata names are display labels and full fixture paths can differ across machines, so comparison keys should use the fixture directory slug from `fixturePath`.
+
+Completed 2026-05-25: `make eval-quick` now runs a checked-in three-fixture smoke corpus in under a minute:
+
+```
+make eval-quick
+```
+
+The quick corpus covers one security-boundary leak, one correctness/off-by-one regression, and one clean documentation-only PR. Each fixture includes the planned `fixture.yaml`, `diff.patch`, `repo-state/`, and `expected.yaml` shape, with canned results under `tests/ReviewBot.Evals/CannedResults/quick/`. Correction discovered while adding the target: eval run JSON is generated output, so `runs/` is now ignored instead of becoming accidental source control noise.
 
 ### Calibration first, then everything else
 
@@ -182,7 +190,11 @@ Per your own assessment, latency is the felt pain. The 9B local model is the dom
 
 **Skip self-critique when it can't help.** Today self-critique runs whenever `review.self_critique: true` and any comment exists. If every comment is high-confidence already, the critique pass has nothing to do (high-confidence comments are retained unconditionally). Short-circuit: if `candidateComments.All(c => c.Confidence == Confidence.High)`, skip the critique entirely. Same final result, one fewer LLM call.
 
+Correction confirmed 2026-05-26: this optimization had already shipped before the current Phase 21 slice. `ReviewWorker` critiques only lower-confidence candidate comments, returns immediately when no lower-confidence comments remain, and `ReviewWorkerTests` covers the high-confidence-only stop case.
+
 **Skip full-file context when the file is mostly new.** `review.full_file_max_bytes` currently fetches small modified files in full. But if `f.AdditionsCount / (f.AdditionsCount + f.DeletionsCount) > 0.9`, the diff already contains essentially the whole file. Fetching it is wasted bytes.
+
+Completed 2026-05-26: full-file context now excludes non-deleted files whose additions are more than 90 percent of changed lines before applying the small-patch byte filter. The stop test passes: mostly-new files are not requested for full-file context, exactly-90-percent and mixed files still are, and the LLM receives only fetched non-mostly-new file contents. Correction discovered while adding coverage: the worker test helper represented every synthetic modified file as 1 addition / 0 deletions, which made ordinary modified-file fixtures look like mostly-new files. The helper now defaults modified files to a mixed add/delete change and allows tests to set explicit additions/deletions.
 
 **Stream-and-fork the LLM call for self-critique on large PRs.** Not actually streaming the response (the JSON has to be complete before parsing), but: kick off the self-critique LLM call as soon as the first pass returns, in parallel with the agentic-context branch decision. Today these are sequential.
 
@@ -387,8 +399,10 @@ What's explicitly out of scope for v1: multi-tenant auth, per-user permissions, 
 
 ## Risks
 
-The eval harness is the load-bearing piece of this plan. If it isn't built carefully (judge prompt drift, fixture distribution skewed toward easy bugs, scoring rules too forgiving), the rest of the work optimizes against a bad metric. Budget at least three days for rubric-tuning after the initial implementation, comparing harness scores against your own hand-review of the same fixtures. If the harness and your eye disagree on more than 20 percent of fixtures, the rubric needs work, not the bot. The 2026-05-25 rule-scoring slice closes the risk that the fixture schema is only aspirational, but opens a calibration risk: the first implementation counts any unmatched, non-allowed comment as a false positive. Revisit that strictness after the first 5 to 10 fixtures are scored by hand. The set-level score runner lowers the fixture-calibration risk by making multi-fixture runs reproducible, but it adds one convention to document: canned result files must be named after their fixture directory. The compare command closes the immediate "eyeball two JSON blobs" regression risk for prompt work, but opens a corpus-change interpretation risk: added and removed fixtures are reported, not treated as regressions, so baseline comparisons should generally use the same fixture corpus.
+The eval harness is the load-bearing piece of this plan. If it isn't built carefully (judge prompt drift, fixture distribution skewed toward easy bugs, scoring rules too forgiving), the rest of the work optimizes against a bad metric. Budget at least three days for rubric-tuning after the initial implementation, comparing harness scores against your own hand-review of the same fixtures. If the harness and your eye disagree on more than 20 percent of fixtures, the rubric needs work, not the bot. The 2026-05-25 rule-scoring slice closes the risk that the fixture schema is only aspirational, but opens a calibration risk: the first implementation counts any unmatched, non-allowed comment as a false positive. Revisit that strictness after the first 5 to 10 fixtures are scored by hand. The set-level score runner lowers the fixture-calibration risk by making multi-fixture runs reproducible, but it adds one convention to document: canned result files must be named after their fixture directory. The compare command closes the immediate "eyeball two JSON blobs" regression risk for prompt work, but opens a corpus-change interpretation risk: added and removed fixtures are reported, not treated as regressions, so baseline comparisons should generally use the same fixture corpus. The quick eval corpus closes the immediate dev-loop risk that `eval-quick` existed only as a plan item, while leaving the larger calibration risk open until the corpus grows beyond three fixtures and real model outputs are scored.
 
 Retrieval in Phase 22 has integration surface area: tree-sitter native binaries on multiple OS targets, sqlite-vec extension loading, disk cache management. Plan for two weeks of "make it actually work on Linux containers, Mac dev machines, Windows runners" after the happy-path implementation. Selfhosters will hit these.
 
 Anthropic SDK 5.x is still unofficial. The risk hasn't changed since the v4 plan, but the surface area grows when Phase 21 adds prompt caching. Worth investigating whether the official Anthropic .NET SDK has shipped or is close; if so, migrate. If not, pin the version and document.
+
+Phase 21 full-file trimming closed the immediate wasted-context risk for mostly-new files without adding configuration surface. Residual risk: the fixed 90 percent threshold is heuristic, so future eval/trace data should confirm it does not remove useful context for generated files or unusual patch shapes.
