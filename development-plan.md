@@ -95,6 +95,8 @@ expected_review_state: REQUEST_CHANGES   # given request_changes_on_error: true
 
 The schema is deliberately loose. Real LLM reviewers don't produce identical comments across runs, so the rubric grades against concepts and severity bands, not exact text. The `must_mention_any` keyword list is good enough for v0.
 
+Completed 2026-05-25: the first eval harness slice now exists in `tests/ReviewBot.Evals/`. It loads the v0 fixture contract (`fixture.yaml`, `diff.patch`, `expected.yaml`) and validates line ranges, severity bands, maximum comment counts, and expected review state metadata. Correction discovered while extending the runner: `expected_review_state` needs explicit validation because it is not part of the LLM `ReviewResult`; it is now limited to `APPROVE`, `COMMENT`, or `REQUEST_CHANGES` until the full worker-style runner can score posted review events directly.
+
 ### Scoring
 
 Two scoring passes per fixture, both run after the bot produces a `ReviewResult`:
@@ -110,6 +112,8 @@ Two scoring passes per fixture, both run after the bot produces a `ReviewResult`
    Same prompt every time, store the judge prompt in the harness so it's versioned. Aggregate to a per-comment mean and per-fixture mean.
 
 The judge is the noisier of the two but catches things rule-based scoring misses, like a comment that flags the right line but with a confused explanation.
+
+Completed 2026-05-25: rule-based scoring is implemented for a canned `ReviewResult`. The scorer reports true positives, false positives, false negatives, precision, recall, F1, per-`must_flag` results, per-`must_not_flag` severity-ceiling violations, and extra unmatched comments. The current rule scorer is intentionally strict: any non-allowed unmatched comment counts as a false positive, while comments on `must_not_flag` paths at or below the configured ceiling are allowed.
 
 ### Runner
 
@@ -127,6 +131,23 @@ dotnet run --project tests/ReviewBot.Evals -- \
 Internally it does what the worker does (build `ReviewRequest`, run through `IReviewLlm`, apply self-critique, etc.) but with the GitHub side mocked out. Output is a JSON file per run; a separate `eval compare runs/A.json runs/B.json` command prints a diff table (which fixtures regressed, which improved). That diff is the thing you look at after every prompt change.
 
 Plus a `make eval-quick` target that runs a 3-fixture smoke set in under a minute, so you don't break the dev loop.
+
+Correction discovered 2026-05-25: the full model runner does not have to be the first deliverable. A smaller `score` command is now available:
+
+```
+dotnet run --project tests/ReviewBot.Evals -- score --fixture <dir> --result <llm-result.json> [--out <score.json>]
+dotnet run --project tests/ReviewBot.Evals -- score --fixtures <dir> --results <dir> [--out <run.json>]
+```
+
+Completed 2026-05-25: the score command can now aggregate a fixture set against a directory of canned LLM results. Each immediate fixture subdirectory is matched to `<fixture-directory-name>.json` in the results directory, and the output run JSON includes fixture pass/fail, aggregate precision, recall, F1, and confusion counts. This unblocks multi-fixture rubric calibration before wiring the live `IReviewLlm` runner, judge pass, compare command, and `make eval-quick`.
+
+Completed 2026-05-25: the compare command is now available:
+
+```
+dotnet run --project tests/ReviewBot.Evals -- compare <baseline-run.json> <candidate-run.json> [--out <comparison.json>]
+```
+
+It reads two aggregate run JSON files, matches fixture rows by fixture directory slug, prints a regression/improvement table, optionally writes comparison JSON, and exits nonzero when any fixture regresses. Correction discovered while implementing it: fixture metadata names are display labels and full fixture paths can differ across machines, so comparison keys should use the fixture directory slug from `fixturePath`.
 
 ### Calibration first, then everything else
 
@@ -166,8 +187,6 @@ Per your own assessment, latency is the felt pain. The 9B local model is the dom
 **Stream-and-fork the LLM call for self-critique on large PRs.** Not actually streaming the response (the JSON has to be complete before parsing), but: kick off the self-critique LLM call as soon as the first pass returns, in parallel with the agentic-context branch decision. Today these are sequential.
 
 ### The harder wins (defer to after Phase 22)
-
-**Skip the prompt entirely on near-empty PRs.** If the entire diff is one file, fewer than 20 changed lines, and contains only formatting changes (whitespace, brace style), short-circuit to "no comments" without an LLM call. Risk: false negatives on the rare interesting one-liner. Mitigate by requiring a heuristic match (only whitespace tokens changed). Saves the entire review cost on noise-PRs.
 
 **Smaller specialized model for self-critique.** The critique pass is a binary classification task per comment (keep or drop). It doesn't need the same model as the review pass. A cheaper/faster model would let you self-critique on every review without latency cost. Wire in once Phase 22 stabilizes the prompt structure.
 
@@ -368,7 +387,7 @@ What's explicitly out of scope for v1: multi-tenant auth, per-user permissions, 
 
 ## Risks
 
-The eval harness is the load-bearing piece of this plan. If it isn't built carefully (judge prompt drift, fixture distribution skewed toward easy bugs, scoring rules too forgiving), the rest of the work optimizes against a bad metric. Budget at least three days for rubric-tuning after the initial implementation, comparing harness scores against your own hand-review of the same fixtures. If the harness and your eye disagree on more than 20 percent of fixtures, the rubric needs work, not the bot.
+The eval harness is the load-bearing piece of this plan. If it isn't built carefully (judge prompt drift, fixture distribution skewed toward easy bugs, scoring rules too forgiving), the rest of the work optimizes against a bad metric. Budget at least three days for rubric-tuning after the initial implementation, comparing harness scores against your own hand-review of the same fixtures. If the harness and your eye disagree on more than 20 percent of fixtures, the rubric needs work, not the bot. The 2026-05-25 rule-scoring slice closes the risk that the fixture schema is only aspirational, but opens a calibration risk: the first implementation counts any unmatched, non-allowed comment as a false positive. Revisit that strictness after the first 5 to 10 fixtures are scored by hand. The set-level score runner lowers the fixture-calibration risk by making multi-fixture runs reproducible, but it adds one convention to document: canned result files must be named after their fixture directory. The compare command closes the immediate "eyeball two JSON blobs" regression risk for prompt work, but opens a corpus-change interpretation risk: added and removed fixtures are reported, not treated as regressions, so baseline comparisons should generally use the same fixture corpus.
 
 Retrieval in Phase 22 has integration surface area: tree-sitter native binaries on multiple OS targets, sqlite-vec extension loading, disk cache management. Plan for two weeks of "make it actually work on Linux containers, Mac dev machines, Windows runners" after the happy-path implementation. Selfhosters will hit these.
 
