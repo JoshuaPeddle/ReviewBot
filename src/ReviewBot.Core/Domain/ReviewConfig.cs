@@ -9,7 +9,8 @@ public sealed record ReviewConfig(
     IReadOnlyList<string> Ignore,
     IReadOnlyList<string> Focus,
     string Instructions,
-    GroundingConfig Grounding)
+    GroundingConfig Grounding,
+    RetrievalConfig Retrieval)
 {
     public static ReviewConfig Default { get; } = new(
         Enabled: true,
@@ -34,7 +35,8 @@ public sealed record ReviewConfig(
             "error_handling"
         ]),
         Instructions: string.Empty,
-        Grounding: GroundingConfig.Default);
+        Grounding: GroundingConfig.Default,
+        Retrieval: RetrievalConfig.Default);
 }
 
 public sealed record GroundingConfig(
@@ -56,6 +58,25 @@ public sealed record GroundingConfig(
         TestTimeoutSeconds: 300,
         BuildCommand: null,
         TestCommand: null);
+}
+
+public sealed record RetrievalConfig(
+    bool Enabled,
+    int MaxBytes,
+    string SymbolLookupDepth,
+    bool Embeddings,
+    string IndexCacheDir)
+{
+    public const string DefinitionsDepth = "definitions";
+    public const string CallersDepth = "callers";
+    public const string BothDepth = "both";
+
+    public static RetrievalConfig Default { get; } = new(
+        Enabled: false,
+        MaxBytes: 102_400,
+        SymbolLookupDepth: CallersDepth,
+        Embeddings: false,
+        IndexCacheDir: "/var/cache/reviewbot/index");
 }
 
 public sealed record ModelConfig(

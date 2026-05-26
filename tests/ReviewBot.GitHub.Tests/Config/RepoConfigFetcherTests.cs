@@ -60,6 +60,12 @@ public class RepoConfigFetcherTests
               - performance
               - maintainability
             instructions: "  Keep comments short.  "
+            retrieval:
+              enabled: true
+              max_bytes: 64000
+              symbol_lookup_depth: both
+              embeddings: true
+              index_cache_dir: /tmp/reviewbot-index
             """;
         var contents = Substitute.For<IRepositoryContentsClient>();
         contents
@@ -89,6 +95,12 @@ public class RepoConfigFetcherTests
         config.Ignore.Should().Equal("docs/**", "generated/**");
         config.Focus.Should().Equal("performance", "maintainability");
         config.Instructions.Should().Be("Keep comments short.");
+        config.Retrieval.Should().Be(new RetrievalConfig(
+            Enabled: true,
+            MaxBytes: 64_000,
+            SymbolLookupDepth: RetrievalConfig.BothDepth,
+            Embeddings: true,
+            IndexCacheDir: "/tmp/reviewbot-index"));
     }
 
     [Fact]
@@ -228,6 +240,54 @@ public class RepoConfigFetcherTests
         config.Grounding.TestTimeoutSeconds.Should().Be(GroundingConfig.Default.TestTimeoutSeconds);
         config.Grounding.BuildCommand.Should().Be(GroundingConfig.Default.BuildCommand);
         config.Grounding.TestCommand.Should().Be(GroundingConfig.Default.TestCommand);
+    }
+
+    [Fact]
+    public async Task FetchAsyncMapsRetrievalSection()
+    {
+        const string yaml = """
+            retrieval:
+              enabled: true
+              max_bytes: 204800
+              symbol_lookup_depth: definitions
+              embeddings: true
+              index_cache_dir: /var/tmp/reviewbot/index
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Retrieval.Enabled.Should().BeTrue();
+        config.Retrieval.MaxBytes.Should().Be(204_800);
+        config.Retrieval.SymbolLookupDepth.Should().Be(RetrievalConfig.DefinitionsDepth);
+        config.Retrieval.Embeddings.Should().BeTrue();
+        config.Retrieval.IndexCacheDir.Should().Be("/var/tmp/reviewbot/index");
+    }
+
+    [Fact]
+    public async Task FetchAsyncMergesPartialRetrievalWithDefaults()
+    {
+        const string yaml = """
+            retrieval:
+              enabled: true
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Retrieval.Enabled.Should().BeTrue();
+        config.Retrieval.MaxBytes.Should().Be(RetrievalConfig.Default.MaxBytes);
+        config.Retrieval.SymbolLookupDepth.Should().Be(RetrievalConfig.Default.SymbolLookupDepth);
+        config.Retrieval.Embeddings.Should().Be(RetrievalConfig.Default.Embeddings);
+        config.Retrieval.IndexCacheDir.Should().Be(RetrievalConfig.Default.IndexCacheDir);
     }
 
     [Fact]
@@ -417,6 +477,8 @@ public class RepoConfigFetcherTests
               max_context_requests: 0
               max_context_file_bytes: -10
               full_file_max_bytes: -20
+            retrieval:
+              max_bytes: 0
             """;
         var contents = Substitute.For<IRepositoryContentsClient>();
         contents
@@ -432,6 +494,7 @@ public class RepoConfigFetcherTests
         config.Review.MaxContextRequests.Should().Be(ReviewConfig.Default.Review.MaxContextRequests);
         config.Review.MaxContextFileBytes.Should().Be(ReviewConfig.Default.Review.MaxContextFileBytes);
         config.Review.FullFileMaxBytes.Should().Be(ReviewConfig.Default.Review.FullFileMaxBytes);
+        config.Retrieval.MaxBytes.Should().Be(RetrievalConfig.Default.MaxBytes);
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_files=0", StringComparison.Ordinal));
         logger.Entries.Should().Contain(entry =>
@@ -442,6 +505,30 @@ public class RepoConfigFetcherTests
             entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_context_file_bytes=-10", StringComparison.Ordinal));
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning && entry.Message.Contains("review.full_file_max_bytes=-20", StringComparison.Ordinal));
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning && entry.Message.Contains("retrieval.max_bytes=0", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task FetchAsyncLogsWarningAndDefaultsOnUnknownRetrievalDepth()
+    {
+        const string yaml = """
+            retrieval:
+              symbol_lookup_depth: transitive
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var logger = new CapturingLogger<RepoConfigFetcher>();
+        var fetcher = CreateFetcher(contents, logger);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Retrieval.SymbolLookupDepth.Should().Be(RetrievalConfig.Default.SymbolLookupDepth);
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains("retrieval.symbol_lookup_depth", StringComparison.Ordinal));
     }
 
     private static RepoConfigFetcher CreateFetcher(

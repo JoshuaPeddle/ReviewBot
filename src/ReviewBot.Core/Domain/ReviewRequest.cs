@@ -8,4 +8,11 @@ public sealed record ReviewRequest(
     IReadOnlyList<FileChange> Files,
     ReviewConfig Config,
     GroundingContext? Grounding = null,
-    IReadOnlyDictionary<string, string>? FullFileContents = null);
+    IReadOnlyDictionary<string, string>? FullFileContents = null,
+    IReadOnlyList<RepositoryContextSnippet>? RepositoryContext = null);
+
+public sealed record RepositoryContextSnippet(
+    string Path,
+    int StartLine,
+    int EndLine,
+    string Content);
