@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace ReviewBot.Core.Context;
 
 public sealed class ModelContextRegistry : IModelContextRegistry
@@ -10,17 +12,40 @@ public sealed class ModelContextRegistry : IModelContextRegistry
         new("gpt-4*", 128_000, IsConfigured: false),
         new("gpt-5*", 128_000, IsConfigured: false),
         new("qwen*:*b*", 32_768, IsConfigured: false),
+        new("llama3*:8b*", 8_192, IsConfigured: false),
+        new("*:8b*", 8_192, IsConfigured: false),
+        new("llama3*:70b*", 131_072, IsConfigured: false),
+        new("*:70b*", 131_072, IsConfigured: false),
         new("granite*", 128_000, IsConfigured: false)
     ];
 
     private readonly IReadOnlyList<ModelContextPattern> patterns;
 
-    public ModelContextRegistry(ModelContextOptions? options = null)
+    public ModelContextRegistry(
+        ModelContextOptions? options = null,
+        ILogger<ModelContextRegistry>? logger = null)
     {
-        var configured = options?.Limits
-            .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value > 0)
-            .Select(pair => new ModelContextPattern(pair.Key.Trim(), pair.Value, IsConfigured: true))
-            .ToArray() ?? [];
+        var configured = new List<ModelContextPattern>();
+        foreach (var pair in options?.Limits ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(pair.Key))
+            {
+                logger?.LogWarning(
+                    "Ignoring ModelContext limit with a blank model pattern; limits must have a model name or wildcard pattern.");
+                continue;
+            }
+
+            if (pair.Value <= 0)
+            {
+                logger?.LogWarning(
+                    "Ignoring invalid ModelContext limit {ModelPattern}={ContextTokens}; limits must be positive.",
+                    pair.Key,
+                    pair.Value);
+                continue;
+            }
+
+            configured.Add(new ModelContextPattern(pair.Key.Trim(), pair.Value, IsConfigured: true));
+        }
 
         patterns = configured.Concat(Defaults).ToArray();
     }

@@ -102,7 +102,7 @@ review:
 
 Shipped the context-window and heuristic-estimation primitives that unblock budget-aware prompt assembly:
 
-- Added `IModelContextRegistry` / `ModelContextRegistry` with baked-in limits for Claude, GPT-4/5, Qwen `*b`, Llama 8B/70B, Granite, and an 8,192-token fallback. `ModelContext:Limits` appsettings overrides are wired through the API composition root; invalid non-positive limits are ignored.
+- Added `IModelContextRegistry` / `ModelContextRegistry` with baked-in limits for Claude, GPT-4/5, Qwen `*b`, Llama 8B/70B, Granite, and an 8,192-token fallback. `ModelContext:Limits` appsettings overrides are wired through the API composition root; invalid blank or non-positive limits are ignored with a warning.
 - Added `IPromptTokenEstimator` / `HeuristicTokenEstimator` using `ceil(charCount / 3.5)`.
 - Added immutable `PromptBudget` accounting for model limit, system prompt, grounding, response reserve, consumed sections, and remaining content budget.
 - Added Core tests for known-model lookup, config override, fallback, heuristic estimates, fixed-section subtraction, zero clamping, and budget exhaustion.

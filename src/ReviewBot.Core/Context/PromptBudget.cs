@@ -45,6 +45,8 @@ public sealed record PromptBudget
         ThrowIfNegative(groundingTokens, nameof(groundingTokens));
         ThrowIfNegative(responseReserveTokens, nameof(responseReserveTokens));
 
+        // Exhausted content budget is valid: the worker can still choose chunking,
+        // truncation, or a warning path instead of failing configuration binding.
         var contentBudgetTokens = Math.Max(
             0,
             modelContextLimitTokens - systemPromptTokens - groundingTokens - responseReserveTokens);

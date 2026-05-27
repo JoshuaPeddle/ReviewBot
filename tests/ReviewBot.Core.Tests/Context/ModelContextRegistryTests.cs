@@ -1,4 +1,5 @@
 using FluentAssertions;
+using Microsoft.Extensions.Logging;
 using ReviewBot.Core.Context;
 
 namespace ReviewBot.Core.Tests.Context;
@@ -41,6 +42,32 @@ public class ModelContextRegistryTests
     }
 
     [Fact]
+    public void ConstructorLogsWarningAndIgnoresInvalidConfiguredLimits()
+    {
+        var logger = new CapturingLogger<ModelContextRegistry>();
+        var registry = new ModelContextRegistry(
+            new ModelContextOptions
+            {
+                Limits =
+                {
+                    ["qwen2.5:9b-q4_K_M"] = 0,
+                    [" "] = 16_384
+                }
+            },
+            logger);
+
+        var tokens = registry.GetContextWindowTokens("qwen2.5:9b-q4_K_M");
+
+        tokens.Should().Be(32_768);
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains("Ignoring invalid ModelContext limit", StringComparison.Ordinal));
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains("blank model pattern", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void GetContextWindowTokensPrefersLongestLiteralPrefix()
     {
         var registry = new ModelContextRegistry(new ModelContextOptions
@@ -64,5 +91,26 @@ public class ModelContextRegistryTests
 
         registry.GetContextWindowTokens("unknown-model").Should().Be(ModelContextRegistry.FallbackContextTokens);
         registry.GetContextWindowTokens("").Should().Be(ModelContextRegistry.FallbackContextTokens);
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull =>
+            null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Entries.Add((logLevel, formatter(state, exception)));
+        }
     }
 }
