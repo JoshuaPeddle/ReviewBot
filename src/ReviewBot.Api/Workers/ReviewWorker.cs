@@ -1360,6 +1360,7 @@ public sealed class ReviewWorker : BackgroundService
             .Where(c => c.Confidence >= config.Review.MinConfidence)
             .Where(c => !IsPraiseOnlyComment(c.Body))
             .Where(c => !IsMetaReviewComment(c.Body))
+            .Where(c => !IsNonActionableProcessComment(c.Body))
             .Where(c => !IsSpeculativeMissingContextComment(c.Body))
             .ToArray();
     }
@@ -1438,6 +1439,17 @@ public sealed class ReviewWorker : BackgroundService
         return asksToVerifyMissingContract && usesSpeculativeLanguage && referencesUnseenContract;
     }
 
+    private static bool IsNonActionableProcessComment(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeForTextHeuristics(body);
+        return ContainsAny(normalized, NonActionableProcessPhrases);
+    }
+
     private static string NormalizeForTextHeuristics(string value)
     {
         var sb = new StringBuilder(value.Length + 2);
@@ -1508,6 +1520,18 @@ public sealed class ReviewWorker : BackgroundService
         " requires mentioning ",
         " requires that ",
         " should expect "
+    ];
+
+    private static readonly string[] NonActionableProcessPhrases =
+    [
+        " add a comment explaining ",
+        " consider adding a comment ",
+        " consider whether ",
+        " this is correct ",
+        " this is correct behavior ",
+        " this is the correct behavior ",
+        " this is intentional ",
+        " this is the intended behavior "
     ];
 
     private static readonly string[] MissingContractDirectivePhrases =

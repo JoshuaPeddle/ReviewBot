@@ -1647,6 +1647,67 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task NonActionableProcessCommentsAreDroppedBeforePosting()
+    {
+        await using var fixture = new WorkerFixture();
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review complete.",
+                [
+                    new InlineComment(
+                        "src/App.cs",
+                        1,
+                        "RIGHT",
+                        "This is intentional for the chunking path, but consider adding a comment explaining that ApplyPatchBudget is intentionally skipped when chunking is enabled.",
+                        Severity.Info,
+                        Confidence.High),
+                    new InlineComment(
+                        "src/App.cs",
+                        2,
+                        "RIGHT",
+                        "This is the correct behavior to avoid repeating PR overview once per chunk.",
+                        Severity.Info,
+                        Confidence.High),
+                    new InlineComment(
+                        "src/App.cs",
+                        3,
+                        "RIGHT",
+                        "The chunk_headroom config field allows tuning this, but consider whether the headroom could lead to suboptimal packing.",
+                        Severity.Info,
+                        Confidence.High),
+                    new InlineComment(
+                        "src/App.cs",
+                        4,
+                        "RIGHT",
+                        "This should handle null input before dereferencing the value.",
+                        Severity.Warning,
+                        Confidence.High)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
+    }
+
+    [Fact]
     public async Task EvalFixtureMetaCommentsAreDroppedBeforePosting()
     {
         await using var fixture = new WorkerFixture();
