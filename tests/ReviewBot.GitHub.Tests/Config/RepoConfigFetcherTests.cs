@@ -50,6 +50,7 @@ public class RepoConfigFetcherTests
               request_changes_on_error: true
               approve_if_clean: true
               full_file_max_bytes: 6789
+              response_reserve_tokens: 2048
               trigger:
                 on_review_request: false
                 on_push: true
@@ -88,7 +89,8 @@ public class RepoConfigFetcherTests
             MaxContextFileBytes: 12345,
             RequestChangesOnError: true,
             ApproveIfClean: true,
-            FullFileMaxBytes: 6789));
+            FullFileMaxBytes: 6789,
+            ResponseReserveTokens: 2048));
         config.Review.AgenticContext.Should().BeTrue();
         config.Review.MaxContextRequests.Should().Be(3);
         config.Review.MaxContextFileBytes.Should().Be(12345);
@@ -446,6 +448,28 @@ public class RepoConfigFetcherTests
     }
 
     [Fact]
+    public async Task FetchAsyncMapsResponseReserveTokensAndAllowsZero()
+    {
+        const string yaml = """
+            review:
+              response_reserve_tokens: 0
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var logger = new CapturingLogger<RepoConfigFetcher>();
+        var fetcher = CreateFetcher(contents, logger);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Review.ResponseReserveTokens.Should().Be(0);
+        logger.Entries.Should().NotContain(entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains("review.response_reserve_tokens", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task FetchAsyncLogsWarningAndDefaultsLowOnUnknownMinConfidence()
     {
         const string yaml = """
@@ -477,6 +501,7 @@ public class RepoConfigFetcherTests
               max_context_requests: 0
               max_context_file_bytes: -10
               full_file_max_bytes: -20
+              response_reserve_tokens: -30
             retrieval:
               max_bytes: 0
             """;
@@ -494,6 +519,7 @@ public class RepoConfigFetcherTests
         config.Review.MaxContextRequests.Should().Be(ReviewConfig.Default.Review.MaxContextRequests);
         config.Review.MaxContextFileBytes.Should().Be(ReviewConfig.Default.Review.MaxContextFileBytes);
         config.Review.FullFileMaxBytes.Should().Be(ReviewConfig.Default.Review.FullFileMaxBytes);
+        config.Review.ResponseReserveTokens.Should().Be(ReviewConfig.Default.Review.ResponseReserveTokens);
         config.Retrieval.MaxBytes.Should().Be(RetrievalConfig.Default.MaxBytes);
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_files=0", StringComparison.Ordinal));
@@ -505,6 +531,8 @@ public class RepoConfigFetcherTests
             entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_context_file_bytes=-10", StringComparison.Ordinal));
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning && entry.Message.Contains("review.full_file_max_bytes=-20", StringComparison.Ordinal));
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning && entry.Message.Contains("review.response_reserve_tokens=-30", StringComparison.Ordinal));
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning && entry.Message.Contains("retrieval.max_bytes=0", StringComparison.Ordinal));
     }

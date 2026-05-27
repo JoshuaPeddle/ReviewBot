@@ -138,6 +138,11 @@ review:
   # files are prioritised and the rest are dropped; a note is added to the summary.
   max_patch_lines: 1500
 
+  # Tokens reserved for the model's response when calculating prompt context budget.
+  # Lower this only if the configured model reliably returns short reviews.
+  # Default: 4096
+  response_reserve_tokens: 4096
+
   # Minimum confidence for inline comments to be posted: low, medium, or high.
   # Default: low (no confidence-based filtering).
   min_confidence: low

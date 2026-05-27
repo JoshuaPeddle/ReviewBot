@@ -195,6 +195,14 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
                 owner,
                 repo,
                 sha,
+                path),
+            MergeNonNegativeInt(
+                fileConfig.Review?.ResponseReserveTokens,
+                defaults.Review.ResponseReserveTokens,
+                "review.response_reserve_tokens",
+                owner,
+                repo,
+                sha,
                 path));
 
         var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
@@ -493,6 +501,8 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public bool? ApproveIfClean { get; set; }
 
         public int? FullFileMaxBytes { get; set; }
+
+        public int? ResponseReserveTokens { get; set; }
     }
 
     private sealed class TriggerConfigFile
