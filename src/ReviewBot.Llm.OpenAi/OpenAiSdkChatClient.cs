@@ -40,7 +40,7 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
         {
             MaxOutputTokenCount = request.MaxTokens,
             Temperature = request.Temperature,
-            ResponseFormat = CreateResponseFormat(request.ResponseFormat, request.IncludeContextRequestsInJsonSchema)
+            ResponseFormat = CreateResponseFormat(request.ResponseFormat, request.IncludeContextRequestsInJsonSchema),
         };
 
         var completion = await client.CompleteChatAsync(messages, options, ct);

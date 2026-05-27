@@ -186,6 +186,28 @@ Changed Files:
     }
 
     [Fact]
+    public void ChunkedRequestStatesPartialReviewScope()
+    {
+        var request = CreateRequest() with
+        {
+            ChunkIndex = 2,
+            TotalChunks = 5
+        };
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.UserPrompt.Should().Contain("""
+PR Body:
+Please review the changes.
+
+Review scope:
+(reviewing chunk 2 of 5)
+
+Changed Files:
+""");
+    }
+
+    [Fact]
     public void BuildReturnsDeterministicSnapshot()
     {
         var config = ReviewConfig.Default with

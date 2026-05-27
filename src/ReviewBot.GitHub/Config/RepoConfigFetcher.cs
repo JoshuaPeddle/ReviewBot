@@ -203,6 +203,23 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
                 owner,
                 repo,
                 sha,
+                path),
+            fileConfig.Review?.ChunkedReview ?? defaults.Review.ChunkedReview,
+            MergePositiveInt(
+                fileConfig.Review?.MaxChunks,
+                defaults.Review.MaxChunks,
+                "review.max_chunks",
+                owner,
+                repo,
+                sha,
+                path),
+            MergeUnitInterval(
+                fileConfig.Review?.ChunkHeadroom,
+                defaults.Review.ChunkHeadroom,
+                "review.chunk_headroom",
+                owner,
+                repo,
+                sha,
                 path));
 
         var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
@@ -337,6 +354,37 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         }
 
         if (value >= 0)
+        {
+            return value.Value;
+        }
+
+        logger.LogWarning(
+            "Invalid ReviewBot config value {FieldName}={Value} in {Path} for {Owner}/{Repo} at {Sha}; using default {DefaultValue}",
+            fieldName,
+            value,
+            path,
+            owner,
+            repo,
+            sha,
+            defaultValue);
+        return defaultValue;
+    }
+
+    private double MergeUnitInterval(
+        double? value,
+        double defaultValue,
+        string fieldName,
+        string owner,
+        string repo,
+        string sha,
+        string path)
+    {
+        if (value is null)
+        {
+            return defaultValue;
+        }
+
+        if (value > 0 && value <= 1)
         {
             return value.Value;
         }
@@ -503,6 +551,12 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public int? FullFileMaxBytes { get; set; }
 
         public int? ResponseReserveTokens { get; set; }
+
+        public bool? ChunkedReview { get; set; }
+
+        public int? MaxChunks { get; set; }
+
+        public double? ChunkHeadroom { get; set; }
     }
 
     private sealed class TriggerConfigFile

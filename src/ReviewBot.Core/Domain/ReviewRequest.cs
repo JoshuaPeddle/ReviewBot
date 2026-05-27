@@ -9,7 +9,9 @@ public sealed record ReviewRequest(
     ReviewConfig Config,
     GroundingContext? Grounding = null,
     IReadOnlyDictionary<string, string>? FullFileContents = null,
-    IReadOnlyList<RepositoryContextSnippet>? RepositoryContext = null);
+    IReadOnlyList<RepositoryContextSnippet>? RepositoryContext = null,
+    int? ChunkIndex = null,
+    int? TotalChunks = null);
 
 public sealed record RepositoryContextSnippet(
     string Path,

@@ -16,6 +16,8 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
 
     public string ProviderName => "anthropic";
 
+    public bool SupportsParallelRequests => true;
+
     private readonly AnthropicLlmOptions options;
     private readonly ILogger<AnthropicReviewLlm> logger;
     private readonly Func<TimeSpan, CancellationToken, Task> delayAsync;

@@ -9,7 +9,7 @@ public class HeuristicTokenEstimatorTests
     [InlineData(null, 0)]
     [InlineData("", 0)]
     [InlineData("hello world", 4)]
-    [InlineData("1234567", 2)]
+    [InlineData("1234567", 3)]
     public void EstimateTokensUsesCeilingCharacterHeuristic(string? text, int expectedTokens)
     {
         var estimator = new HeuristicTokenEstimator();
@@ -32,6 +32,6 @@ public class HeuristicTokenEstimatorTests
 
         var tokens = estimator.EstimateTokens(source);
 
-        tokens.Should().Be((int)Math.Ceiling(source.Length / 3.5d));
+        tokens.Should().Be((int)Math.Ceiling(source.Length / 3d));
     }
 }

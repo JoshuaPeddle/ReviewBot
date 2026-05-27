@@ -245,6 +245,16 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
         prompt.Append("\n\nPR Body:\n");
         prompt.Append(request.PrBody);
 
+        if (request is { ChunkIndex: not null, TotalChunks: not null } &&
+            request.TotalChunks > 1)
+        {
+            prompt.Append("\n\nReview scope:\n(reviewing chunk ");
+            prompt.Append(request.ChunkIndex.Value);
+            prompt.Append(" of ");
+            prompt.Append(request.TotalChunks.Value);
+            prompt.Append(')');
+        }
+
         if (AppendRepositoryContext(prompt, request.RepositoryContext))
         {
             prompt.Append("\nChanged Files:\n");

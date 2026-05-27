@@ -51,6 +51,9 @@ public class RepoConfigFetcherTests
               approve_if_clean: true
               full_file_max_bytes: 6789
               response_reserve_tokens: 2048
+              chunked_review: false
+              max_chunks: 7
+              chunk_headroom: 0.75
               trigger:
                 on_review_request: false
                 on_push: true
@@ -90,7 +93,10 @@ public class RepoConfigFetcherTests
             RequestChangesOnError: true,
             ApproveIfClean: true,
             FullFileMaxBytes: 6789,
-            ResponseReserveTokens: 2048));
+            ResponseReserveTokens: 2048,
+            ChunkedReview: false,
+            MaxChunks: 7,
+            ChunkHeadroom: 0.75));
         config.Review.AgenticContext.Should().BeTrue();
         config.Review.MaxContextRequests.Should().Be(3);
         config.Review.MaxContextFileBytes.Should().Be(12345);
@@ -502,6 +508,8 @@ public class RepoConfigFetcherTests
               max_context_file_bytes: -10
               full_file_max_bytes: -20
               response_reserve_tokens: -30
+              max_chunks: 0
+              chunk_headroom: 1.25
             retrieval:
               max_bytes: 0
             """;
@@ -520,6 +528,8 @@ public class RepoConfigFetcherTests
         config.Review.MaxContextFileBytes.Should().Be(ReviewConfig.Default.Review.MaxContextFileBytes);
         config.Review.FullFileMaxBytes.Should().Be(ReviewConfig.Default.Review.FullFileMaxBytes);
         config.Review.ResponseReserveTokens.Should().Be(ReviewConfig.Default.Review.ResponseReserveTokens);
+        config.Review.MaxChunks.Should().Be(ReviewConfig.Default.Review.MaxChunks);
+        config.Review.ChunkHeadroom.Should().Be(ReviewConfig.Default.Review.ChunkHeadroom);
         config.Retrieval.MaxBytes.Should().Be(RetrievalConfig.Default.MaxBytes);
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_files=0", StringComparison.Ordinal));
@@ -533,6 +543,10 @@ public class RepoConfigFetcherTests
             entry.Level == LogLevel.Warning && entry.Message.Contains("review.full_file_max_bytes=-20", StringComparison.Ordinal));
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning && entry.Message.Contains("review.response_reserve_tokens=-30", StringComparison.Ordinal));
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_chunks=0", StringComparison.Ordinal));
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning && entry.Message.Contains("review.chunk_headroom=1.25", StringComparison.Ordinal));
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning && entry.Message.Contains("retrieval.max_bytes=0", StringComparison.Ordinal));
     }

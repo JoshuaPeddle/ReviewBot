@@ -143,6 +143,22 @@ review:
   # Default: 4096
   response_reserve_tokens: 4096
 
+  # Split oversized pull request diffs into multiple LLM review passes instead
+  # of dropping files before review. Disable to fall back to the legacy patch
+  # budget behavior for very large PRs.
+  # Default: true
+  chunked_review: true
+
+  # Safety cap for chunked review. If a PR needs more chunks than this, only the
+  # first max_chunks worth of files after directory/path ordering are reviewed.
+  # Default: 10
+  max_chunks: 10
+
+  # Fraction of the available content budget used for each diff chunk. The
+  # remaining headroom covers prompt assembly overhead.
+  # Default: 0.85
+  chunk_headroom: 0.85
+
   # Minimum confidence for inline comments to be posted: low, medium, or high.
   # Default: low (no confidence-based filtering).
   min_confidence: low
