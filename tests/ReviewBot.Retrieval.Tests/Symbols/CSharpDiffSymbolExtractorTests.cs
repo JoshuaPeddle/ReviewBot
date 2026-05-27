@@ -46,16 +46,19 @@ public sealed class CSharpDiffSymbolExtractorTests
     public void ExtractIgnoresStringsCommentsDeletedLinesAndUnsupportedFiles()
     {
         var csharpFile = ChangedFile(
-            """
+            """"
             @@ -10,8 +10,9 @@ public void Run()
             -    var removed = new RemovedType();
             +    var literal = "ReviewResult ProcessAsync IReviewLlm";
+            +    var raw = """
+            +        RawStringType.RawStringMethod();
+            +        """;
             +    // HiddenType.HiddenMethod();
             +    var current = VisibleType.Create();
             +    /*
             +       BlockCommentType.Ignored();
             +    */
-            """);
+            """");
 
         var markdownFile = new FileChange(
             "docs/review.md",
@@ -71,13 +74,15 @@ public sealed class CSharpDiffSymbolExtractorTests
         var result = new CSharpDiffSymbolExtractor().Extract([csharpFile, markdownFile]);
 
         result.Should().ContainSingle();
-        result[0].Symbols.Should().Contain(new DiffSymbol("VisibleType", DiffSymbolKind.Type, 12));
-        result[0].Symbols.Should().Contain(new DiffSymbol("Create", DiffSymbolKind.Method, 12));
+        result[0].Symbols.Should().Contain(new DiffSymbol("VisibleType", DiffSymbolKind.Type, 15));
+        result[0].Symbols.Should().Contain(new DiffSymbol("Create", DiffSymbolKind.Method, 15));
         result[0].Symbols.Select(symbol => symbol.Name).Should().NotContain([
             "RemovedType",
             "ReviewResult",
             "ProcessAsync",
             "IReviewLlm",
+            "RawStringType",
+            "RawStringMethod",
             "HiddenType",
             "HiddenMethod",
             "BlockCommentType",

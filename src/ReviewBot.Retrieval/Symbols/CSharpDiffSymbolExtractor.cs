@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text;
 using System.Text.RegularExpressions;
 using ReviewBot.Core.Domain;
 
@@ -91,6 +90,7 @@ public sealed class CSharpDiffSymbolExtractor : IDiffSymbolExtractor
         var seen = new HashSet<(string Name, DiffSymbolKind Kind)>();
         int? nextNewLine = null;
         var inBlockComment = false;
+        var rawStringQuoteCount = 0;
 
         foreach (var rawLine in SplitLines(patch))
         {
@@ -98,6 +98,7 @@ public sealed class CSharpDiffSymbolExtractor : IDiffSymbolExtractor
             {
                 nextNewLine = ParseNewStartLine(rawLine);
                 inBlockComment = false;
+                rawStringQuoteCount = 0;
                 continue;
             }
 
@@ -124,7 +125,10 @@ public sealed class CSharpDiffSymbolExtractor : IDiffSymbolExtractor
             var lineNumber = nextNewLine.Value;
             nextNewLine++;
 
-            var code = StripCommentsAndStrings(rawLine[1..], ref inBlockComment);
+            var code = CSharpLexicalSanitizer.StripCommentsAndStrings(
+                rawLine[1..],
+                ref inBlockComment,
+                ref rawStringQuoteCount);
             if (string.IsNullOrWhiteSpace(code))
             {
                 continue;
@@ -229,76 +233,6 @@ public sealed class CSharpDiffSymbolExtractor : IDiffSymbolExtractor
             match.Groups["newStart"].Value,
             NumberStyles.None,
             CultureInfo.InvariantCulture);
-    }
-
-    private static string StripCommentsAndStrings(string line, ref bool inBlockComment)
-    {
-        var result = new StringBuilder(line.Length);
-        for (var i = 0; i < line.Length; i++)
-        {
-            var current = line[i];
-            var next = i + 1 < line.Length ? line[i + 1] : '\0';
-
-            if (inBlockComment)
-            {
-                if (current == '*' && next == '/')
-                {
-                    inBlockComment = false;
-                    i++;
-                }
-
-                continue;
-            }
-
-            if (current == '/' && next == '/')
-            {
-                break;
-            }
-
-            if (current == '/' && next == '*')
-            {
-                inBlockComment = true;
-                i++;
-                continue;
-            }
-
-            if (current is '"' or '\'')
-            {
-                i = SkipQuotedLiteral(line, i, current);
-                result.Append(' ');
-                continue;
-            }
-
-            result.Append(current);
-        }
-
-        return result.ToString();
-    }
-
-    private static int SkipQuotedLiteral(string line, int start, char quote)
-    {
-        var isVerbatim = quote == '"' && start > 0 && line[start - 1] == '@';
-        for (var i = start + 1; i < line.Length; i++)
-        {
-            if (isVerbatim && line[i] == '"' && i + 1 < line.Length && line[i + 1] == '"')
-            {
-                i++;
-                continue;
-            }
-
-            if (!isVerbatim && line[i] == '\\')
-            {
-                i++;
-                continue;
-            }
-
-            if (line[i] == quote)
-            {
-                return i;
-            }
-        }
-
-        return line.Length - 1;
     }
 
     private static IEnumerable<string> SplitLines(string value)
