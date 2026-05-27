@@ -98,6 +98,19 @@ review:
 
 `PromptBudget` tests: correct subtraction of fixed sections, budget drawn to zero stops fetching more context. `ModelContextRegistry` tests: known-model lookup, config override, fallback. `HeuristicTokenEstimator` tests: empty string, ASCII, source code samples. Worker integration test: when estimated diff tokens exceed content budget, multi-pass is triggered rather than truncation.
 
+#### Completed foundation slice (May 27, 2026)
+
+Shipped the context-window and heuristic-estimation primitives that unblock budget-aware prompt assembly:
+
+- Added `IModelContextRegistry` / `ModelContextRegistry` with baked-in limits for Claude, GPT-4/5, Qwen `*b`, Llama 8B/70B, Granite, and an 8,192-token fallback. `ModelContext:Limits` appsettings overrides are wired through the API composition root; invalid blank or non-positive limits are ignored with a warning.
+- Added `IPromptTokenEstimator` / `HeuristicTokenEstimator` using `ceil(charCount / 3.5)`.
+- Added immutable `PromptBudget` accounting for model limit, system prompt, grounding, response reserve, consumed sections, and remaining content budget.
+- Added Core tests for known-model lookup, config override, fallback, heuristic estimates, fixed-section subtraction, zero clamping, and budget exhaustion.
+- Added an API composition test proving the budgeting services resolve from DI.
+
+
+Remaining in Step 1: Anthropic `count_tokens`, per-section estimation in the live worker, `response_reserve_tokens` repo config, budget-aware full-file/retrieval/diff assembly, logging, and the worker integration test that triggers multi-pass when the diff exceeds budget.
+
 ---
 
 ### Step 2: Multi-pass chunked review
@@ -287,7 +300,7 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 
 ## Risks
 
-**Context estimation accuracy.** Heuristic token counting (chars/3.5) can be off by 20–30% for mixed-language diffs with heavy Unicode or whitespace. The Anthropic count_tokens API is accurate but adds a round-trip. If chunk boundaries are calculated from an underestimate, the assembled prompt still overflows — just less often. Mitigation: apply a conservative headroom factor (0.85 per chunk, response_reserve 4096) and log when actual token usage from the response differs more than 15% from the estimate. Tune the heuristic against the eval corpus once token usage reporting is in place.
+**Context estimation accuracy.** Heuristic token counting (chars/3.5) can be off by 20–30% for mixed-language diffs with heavy Unicode or whitespace. The Anthropic count_tokens API is accurate but adds a round-trip. If chunk boundaries are calculated from an underestimate, the assembled prompt still overflows — just less often. Status: open after the May 27 foundation slice; the registry, heuristic estimator, and budget accounting now exist, but the worker does not yet enforce them. Mitigation: apply a conservative headroom factor (0.85 per chunk, response_reserve 4096) and log when actual token usage from the response differs more than 15% from the estimate. Tune the heuristic against the eval corpus once token usage reporting is in place.
 
 **Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. The eval corpus should have 3–5 cross-chunk fixtures to measure how bad this gap actually is. Expect multi-pass alone (without retrieval) to miss these; retrieval's job is to close the gap.
 

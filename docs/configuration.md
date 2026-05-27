@@ -74,6 +74,29 @@ The SQLite database file is created automatically on first start; no manual sche
 
 ---
 
+## ModelContext
+
+Overrides model context-window assumptions used by prompt budgeting. Keys under `Limits` are model names or `*` wildcard patterns; values must be positive token counts. Configured matches override built-in defaults when the literal prefix length is tied.
+
+| Key | Env var | Type | Default | Description |
+|---|---|---|---|---|
+| `Limits:{model}` | `REVIEWBOT__ModelContext__Limits__{model}` | `int` | built-in registry | Context window token override for a model or wildcard pattern |
+
+Example:
+
+```json
+{
+  "ModelContext": {
+    "Limits": {
+      "qwen2.5:9b-q4_K_M": 32768,
+      "my-custom-model": 16384
+    }
+  }
+}
+```
+
+---
+
 ## Worker
 
 | Key | Env var | Type | Default | Description |

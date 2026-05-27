@@ -7,6 +7,7 @@ using ReviewBot.Api;
 using ReviewBot.Api.Options;
 using ReviewBot.Api.Workers;
 using ReviewBot.Api.Webhooks;
+using ReviewBot.Core.Context;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
 using ReviewBot.GitHub.Auth;
@@ -52,6 +53,8 @@ builder.Services.AddOptions<WorkerOptions>()
     .ValidateOnStart();
 
 builder.Services.AddReviewLlmFactory();
+builder.Services.AddPromptBudgeting(options =>
+    builder.Configuration.GetSection(ModelContextOptions.SectionName).Bind(options));
 builder.Services.AddAnthropicReviewLlm(options =>
     builder.Configuration.GetSection(AnthropicLlmOptions.SectionName).Bind(options));
 builder.Services.AddOpenAiReviewLlm(options =>

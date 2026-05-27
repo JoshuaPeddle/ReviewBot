@@ -10,6 +10,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using ReviewBot.Core.Context;
 using NSubstitute;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Llm;
@@ -59,6 +60,19 @@ public class CompositionRootTests
 
         scope.ServiceProvider.GetRequiredService<ICheckRunFetcher>()
             .Should().BeOfType<CheckRunFetcher>();
+    }
+
+    [Fact]
+    public async Task PromptBudgetingServicesAreRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<IModelContextRegistry>()
+            .GetContextWindowTokens("gpt-5.1")
+            .Should().Be(128_000);
+        scope.ServiceProvider.GetRequiredService<IPromptTokenEstimator>()
+            .Should().BeOfType<HeuristicTokenEstimator>();
     }
 
     [Fact]

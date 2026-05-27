@@ -10,11 +10,11 @@ public sealed record OpenAiLlmOptions
 
     public Uri? BaseUrl { get; set; }
 
-    public int MaxTokens { get; set; } = 4096;
+    public int MaxTokens { get; set; } = 8192;
 
     public float Temperature { get; set; } = 0.2f;
 
-    private string responseFormat = OpenAiResponseFormats.JsonObject;
+    private string responseFormat = OpenAiResponseFormats.Text;
 
     public string ResponseFormat
     {

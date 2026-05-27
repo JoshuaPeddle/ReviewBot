@@ -44,7 +44,7 @@ public sealed class OpenAiReviewLlmTests
         client.Requests.Should().ContainSingle()
             .Which.UserMessages.Should().ContainSingle();
         client.Requests[0].ModelName.Should().Be("gpt-test");
-        client.Requests[0].ResponseFormat.Should().Be("json_object");
+        client.Requests[0].ResponseFormat.Should().Be("text");
         client.Requests[0].IncludeContextRequestsInJsonSchema.Should().BeFalse();
     }
 
