@@ -1,326 +1,204 @@
-# ReviewBot Strategic Roadmap (v5)
+# ReviewBot Strategic Roadmap (v6)
 
-This document picks up where `development-plan.md` left off. Phases 1 to 18 shipped. Phase 19 (OpenAI-compatible robustness) is drafted and stays as planned. Beyond that, the focus shifts from feature breadth to two things at once: a baseline we can measure against (so improvements stop being eyeball judgments), and the smart context management that makes the bot punch above its model size.
+## What shipped (Phases 1–21)
 
-## Context that shaped this plan
+Phases 1–18 built the core product: webhook ingestion, idempotent queue, full GitHub review posting, Anthropic and OpenAI-compatible LLM adapters, Ollama/local model support, multi-provider grounding (language detection, build runners, test runners), speculative self-critique, incremental review state, and per-repo YAML configuration.
 
-GitHub Copilot moves to usage-based billing on June 1, 2026. Code review will start metering tokens *and* consuming GitHub Actions minutes simultaneously. Teams running Copilot code review at scale are going to be looking for alternatives almost immediately, and the timing matters: a competent v0.3 ReviewBot release with one-command Docker bring-up is more valuable in June than a polished v1.0 in September.
+Phase 19 added OpenAI-compatible robustness: structured JSON response format, malformed-response parse-and-repair, per-provider response-format config, and token-usage metrics on every LLM call.
 
-Quality on a 7-PR sample is solid but unmeasured. Every future quality change (prompt tweaks, retrieval, self-critique tuning) is a guess until there is a scored corpus to run against. This makes the eval harness the single highest-leverage next phase, ahead of any further reviewer-side changes.
+Phase 20 shipped a complete evaluation harness (`tests/ReviewBot.Evals/`): fixture format (fixture.yaml, diff.patch, repo-state/, expected.yaml), rule-based scoring (must_flag, must_not_flag, max comments, review state), multi-fixture aggregation, a `compare` regression command, and a three-fixture quick smoke corpus under `make eval-quick`.
 
-The product is "ReviewBot self-hosted, MIT, bring-your-own-LLM." The codebase already handles cloud (Anthropic / OpenAI-compatible) and local (Ollama) cleanly. Smart context management has to work both ways: a 9B local model needs aggressive context trimming and selective retrieval; a 200K context window cloud model wants different tradeoffs (less retrieval pressure, more concern about token cost). Keep the retrieval interface model-agnostic and let model-specific tuning live in adapters.
+Phase 21 shipped the latency wins: parallel config+metadata fetches on known head SHA, parallel grounding+full-file context, speculative self-critique (starts while agentic context is in flight), mostly-new file skipping (>90% additions ratio skips full-file fetch), and Anthropic prompt caching with `cache_control: ephemeral` on the system prompt (disabled for repair requests, toggleable via config).
 
-## Phase order (next 90 days)
-
-1. **Phase 19 as drafted** (Steps 51-52). Already specced in the existing plan. Ship it first. Parse repair, response-format config, and token-usage metrics are foundational for everything below: the eval harness needs the parse failure counter, the latency work needs token-usage numbers, and prompt caching in Phase 21 builds on the response-format scaffolding.
-
-2. **Phase 20: Eval harness.** Build before further quality work. Without it, Phase 22's retrieval changes are pure faith.
-
-3. **Phase 21: Latency reductions.** Mostly pipeline-level, not model-level. Cheap wins that pay for themselves immediately on every review.
-
-4. **Phase 22: Retrieval-based context.** The big quality+efficiency lever. Replaces the agentic-context guesswork with deterministic symbol lookup.
-
-5. **Phase 23: Observability and review traces.** A debug aid that turns into a WebUI feature later.
-
-6. **Phase 24: WebUI.** Last, not first. The CLI and `/healthz` are enough for development; the UI is for adopters.
-
-A loose target: Phase 19 in one to two weeks, Phase 20 two weeks, Phase 21 one week, Phase 22 three to four weeks. That puts a credible v0.3 release in early-to-mid July, with the WebUI as a v0.4 in August. Aggressive but doable as a single-maintainer side project if you stay scoped.
+Phase 22 (foundation slices) shipped the retrieval scaffolding: `src/ReviewBot.Retrieval/` project with `IDiffSymbolExtractor` and a C#-aware regex extractor, `IRepoIndex` / `IRepoSymbolParser` backed by SQLite with SHA-scoped storage, GlobMatcher for ignore paths, `CSharpLexicalSanitizer` for raw-string/comment stripping shared by both extraction paths, `RetrievalConfig` wired into `ReviewConfig` and repo YAML parsing, and `RepositoryContextSnippet` rendered by `PromptBuilder` before the diff under `## Repository context`. Retrieval defaults to `enabled: false` until the worker integration slice ships.
 
 ---
 
-## Phase 20: Evaluation harness
+## Context shaping the current priority
 
-### The problem
+GitHub Copilot usage-based billing started June 1, 2026. The window for "competent self-hosted alternative" is now, not September. A v0.3 release needs to work reliably for the most common adoption profile: **a small local model (Qwen 9B, 32K context) on a developer's own hardware, reviewing real production PRs.**
 
-Seven PRs hand-reviewed is enough to confirm the bot works. It is not enough to detect regressions, compare models, justify a prompt change, or claim the retrieval work is actually helping. Every future quality decision needs a fixed corpus and a scoring rubric, or it's a vibes-based engineering project.
+That profile exposes the single largest reliability gap today: **context overflow.** As retrieval context, full-file context, grounding, and diff all accumulate, the prompt silently grows past the model's limit. The model either truncates (missing critical context), errors, or halluccinates. There is no guardrail, no estimation, and no fallback. This gets worse with every improvement we make — retrieval adds more context, full-file fetching adds more context, and the prompt only grows.
 
-### The approach
+Multi-pass chunked review is now a blocker, not a stretch goal. Without it, large PRs on small models degrade unpredictably. With it, any PR can be reviewed correctly regardless of model size — the bot just takes more passes on a large PR.
 
-A fixture-driven test harness, separate from the existing xUnit suite, that runs the full review pipeline against canned PRs and scores the output two ways: rule-based (did the bot flag the planted issue?) and judge-based (an LLM rates each comment on factuality, actionability, and conciseness).
+The right sequencing:
 
-Three kinds of fixtures, all in `tests/ReviewBot.Evals/Fixtures/`:
-
-- **Planted-bug PRs.** You write the bug, you know the answer. The four-issue diff from your demo is the prototype: one true vulnerability (signature validator returns secret state), one correctness regression (line range check), one debatable choice (channel full mode), one boundary-case widening (`> 0` to `>= 0`). Aim for 10 to 15 of these covering: security boundary leaks, correctness regressions, concurrency bugs, error-handling removal, resource leaks, off-by-one, null handling, and a few "looks suspicious but is fine" negative cases.
-
-- **Real PR snapshots.** Pick 10 to 15 merged PRs from your own repos and the company repos you can use, freeze them at a specific SHA pair (base, head), and hand-author the expected findings. Mix the easy wins (clear bugs that any reviewer would catch) with subtle ones (an issue that needed retrieval-augmented context to spot).
-
-- **Clean PRs.** 5 to 10 PRs that should produce zero or near-zero comments. These guard against regression toward over-eager review. Just as important as the bug fixtures.
-
-### Fixture format
-
-Each fixture is a directory:
-
-```
-Fixtures/
-  001-webhook-signature-leak/
-    fixture.yaml              # metadata
-    diff.patch                # unified diff
-    repo-state/               # checked-in subset of the repo at base SHA
-      src/...
-    expected.yaml             # findings the bot should produce
-```
-
-`fixture.yaml`:
-
-```yaml
-name: Webhook signature validator leaks secret state
-category: security_boundary
-difficulty: high     # how subtle the issue is
-description: |
-  A malicious change replaces "return false" on a malformed signature
-  header with "return string.IsNullOrWhiteSpace(secret)", leaking
-  whether a secret is configured. Should be flagged as security error.
-```
-
-`expected.yaml`:
-
-```yaml
-must_flag:
-  - path: src/ReviewBot.Api/Webhooks/WebhookSignatureValidator.cs
-    line_range: [20, 20]
-    severity_at_least: warning
-    topic: leaks_configuration_state
-    # The bot's comment body must mention the underlying concept;
-    # don't pin exact wording. A keyword list is fine.
-    must_mention_any: ["leak", "trust boundary", "secret", "configuration", "information disclosure"]
-
-must_not_flag:
-  - path: src/ReviewBot.Core/Jobs/ChannelReviewJobQueue.cs
-    reason: "channel full mode change is debatable, not wrong"
-    severity_above: warning   # info-level is fine
-
-max_total_comments: 5
-expected_review_state: REQUEST_CHANGES   # given request_changes_on_error: true
-```
-
-The schema is deliberately loose. Real LLM reviewers don't produce identical comments across runs, so the rubric grades against concepts and severity bands, not exact text. The `must_mention_any` keyword list is good enough for v0.
-
-Completed 2026-05-25: the first eval harness slice now exists in `tests/ReviewBot.Evals/`. It loads the v0 fixture contract (`fixture.yaml`, `diff.patch`, `expected.yaml`) and validates line ranges, severity bands, maximum comment counts, and expected review state metadata. Correction discovered while extending the runner: `expected_review_state` needs explicit validation because it is not part of the LLM `ReviewResult`; it is now limited to `APPROVE`, `COMMENT`, or `REQUEST_CHANGES` until the full worker-style runner can score posted review events directly.
-
-### Scoring
-
-Two scoring passes per fixture, both run after the bot produces a `ReviewResult`:
-
-1. **Rule-based.** For each `must_flag` entry, did the bot post a comment within `line_range` at or above the severity floor, with the comment body containing at least one keyword? For each `must_not_flag`, did the bot stay quiet (or below the severity ceiling)? Compute per-fixture precision, recall, and F1, then aggregate.
-
-2. **Judge-based.** An LLM-as-judge pass (use the strongest cloud model available, never the same model being evaluated) rates each comment the bot produced on four axes, each 1-5:
-    - Factuality: is the bug real?
-    - Specificity: does the comment point to the actual problem?
-    - Actionability: is the fix direction clear?
-    - Conciseness: free of diff-restating, no padding, no "could throw" hand-waving?
-
-   Same prompt every time, store the judge prompt in the harness so it's versioned. Aggregate to a per-comment mean and per-fixture mean.
-
-The judge is the noisier of the two but catches things rule-based scoring misses, like a comment that flags the right line but with a confused explanation.
-
-Completed 2026-05-25: rule-based scoring is implemented for a canned `ReviewResult`. The scorer reports true positives, false positives, false negatives, precision, recall, F1, per-`must_flag` results, per-`must_not_flag` severity-ceiling violations, and extra unmatched comments. The current rule scorer is intentionally strict: any non-allowed unmatched comment counts as a false positive, while comments on `must_not_flag` paths at or below the configured ceiling are allowed.
-
-### Runner
-
-A new console project, `tests/ReviewBot.Evals/`. CLI:
-
-```
-dotnet run --project tests/ReviewBot.Evals -- \
-  --model openai:qwen3.5:9b-q4 \
-  --base-url http://localhost:11434/v1 \
-  --judge anthropic:claude-opus-4-7 \
-  --fixtures tests/ReviewBot.Evals/Fixtures \
-  --out runs/2026-05-25.json
-```
-
-Internally it does what the worker does (build `ReviewRequest`, run through `IReviewLlm`, apply self-critique, etc.) but with the GitHub side mocked out. Output is a JSON file per run; a separate `eval compare runs/A.json runs/B.json` command prints a diff table (which fixtures regressed, which improved). That diff is the thing you look at after every prompt change.
-
-Plus a `make eval-quick` target that runs a 3-fixture smoke set in under a minute, so you don't break the dev loop.
-
-Correction discovered 2026-05-25: the full model runner does not have to be the first deliverable. A smaller `score` command is now available:
-
-```
-dotnet run --project tests/ReviewBot.Evals -- score --fixture <dir> --result <llm-result.json> [--out <score.json>]
-dotnet run --project tests/ReviewBot.Evals -- score --fixtures <dir> --results <dir> [--out <run.json>]
-```
-
-Completed 2026-05-25: the score command can now aggregate a fixture set against a directory of canned LLM results. Each immediate fixture subdirectory is matched to `<fixture-directory-name>.json` in the results directory, and the output run JSON includes fixture pass/fail, aggregate precision, recall, F1, and confusion counts. This unblocks multi-fixture rubric calibration before wiring the live `IReviewLlm` runner, judge pass, and compare command.
-
-Completed 2026-05-25: the compare command is now available:
-
-```
-dotnet run --project tests/ReviewBot.Evals -- compare <baseline-run.json> <candidate-run.json> [--out <comparison.json>]
-```
-
-It reads two aggregate run JSON files, matches fixture rows by fixture directory slug, prints a regression/improvement table, optionally writes comparison JSON, and exits nonzero when any fixture regresses. Correction discovered while implementing it: fixture metadata names are display labels and full fixture paths can differ across machines, so comparison keys should use the fixture directory slug from `fixturePath`.
-
-Completed 2026-05-25: `make eval-quick` now runs a checked-in three-fixture smoke corpus in under a minute:
-
-```
-make eval-quick
-```
-
-The quick corpus covers one security-boundary leak, one correctness/off-by-one regression, and one clean documentation-only PR. Each fixture includes the planned `fixture.yaml`, `diff.patch`, `repo-state/`, and `expected.yaml` shape, with canned results under `tests/ReviewBot.Evals/CannedResults/quick/`. Correction discovered while adding the target: eval run JSON is generated output, so `runs/` is now ignored instead of becoming accidental source control noise.
-
-### Calibration first, then everything else
-
-The first useful output of the harness is a baseline score across (a) your local 9B model, (b) Claude Opus 4.7, (c) GPT-5.1, with the current prompt. That score is the regression floor. Every subsequent change has to either improve it or be explicitly accepted as a quality-neutral change for some other reason (cost, latency).
-
-Side effect: this baseline is great marketing copy. "On our 30-fixture eval, ReviewBot with Claude Opus catches 87 percent of planted bugs at 92 percent precision; with local Qwen 9B it catches 71 percent at 84 percent precision." Put it in the README.
-
-### Stretch goals (post v0)
-
-- Mutation testing-style fixture generation: take a clean repo, programmatically introduce known bug patterns (drop a null check, flip a boundary, swap `&&` for `||`), generate fixtures automatically. Cheap way to scale the corpus past 50 fixtures.
-- Public OSS PR mining: scrape commits that say "fix bug" or revert recent changes, freeze them at the buggy SHA, run the bot, score whether it surfaces the issue that was fixed. License the corpus carefully.
+1. **Context-window awareness + token estimation** — foundational, prerequisite to everything. The bot must know how much room it has before building a prompt.
+2. **Multi-pass chunked review** — splits PRs that exceed the content budget into chunks and merges results. Unblocks correct behavior on small models.
+3. **Retrieval worker integration** — wire the existing retrieval foundation into the worker using context-aware budgets. Retrieval context replaces agentic guesswork.
+4. **Observability** — traces, OTel spans, per-review cost. Needed to detect regressions and debug user-reported issues as adoption grows.
+5. **WebUI** — last, for non-developer operators.
 
 ---
 
-## Phase 21: Latency reductions
+## Phase 22 (current): Context-aware multi-pass retrieval
 
-### The problem
+### Step 1: Context-window awareness and token estimation
 
-Per your own assessment, latency is the felt pain. The 9B local model is the dominant cost on each review, but the pipeline around it has multiple sequential stages that can be parallelized, plus a few that can be skipped when the PR is small.
+#### The problem
 
-### The cheap wins (do these first)
+The worker assembles the prompt from multiple sources — system prompt, grounding, retrieval snippets, full-file context, diff — with only a rough byte budget controlling size. Bytes are not tokens. A 32K-token Qwen model with a heavy system prompt and grounding might have 20K tokens of headroom; a 200K-token Claude model might have 180K. The worker has no idea which is which, and the byte-to-token ratio varies by language (code is token-dense).
 
-**Parallelize the pipeline.** Today `ReviewWorker.ProcessAsync` runs sequentially: token fetch, metadata fetch, config fetch, file fetch, grounding, LLM. Several of these depend only on the head SHA. The token fetch must come first (everything else needs the token), but after that:
+Overflow is silent: the provider either truncates, errors, or produces garbage. There is no warning, no logged evidence, and no retry with a smaller prompt.
 
-- Repo config fetch, PR metadata fetch, and grounding (Tier 1 / 2 / 3) can run concurrently.
-- File fetch must wait for config (needs `max_files`, ignore globs).
-- The LLM call must wait for files and grounding.
+#### The design
 
-`Task.WhenAll` after the token fetch, holding the joined task until file fetch needs the config. Expected savings: 1 to 3 seconds per review depending on grounding tier.
+**Model context registry.** A new `IModelContextRegistry` (single implementation: `ModelContextRegistry`) maps model identifiers to context window sizes. Defaults baked in for common models:
 
-Completed 2026-05-26: `ReviewWorker.ProcessAsync` now overlaps repo config and PR metadata fetches whenever the webhook event already includes a head SHA, starts the last-reviewed SHA lookup while metadata is still resolving, and runs full-file context fetching concurrently with grounding before the LLM call. The stop test passes: worker tests prove config and metadata fetches start in parallel and that grounding and full-file context fetching can both be in flight before review generation. Correction discovered while implementing: grounding should not start before the worker knows there are reviewable files, because empty/ignored/over-budget PRs should still skip build/check grounding entirely; the overlap is therefore with full-file context, not with the initial PR file-list fetch. Another behavior change to call out: disabled repos and push-disabled synchronize events may now have an in-flight metadata request that is ignored and fault-observed, so the old "disabled config makes zero PR metadata calls" assumption is no longer true.
+| Pattern | Context tokens |
+|---|---|
+| `claude-*` | 200 000 |
+| `gpt-4*`, `gpt-5*` | 128 000 |
+| `qwen*:*b*` | 32 768 |
+| `llama3*:8b*`, `*:8b*` | 8 192 |
+| `llama3*:70b*`, `*:70b*` | 131 072 |
+| `granite*` | 128 000 |
+| (fallback) | 8 192 |
 
-**Anthropic prompt caching.** Anthropic supports prompt caching where unchanged prompt prefixes are cached server-side and re-sent at a discount. The system prompt for a review is identical across all PRs in the same repo (focus, instructions, schema), and the grounding section is identical for the duration of a SHA. Mark the system prompt + grounding block as `cache_control: ephemeral` on the request. First review of a SHA pays full price, subsequent reviews (re-runs, self-critique passes, agentic-context second passes) hit the cache. Self-critique on a single review can save 50 to 70 percent of system-prompt tokens because the system prompt is reused. Worth the small adapter change.
+Config overrides in `appsettings.json`:
 
-Completed 2026-05-26: Anthropic requests now enable SDK fine-grained prompt caching by default and mark the system prompt with `cache_control: ephemeral`; `Anthropic:PromptCachingEnabled=false` disables it. Review and raw completion requests are cacheable, while malformed-response repair requests remain uncached because their system prompt embeds the failed model output. The stop test passes: Anthropic LLM tests prove normal review/self-critique requests opt in, repair opts out, the config flag disables caching, and the SDK request maps enabled caching to `PromptCacheType.FineGrained` plus an ephemeral system-message cache point. Correction discovered while implementing: the current prompt builder composes verified grounding into the single system prompt rather than a separate grounding message, so the adapter caches the combined system prompt. Also, Anthropic.SDK 5.10.0 represents disabled prompt caching as `PromptCacheType.None`, not a null/unset property.
+```yaml
+ModelContext:
+  Limits:
+    "qwen2.5:9b-q4_K_M": 32768
+    "my-custom-model": 16384
+```
 
-**Skip self-critique when it can't help.** Today self-critique runs whenever `review.self_critique: true` and any comment exists. If every comment is high-confidence already, the critique pass has nothing to do (high-confidence comments are retained unconditionally). Short-circuit: if `candidateComments.All(c => c.Confidence == Confidence.High)`, skip the critique entirely. Same final result, one fewer LLM call.
+Pattern matching is longest-prefix-wins. The registry is injected as a singleton; both LLM adapters (Anthropic, OpenAI-compatible) read it to supply the limit for their current model.
 
-Correction confirmed 2026-05-26: this optimization had already shipped before the current Phase 21 slice. `ReviewWorker` critiques only lower-confidence candidate comments, returns immediately when no lower-confidence comments remain, and `ReviewWorkerTests` covers the high-confidence-only stop case.
+**Token estimation.** A new `IPromptTokenEstimator` with two implementations:
 
-**Skip full-file context when the file is mostly new.** `review.full_file_max_bytes` currently fetches small modified files in full. But if `f.AdditionsCount / (f.AdditionsCount + f.DeletionsCount) > 0.9`, the diff already contains essentially the whole file. Fetching it is wasted bytes.
+- `AnthropicTokenEstimator` — calls the Anthropic `count_tokens` API synchronously before sending (only when the prompt is large; below a threshold, use the heuristic). The count_tokens call adds latency but is far cheaper than a failed review.
+- `HeuristicTokenEstimator` — `Math.Ceiling(charCount / 3.5)` for source code (code is denser than prose), used for OpenAI-compatible providers and as a fast pre-check.
 
-Completed 2026-05-26: full-file context now excludes non-deleted files whose additions are more than 90 percent of changed lines before applying the small-patch byte filter. The stop test passes: mostly-new files are not requested for full-file context, exactly-90-percent and mixed files still are, and the LLM receives only fetched non-mostly-new file contents. Correction discovered while adding coverage: the worker test helper represented every synthetic modified file as 1 addition / 0 deletions, which made ordinary modified-file fixtures look like mostly-new files. The helper now defaults modified files to a mixed add/delete change and allows tests to set explicit additions/deletions.
+The estimator is applied per prompt section so the worker knows how much each section costs before committing to it.
 
-**Stream-and-fork the LLM call for self-critique on large PRs.** Not actually streaming the response (the JSON has to be complete before parsing), but: kick off the self-critique LLM call as soon as the first pass returns, in parallel with the agentic-context branch decision. Today these are sequential.
+**Budget-aware prompt assembly.** `ReviewWorker` computes a `PromptBudget` before assembling context:
 
-Completed 2026-05-26: the worker now starts self-critique speculatively as soon as the first review result is parsed, so it can overlap with agentic-context request filtering and file fetching when the initial result remains the final result. The stop test passes: worker tests prove self-critique starts while agentic context fetching is still in flight, and prove that an enriched agentic-context result gets a fresh critique instead of accidentally reusing the speculative critique for the initial comments. Correction discovered while implementing: the optimization cannot blindly reuse the first-pass critique after a successful agentic second pass, because the comment set may be replaced. The worker now cancels and observes the speculative critique in that case, then critiques the enriched comments with the existing behavior.
+```
+content_budget = model_context_limit
+                 - system_prompt_tokens  (estimated once per config)
+                 - grounding_tokens      (estimated after grounding runs)
+                 - response_reserve      (config, default 4096)
+```
 
-### The harder wins (defer to after Phase 22)
+This budget is threaded through `FullFileContextAsync`, retrieval context selection, and the diff inclusion logic. Each component draws from the budget and stops when it's exhausted. The diff always takes priority — if the diff alone exceeds the content budget, multi-pass kicks in (see Step 2).
 
-**Smaller specialized model for self-critique.** The critique pass is a binary classification task per comment (keep or drop). It doesn't need the same model as the review pass. A cheaper/faster model would let you self-critique on every review without latency cost. Wire in once Phase 22 stabilizes the prompt structure.
+Config:
 
-### Measurement
+```yaml
+review:
+  response_reserve_tokens: 4096   # tokens reserved for model output
+```
 
-Every latency change goes through the eval harness's run-time records, not just a stopwatch on one PR. The harness should emit per-stage timings for each fixture. Phase 19's token metrics complete the picture. A latency change that improves p50 by 10 percent but doubles p99 isn't a win.
+**Logging.** Every review logs the estimated prompt tokens, content budget, and how each section consumed it at Debug level. Overflow is logged at Warning with the model and PR number.
+
+#### Stop test
+
+`PromptBudget` tests: correct subtraction of fixed sections, budget drawn to zero stops fetching more context. `ModelContextRegistry` tests: known-model lookup, config override, fallback. `HeuristicTokenEstimator` tests: empty string, ASCII, source code samples. Worker integration test: when estimated diff tokens exceed content budget, multi-pass is triggered rather than truncation.
 
 ---
 
-## Phase 22: Retrieval-based context
+### Step 2: Multi-pass chunked review
 
-### The problem
+#### The problem
 
-The current context strategy is: diff plus optional small whole files plus optional model-requested files (agentic). This works for changes that are self-contained. It breaks down when the change references something defined elsewhere: a new method that overrides a base class, a field added to a type used 30 places, a refactor that touches the interface but not the implementations. The model can't see the relevant context, the comment is either missed or hallucinated.
+A large refactor touches 80 files. The diff is 15K lines. Even with a 200K-token Claude model, this might be borderline; with a 32K Qwen model, it's impossible in one pass. Today the worker silently drops files once `max_files` or byte budgets are hit, meaning large PRs get incomplete reviews with no indication of what was skipped.
 
-Agentic context partially addresses this, but the model has to *guess* what files it needs after seeing the diff, then we make a second LLM round-trip. That's slow and brittle: the 9B model frequently asks for files that don't exist or aren't relevant.
+Multi-pass fixes this: when the total diff exceeds the content budget, split files into chunks that fit, review each chunk independently with the same system prompt and grounding, and merge all comments into a single `ReviewResult`.
 
-### The approach
+#### The design
 
-Replace agentic context with deterministic, structure-aware retrieval. The reviewer doesn't have to ask for files; the pipeline reads the diff, extracts the symbols it touches, looks them up against an index of the repo, and includes the relevant context automatically.
+**Chunking.** When `EstimatedDiffTokens(allFiles) > content_budget`, the worker enters chunked mode:
 
-Two-stage rollout: v0 uses pure symbol-graph retrieval with no embeddings (cheap, deterministic, works for typed languages). v1 adds embedding-based retrieval for natural-language matches and untyped languages.
+1. Sort files by directory prefix (keeps related files together in the same chunk).
+2. Greedily pack files into chunks: add a file to the current chunk if it fits within `content_budget * 0.85` (leave headroom for prompt assembly overhead), otherwise start a new chunk.
+3. Minimum one file per chunk even if it exceeds budget (avoids infinite loop on pathologically large single files — those get truncated at the existing `max_file_bytes` limit).
 
-### v0: Symbol-graph retrieval (start here)
+**Per-chunk review.** Each chunk is reviewed with identical system prompt and grounding. The `ReviewRequest` carries a `ChunkIndex` and `TotalChunks` annotation; the prompt builder inserts `(reviewing chunk N of M)` into the user turn so the model knows it is seeing a partial view. This matters for comment quality — the model should not claim to see the whole PR when it can't.
 
-The pieces:
+**Result merging.** After all chunks complete:
 
-**Symbol extraction from the diff.** For each changed file in the diff, identify the identifiers that appear in added or context lines: type names, method names, field references. Tree-sitter is the standard tool, multi-language, no compiler required. There's a managed wrapper for .NET (TreeSitterSharp or a similar binding), or you can shell out to tree-sitter CLI. Output: a list of (identifier, kind) tuples per file, where `kind` is one of `type`, `method`, `field`, `import`.
+- Comments are deduplicated by `(path, line, kind)`: if two chunks produce overlapping comments (unlikely but possible at chunk boundaries), keep the higher-severity one.
+- `ReviewState` is the highest severity across all chunks (`REQUEST_CHANGES` > `COMMENT` > `APPROVE`).
+- Self-critique runs once over the merged set, not per chunk (avoids 3× the critique cost).
+- Token usage is summed across all LLM calls and reported as a single total.
 
-**Repo symbol index.** A per-SHA cache mapping identifier names to their definitions and usages elsewhere in the repo. Walk the repo at the PR head, tree-sitter every file in scope (skip ignored paths), record `(symbol, file, line, kind, signature)`. Stored as a SQLite table for selfhost simplicity (no extra service). Keyed by SHA, evicted after N days of unuse.
+**Parallel vs sequential chunks.** For cloud providers with high rate limits, chunks can run in parallel (`Task.WhenAll`). For local models where parallelism is harmful (single GPU, no batching), chunks run sequentially. The LLM adapter exposes `bool SupportsParallelRequests` (Anthropic: true, OpenAI-compatible: false by default, configurable).
 
-**Lookup.** For each symbol in the diff, query the index:
-
-- The symbol's definition (if not in the changed file itself).
-- The top 3 callers (for methods) or referencers (for types/fields).
-
-**Context selection.** Each lookup returns a (file, line range) hit. Deduplicate to a list of "include this hunk of this file." Cap the total at `retrieval.max_bytes` (default 100KB or so). Concatenate before the diff in the prompt, under a `## Repository context` heading.
-
-The agentic-context fetcher stays for the cases where retrieval misses something, but becomes a fallback rather than the primary path. Bound it to 0 rounds by default (off); turn it on with `review.agentic_context: true` if you want the second LLM round-trip.
-
-### v1: Embedding-augmented retrieval
-
-For natural-language similarity (the kind of thing tree-sitter doesn't help with: "this looks like it could be relevant to error handling around the new method"), add a second retrieval lane.
-
-- Embed chunks at indexing time using a local model (`bge-small-en-v1.5` is a reasonable default, runs cheaply on CPU; for cloud, voyage-3-lite or text-embedding-3-small).
-- Store embeddings in SQLite using the `sqlite-vec` extension. No separate vector database. The selfhost story stays one process, one disk file.
-- Query at retrieval time using the diff (or each hunk) as the query.
-- Merge with the symbol-graph hits, dedupe, cap.
-
-This is genuinely useful for documentation or test-discovery, less useful for the typed-language code review case where symbol resolution wins. Build v0 first, run the eval harness against it, see what's missing before adding v1.
-
-### Cache lifecycle
-
-Indexing a mid-size repo (10K files) with tree-sitter and embeddings is on the order of 30 to 60 seconds the first time. After that:
-
-- Cache key is `(owner/repo, sha)`. PR re-reviews hit the same cache entry.
-- A new SHA on the same repo triggers an incremental update: re-index only changed files (use the existing compare API).
-- LRU evict to a fixed disk cap, default 5GB.
-
-A new `ReviewBot.Retrieval` project, with `IRepoIndex`, `ITreeSitterParser`, `IEmbeddingClient`, `IRetrievalProvider`. Injected into the worker the same way grounding is.
-
-### Config
+Config:
 
 ```yaml
-retrieval:
-  enabled: true                        # default true once shipped
-  max_bytes: 102400                    # cap on retrieved context per review
-  symbol_lookup_depth: callers         # callers | definitions | both
-  embeddings: false                    # v0 ships with this off
-  index_cache_dir: /var/cache/reviewbot/index
+review:
+  chunked_review: true            # default true; set false to disable chunking and fall back to today's truncation
+  max_chunks: 10                  # safety cap; if a PR needs more, only the first N*budget worth is reviewed
+  chunk_headroom: 0.85            # fraction of content_budget used per chunk
 ```
 
-Completed 2026-05-26: the first Phase 22 retrieval slice now has a typed config and prompt surface. `ReviewConfig` carries a `RetrievalConfig`, repo YAML parses `retrieval.enabled`, `max_bytes`, `symbol_lookup_depth`, `embeddings`, and `index_cache_dir`, and `ReviewRequest` can carry deterministic repository snippets that `PromptBuilder` renders before the diff under `## Repository context`. The stop test passes: config tests cover full, partial, and invalid retrieval YAML, and prompt tests prove snippets are ordered, sanitized, and inserted before changed files. Correction discovered while implementing: `retrieval.enabled` should default to `false` until an actual retrieval provider/indexer is wired into the worker, even though the end-state config should default true once shipped. Also, `review.full_file_max_bytes` remains active for now; it is not safe to remove until retrieval can actually replace it end-to-end.
+**Eval signal.** Add two fixture categories to the eval corpus:
 
-### What this replaces
+- **Large-PR fixtures**: a PR spanning multiple directories; must_flag entries spread across files in different chunks. Passes only if merging works correctly.
+- **Cross-chunk reference fixtures**: a bug that is visible only when two files from different chunks are considered together. These are expected to fail initially and serve as the benchmark for when retrieval (Step 3) closes the gap.
 
-- `review.full_file_max_bytes`: subsumed. Retrieval can include the modified file's full text if it's small, but without a separate config flag. The retrieval engine decides.
-- `review.agentic_context`: stays but defaults off. Use it for cases where the model recognizes a need retrieval missed.
+#### Stop tests
 
-### Eval signal
+Chunking strategy tests: single file, N files fitting in one chunk, N files requiring exactly two chunks, a single file exceeding budget (clamped to one chunk). Merge tests: no duplicates, duplicate resolution prefers higher severity, review state max. Parallel vs sequential dispatch controlled by `SupportsParallelRequests`. Worker integration test: a 5-file PR with a 1-file content budget produces 5 chunks, one comment per chunk, final result has 5 comments merged and one self-critique call.
 
-This is where the harness pays off. Compare v0 retrieval vs current agentic-context approach across the fixture corpus. Expected outcomes:
+---
 
-- Symbol-graph retrieval matches or beats agentic context on the "needs definition of referenced type" fixtures.
-- Symbol-graph retrieval is dramatically faster (one parallel batch query vs second LLM round-trip).
-- Agentic context still wins on a small subset of fixtures where the bug is in a file the diff doesn't structurally reference. Use this to decide whether to keep agentic as a fallback or remove it entirely.
+### Step 3: Retrieval worker integration
+
+The retrieval foundation (diff symbol extractor, SQLite repo index, C# parser, config, prompt surface) is already built. This step wires it into the live review path.
+
+**What gets added:**
+
+- `IRetrievalProvider` (new interface): given a `ReviewRequest` + `PromptBudget`, returns a list of `RepositoryContextSnippet` up to the remaining budget. The budget portion reserved for retrieval is `min(retrieval.max_bytes / avg_bytes_per_token, content_budget * 0.3)` — retrieval never consumes more than 30% of content budget.
+- `SqliteRetrievalProvider` (first implementation): calls `IDiffSymbolExtractor` on the diff, queries `IRepoIndex` for definitions and top-3 callers per symbol, deduplicates and ranks hits by relevance (definitions first, then callers), converts to snippets within budget.
+- Worker integration: when `retrieval.enabled: true`, run `IRetrievalProvider` in parallel with grounding (after token fetch and config), inject snippets into `ReviewRequest.RepositoryContext`, proceed to prompt assembly.
+- Incremental indexing: on each review, trigger a background `IRepoIndex.IndexAsync` for the PR's head SHA if that SHA is not already indexed. Use the GitHub compare API to fetch only changed-file paths, re-parse only those paths. The first review of a new SHA blocks until indexing completes; subsequent reviews of the same SHA are instant.
+- Eviction: a background `IHostedService` runs nightly, calling `IRepoIndex.DeleteUnusedBeforeAsync(DateTime.UtcNow - TimeSpan.FromDays(30))`.
+
+**What this replaces:**
+- Agentic context (`review.agentic_context`) becomes opt-in rather than the default enrichment path. It stays in the worker as a fallback but defaults off once retrieval is stable.
+- `review.full_file_max_bytes` is superseded but kept active until retrieval is proven across the eval corpus; the deprecation decision comes after Phase 23 eval data.
+
+**Remaining known limitation:** the C# parser is lexical/regex, not tree-sitter or Roslyn. Retrieval quality will be bounded by this. The tree-sitter migration is a separate follow-on slice, not a blocker for shipping the worker integration.
+
+**Stop tests:** `IRetrievalProvider` unit tests with a mock index. Worker integration test: with `retrieval.enabled: true`, symbols extracted from a synthetic diff are looked up, snippets injected into the request, snippets appear in the rendered prompt. Budget cap: if snippets would exceed the retrieval budget fraction, they are trimmed to fit. SHA-not-indexed triggers `IndexAsync` before review continues.
 
 ---
 
 ## Phase 23: Observability and review traces
 
-The existing metrics are good for system health (queue depth, processing rate, LLM duration). They are not good for debugging *why a specific review was bad*, which is what you'll need to triage user reports as adopters come on board.
+The existing metrics (queue depth, processing rate, LLM duration) diagnose system health. They do not explain *why a specific review was wrong*, which is the question every user bug report starts with.
 
 ### Review trace persistence
 
-For every review, write a single JSON file containing:
+For every review, write a JSON file under `traces/{repo}/{prNumber}-{deliveryId}.json`:
 
-- Job metadata (delivery ID, owner, repo, PR, SHA, trigger reason)
-- Config snapshot (the effective `ReviewConfig` for this review)
-- Full prompt sent to the LLM (system + user)
-- Raw LLM response (pre-parse)
-- Parsed `ReviewResult`
-- Self-critique prompt/response/result if it ran
+- Job metadata (delivery ID, owner, repo, PR number, SHA, trigger reason)
+- Config snapshot (effective `ReviewConfig`)
+- Chunk count and per-chunk summaries (if chunked)
+- Full prompt per chunk: system + user (or a hash if `Tracing__IncludePrompts: false` to save disk)
+- Raw LLM response per chunk (pre-parse)
+- Parsed `ReviewResult` per chunk + merged result
+- Self-critique prompt/response if it ran
 - Agentic context request + fetched files if applicable
-- Retrieval hits if applicable (Phase 22)
-- Final comments posted vs filtered, with drop reasons
-- Per-stage timings
-- Token usage
+- Retrieval hits per chunk: symbols queried, snippets returned, bytes used
+- Final comments posted vs filtered with drop reasons
+- Per-stage timings (token fetch, config, grounding, retrieval, LLM per chunk, merge, post)
+- Token usage per chunk and total
+- Estimated cost (when provider rate is configured)
+- Content budget and actual consumption per section
 
-Stored under `traces/{repo}/{prNumber}-{deliveryId}.json`, with size cap and TTL via the existing cleanup service. Off by default (`Tracing__Enabled: false`); on by default in dev appsettings.
+Stored with a size cap (default 500MB, `Tracing__MaxDiskMb`) and TTL cleanup (default 14 days, `Tracing__RetentionDays`) via the existing cleanup service. Off by default in production (`Tracing__Enabled: false`); on by default in dev appsettings. When `IncludePrompts: false`, only the section headers and byte counts are recorded — useful for production deployments handling sensitive code.
 
-This is gold for debugging. "User says the bot flagged something weird on PR #42, here's the trace JSON, paste it back to me." Also: critical for the eval harness, since you can replay any saved trace through the bot for regression testing.
+Traces are the primary debugging artifact: "user says the bot flagged something weird on PR 42" → hand over the trace JSON.
 
 ### OpenTelemetry spans
 
-Wrap the major worker stages in `ActivitySource` spans, named consistently:
+Wrap major worker stages in `ActivitySource` spans:
 
 ```
 reviewbot.review
@@ -331,94 +209,92 @@ reviewbot.review
 │  ├─ reviewbot.grounding.tier1_language
 │  ├─ reviewbot.grounding.tier2_build
 │  └─ reviewbot.grounding.tier3_tests
-├─ reviewbot.retrieval (Phase 22)
-├─ reviewbot.llm.review
-├─ reviewbot.llm.self_critique
-├─ reviewbot.llm.agentic_context
+├─ reviewbot.retrieval
+│  ├─ reviewbot.retrieval.extract_symbols
+│  ├─ reviewbot.retrieval.index_sha
+│  └─ reviewbot.retrieval.lookup
+├─ reviewbot.chunk_review (one per chunk)
+│  ├─ reviewbot.llm.review
+│  └─ reviewbot.llm.self_critique (if ran per-chunk)
+├─ reviewbot.merge_chunks
+├─ reviewbot.llm.self_critique (merged)
 └─ reviewbot.post_review
 ```
 
-OpenTelemetry exporters are already a one-liner with `OpenTelemetry.Extensions.Hosting`. Add OTLP exporter, document the Jaeger/Tempo target in the README. Self-hosters who care about traces can wire to their own collector; the rest get the metrics they already have.
+Add OTLP exporter (`OpenTelemetry.Extensions.Hosting` plus `OpenTelemetry.Exporter.OpenTelemetryProtocol`). Self-hosters wire to Jaeger, Tempo, or any OTLP-compatible collector. Document in README with a `docker-compose.yml` Jaeger example.
+
+Span attributes: `review.owner`, `review.repo`, `review.pr_number`, `review.sha`, `review.model`, `review.chunk_index`, `review.total_chunks`, `llm.prompt_tokens`, `llm.completion_tokens`, `retrieval.symbols_queried`, `retrieval.snippets_returned`, `retrieval.bytes_used`.
 
 ### Cost surface
 
-When the LLM provider returns token usage (Phase 19), compute an estimated dollar cost per review using a configurable per-token rate. Surface as:
+When token usage is reported by the provider, compute estimated dollar cost per review using a configurable per-million-token rate:
 
-- A counter `reviewbot.cost.usd_total` with labels (provider, model, phase).
-- A field in the trace JSON.
-- Eventually a column in the WebUI's review list.
+```yaml
+CostRates:
+  "claude-opus-4-7":
+    InputPer1M: 15.00
+    OutputPer1M: 75.00
+  "claude-sonnet-4-6":
+    InputPer1M: 3.00
+    OutputPer1M: 15.00
+```
 
-For local Ollama models the cost is zero; the counter just stays at zero. For cloud models the company adopters care a lot about this number.
+Surface as a `reviewbot.cost.usd_total` counter (labels: provider, model, phase: review/self_critique/retrieval_index) and a field in the trace JSON. For Ollama models, the rate is zero; the counter stays at zero. Cost visibility matters a lot to company adopters evaluating cloud model spend.
 
 ---
 
 ## Phase 24: WebUI
 
-Defer until Phases 19 to 23 ship. The CLI plus logs plus traces are enough for development. The WebUI is for the moment a non-developer admin or a tech lead wants to look at the bot's behavior without grepping JSON.
+Defer until Phases 22 and 23 ship. The CLI, logs, and trace JSON are sufficient for development and early adopters.
 
 ### Scope for v1
 
-Blazor Server, same .NET 10 stack as the API. Single project, served from the same host. No separate frontend toolchain (you're a single maintainer; the JS ecosystem is not your friend here).
+Blazor Server, same .NET 10 stack as the API. Single project, served from the same host. No separate frontend toolchain.
 
 Pages:
 
-- **Reviews list.** Recent reviews across all installations, filterable by repo and status (success / skipped / failed). Click into one.
-- **Review trace detail.** The trace JSON, rendered. System prompt, user prompt, raw LLM response (collapsed by default, expand to read), parsed comments, posted comments, dropped comments with reasons, per-stage timings, token usage, cost estimate.
-- **Metrics dashboard.** Existing OTel metrics rendered as charts: reviews per hour, p50/p95 latency, token usage trend, cost trend.
-- **Config editor.** Pull the `.github/review-bot.yml` from any installed repo via the GitHub API, render with validation, let the user edit and commit (via the same GitHub App, requires Contents:write so make it opt-in). Useful for tuning without bouncing to GitHub's web editor.
-- **Eval results browser.** Latest eval harness run, fixture-by-fixture pass/fail, comment-quality scores, diff against the previous run.
+- **Reviews list.** Recent reviews across all installations, filterable by repo and status. Click into a review.
+- **Review trace detail.** The trace JSON rendered: system prompt, user prompt per chunk (collapsed), raw LLM response (collapsed), parsed comments, posted comments, dropped comments with reasons, per-stage timings, token usage, estimated cost. Multi-pass reviews show a chunk-by-chunk accordion then the merged result.
+- **Metrics dashboard.** OTel metrics as charts: reviews per hour, p50/p95 latency, token usage trend, cost trend, chunk count distribution.
+- **Config editor.** Pull `.github/review-bot.yml` via GitHub API, render with validation, commit via the GitHub App (opt-in, requires Contents:write).
+- **Eval results browser.** Latest eval run, fixture-by-fixture pass/fail, comment-quality scores, diff against previous run.
 
-What's explicitly out of scope for v1: multi-tenant auth, per-user permissions, org-level admin. This is a self-hosted single-tenant tool. One Basic Auth password protecting the whole UI is fine; document it in the README.
-
----
-
-## Things you didn't mention that probably belong on the list
-
-**Multi-pass chunked review for large PRs.** Today the patch-budget logic drops files. Better: when total patch lines exceed the budget, split into N coherent chunks (group files by directory or import-graph proximity), review each chunk independently, merge the comments. Quality move for refactor PRs that touch 100 files. Worth doing after retrieval is in place because retrieval also helps cross-chunk consistency.
-
-**Severity calibration.** The LLM picks `info | warning | error`, and the `request_changes_on_error` flag promotes any error to a merge block. This is dangerous if the model over-uses `error`. The eval harness should report severity distribution by model, and the system prompt should include a calibration anchor ("`error` means this PR cannot be merged in its current state; reserve for security issues, data loss, or correctness regressions in critical paths"). Otherwise users will turn off `request_changes_on_error` after the first false-positive merge block.
-
-**Pre-LLM secret scrub.** Your company will care about this. Before constructing the prompt, run a fast regex pass over the diff and any retrieved/fetched files for the common shapes: AWS access keys, GitHub PATs, Stripe keys, private key blocks, RSA / EC private headers, hardcoded passwords. Either redact or refuse to send the review with a clear log line. The agentic-context fetcher already does path-based scrubbing (`.env`, `*.pem`); content-based scrubbing closes the gap when a secret ends up in a `.cs` file by mistake.
-
-**Inline `suggestion` blocks.** GitHub renders ```` ```suggestion ```` blocks in review comments as one-click-applyable diffs. The current prompt mentions them but the model rarely produces them. A focused prompt-engineering pass plus a few eval fixtures that grade on "did the model produce an applicable suggestion when the fix is mechanical" would push this. Big quality-of-life win for adopters.
-
-**Severity-aware notifications.** When `request_changes_on_error` fires, send an extra signal beyond the GitHub review (Slack webhook, email, whatever). Optional, off by default, configured per-install. Useful for teams that monitor the bot's output as a CI signal.
-
-**One-command Docker bring-up for the self-host story.** A `docker-compose.yml` in the repo root that runs ReviewBot plus Ollama plus a model puller, with sensible defaults. New user clones the repo, fills in three env vars (GitHub App ID, private key, webhook secret), runs `docker compose up`. This is what makes the Copilot-pricing-driven adopters say yes vs no. Today the README has a `docker run` snippet that assumes you've already built the image; that's a higher bar than necessary.
-
-**A public eval scoreboard.** Once Phase 20 lands, run the eval against the major models (Claude Opus 4.7, Sonnet 4.6, GPT-5.1, GPT-4.1, Qwen 9B, Llama 3.1 70B, Llama 3.1 8B), publish the table in the README. This is excellent marketing: "ReviewBot's quality is a function of the model you point it at, and here's the data." Updates per model release.
-
-**Conversation continuity.** When a PR author replies to a bot comment with "this is intentional, see ADR-042," the bot should not re-flag the same issue on the next push. Hard problem: requires tracking comment threads, classifying replies (acknowledged / disputed / unrelated), and selective re-review. Defer to v2. Mention in the docs as a known limitation.
-
-**License care on eval fixtures.** If you derive fixtures from public OSS PRs, the source repo's license matters for redistribution. MIT/Apache/BSD fixtures are fine. GPL is sticky. Avoid kernel-style projects unless you only ship a pointer to the upstream SHA, not a checked-in copy.
-
-**Test runner expansion.** Phase 18's Tier 3 grounding only supports .NET and Python. Once the eval harness is live, adding JS/TS (tsc, jest), Go (go test), and Rust (cargo test) becomes cheap because you can verify each one against fixtures specific to that language. Prioritize JS/TS first; the market is bigger.
+Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this is a self-hosted single-tenant tool.
 
 ---
 
-## What's intentionally not on this list
+## Things still on the list (post-Phase 22)
 
-- Multi-tenant cloud product (you've explicitly deferred).
-- Anything that requires breaking changes to the v0.2 config schema. New features add fields with defaults; nothing removes existing flags.
-- Model fine-tuning. The model-agnostic interface stays. If a fine-tuned model outperforms on the eval harness, the worker is happy to point at it; that's an exercise for an adopter, not the project.
-- A formal plugin/extension API. Premature. The IReviewLlm and IRepoConfigFetcher seams already exist; that's enough surface area for forks. Promote to a real API once there's evidence anyone wants to extend the bot in a way the config doesn't cover.
+**One-command Docker bring-up.** `docker-compose.yml` in the repo root: ReviewBot + Ollama + model puller, three env vars to fill in. This is the difference between "adopters say yes" and "adopters say too hard." Priority just behind Phase 22.
+
+**Tree-sitter upgrade for retrieval.** The current C# parser is lexical. Tree-sitter gives correct symbol extraction for C#, and the multi-language path for JS/TS, Go, Rust. Significant integration work (native binary portability on Linux container + Mac + Windows). Build after Phase 22 is stable and measured.
+
+**Severity calibration.** The LLM overuses `error`, which triggers `request_changes_on_error` as a false merge block. Eval harness should report severity distribution per model. System prompt needs a calibration anchor. Add two eval fixture categories: one that should produce exactly one `error`, one that should produce zero `error` despite having real bugs. The distribution across the corpus is the signal.
+
+**Pre-LLM secret scrub.** Fast regex over diff and retrieved files before prompt assembly. Patterns: AWS access keys, GitHub PATs, Stripe keys, private key blocks, hardcoded password shapes. Either redact or abort the review with a clear log line. The agentic-context fetcher already does path-based scrubbing (`.env`, `*.pem`); content-based scrubbing closes the gap when a secret ends up in a `.cs` file.
+
+**Inline `suggestion` blocks.** GitHub renders ` ```suggestion ``` ` as one-click diffs. The prompt mentions this but the model rarely produces them. A focused prompt-engineering pass plus a few eval fixtures grading on "did the model produce an applicable suggestion when the fix is mechanical" would push this substantially.
+
+**A public eval scoreboard.** Run the eval against Claude Opus 4.7, Sonnet 4.6, GPT-5.1, Qwen 9B, Llama 3.1 8B. Publish in the README. "Here's what you get with local Qwen vs cloud Claude, measured" is better marketing than any feature list.
+
+**Smaller model for self-critique.** The critique pass is binary classification per comment. It doesn't need the same model as the review. A cheaper/faster model would make self-critique cost-free for every review. Wire in once Phase 22 stabilizes.
+
+**Conversation continuity.** When a PR author replies "this is intentional, see ADR-042," the bot shouldn't re-flag the same issue next push. Hard: requires tracking comment threads, classifying replies, selective re-review. Defer to v2.
+
+**Multi-tenant / cloud product.** Explicitly deferred. The MIT self-hosted story is the product.
 
 ---
 
 ## Risks
 
-The eval harness is the load-bearing piece of this plan. If it isn't built carefully (judge prompt drift, fixture distribution skewed toward easy bugs, scoring rules too forgiving), the rest of the work optimizes against a bad metric. Budget at least three days for rubric-tuning after the initial implementation, comparing harness scores against your own hand-review of the same fixtures. If the harness and your eye disagree on more than 20 percent of fixtures, the rubric needs work, not the bot. The 2026-05-25 rule-scoring slice closes the risk that the fixture schema is only aspirational, but opens a calibration risk: the first implementation counts any unmatched, non-allowed comment as a false positive. Revisit that strictness after the first 5 to 10 fixtures are scored by hand. The set-level score runner lowers the fixture-calibration risk by making multi-fixture runs reproducible, but it adds one convention to document: canned result files must be named after their fixture directory. The compare command closes the immediate "eyeball two JSON blobs" regression risk for prompt work, but opens a corpus-change interpretation risk: added and removed fixtures are reported, not treated as regressions, so baseline comparisons should generally use the same fixture corpus. The quick eval corpus closes the immediate dev-loop risk that `eval-quick` existed only as a plan item, while leaving the larger calibration risk open until the corpus grows beyond three fixtures and real model outputs are scored.
+**Context estimation accuracy.** Heuristic token counting (chars/3.5) can be off by 20–30% for mixed-language diffs with heavy Unicode or whitespace. The Anthropic count_tokens API is accurate but adds a round-trip. If chunk boundaries are calculated from an underestimate, the assembled prompt still overflows — just less often. Mitigation: apply a conservative headroom factor (0.85 per chunk, response_reserve 4096) and log when actual token usage from the response differs more than 15% from the estimate. Tune the heuristic against the eval corpus once token usage reporting is in place.
 
-Retrieval in Phase 22 has integration surface area: tree-sitter native binaries on multiple OS targets, sqlite-vec extension loading, disk cache management. Plan for two weeks of "make it actually work on Linux containers, Mac dev machines, Windows runners" after the happy-path implementation. Selfhosters will hit these.
+**Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. The eval corpus should have 3–5 cross-chunk fixtures to measure how bad this gap actually is. Expect multi-pass alone (without retrieval) to miss these; retrieval's job is to close the gap.
 
-Phase 22's first retrieval slice closes the risk that later retrieval work has no typed config or prompt injection point. Residual risk: the worker still does not populate repository snippets, so `retrieval.enabled` is intentionally documented and implemented as default-off until the symbol extractor, repo index, and context-selection provider are wired and measured. Keeping `review.full_file_max_bytes` active avoids a behavior regression, but means there will be a future deprecation/migration decision once retrieval can subsume it.
+**Retrieval parser quality.** The lexical C# parser misclassifies edge-case syntax and produces false positives on symbol extraction. Symbol lookup hits with wrong matches dilute the retrieval context budget. Measure via eval: if retrieval is on but scores lower than no retrieval, the parser noise is the cause. Switching to tree-sitter or Roslyn is the fix; do it after the measurement confirms the gap.
 
-Anthropic SDK 5.x is still unofficial. The risk hasn't changed since the v4 plan, but the surface area grows when Phase 21 adds prompt caching. Worth investigating whether the official Anthropic .NET SDK has shipped or is close; if so, migrate. If not, pin the version and document.
+**Chunked review cost.** A 10-chunk review is 10× the LLM cost. For cloud models at scale, this matters. The `max_chunks` config is the safety cap, but users may not know what value to set. The WebUI cost dashboard (Phase 23) is the feedback loop. Until then, log total token usage and estimated cost at the review completion level so it shows up in standard logs.
 
-Phase 21 Anthropic prompt caching closes the immediate implementation risk for cache-control wiring in the current SDK. Residual risk: provider-side cache hit behavior and token savings are not yet measured in eval/trace output, and Anthropic.SDK remains a version-sensitive dependency for this feature.
+**SQLite index contention.** The repo index uses SQLite. Concurrent reviews of the same repo could race on index writes. SQLite with WAL mode handles concurrent reads fine but serializes writes. For the expected deployment scale (single-maintainer self-hosted), this is acceptable. If concurrent review volume grows, the contention will show up as index write latency in OTel spans.
 
-Phase 21 full-file trimming closed the immediate wasted-context risk for mostly-new files without adding configuration surface. Residual risk: the fixed 90 percent threshold is heuristic, so future eval/trace data should confirm it does not remove useful context for generated files or unusual patch shapes.
-
-Phase 21 pipeline parallelization closes the obvious sequential-worker latency risk for event-triggered reviews with known head SHAs. Residual risk: speculative metadata fetches can spend one extra GitHub request on jobs that config later skips; monitor rate-limit pressure before parallelizing more aggressively, especially for disabled repos with frequent webhook traffic.
-
-Phase 21 speculative self-critique closes the remaining sequential branch risk for reviews where agentic context falls back to the initial result. Residual risk: if agentic context successfully replaces the review result, the initially-started self-critique may be canceled after the provider request has already begun, so cloud providers may still bill for some discarded work. Measure how often agentic second passes succeed before deciding whether to gate speculation to large PRs or specific providers.
+**Anthropic SDK stability.** `Anthropic.SDK` 5.x remains unofficial. Prompt caching and fine-grained cache control are version-sensitive. Pin the version in `Directory.Packages.props` and document. Watch for an official Anthropic .NET SDK; migrate when one ships.

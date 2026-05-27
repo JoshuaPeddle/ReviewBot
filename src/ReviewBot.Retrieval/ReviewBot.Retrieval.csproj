@@ -1,0 +1,8 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <ProjectReference Include="..\ReviewBot.Core\ReviewBot.Core.csproj" />
+  </ItemGroup>
+
+</Project>
