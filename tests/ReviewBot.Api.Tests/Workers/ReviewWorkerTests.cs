@@ -239,6 +239,42 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task GroundingFailureStopsBeforeFullFileContextAndLlm()
+    {
+        var logger = new CapturingLogger<ReviewWorker>();
+        await using var fixture = new WorkerFixture(logger: logger);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { FullFileMaxBytes = 10_000 }
+        };
+        var groundingStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+            .ReturnsForAnyArgs(_ =>
+            {
+                groundingStarted.SetResult();
+                return Task.FromException<GroundingContext>(new InvalidOperationException("grounding failed"));
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await groundingStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var logEntry = await logger.ErrorLogged.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        logEntry.Message.Should().Contain("failed; continuing with the next job");
+        await fixture.PullRequestFetcher.DidNotReceiveWithAnyArgs()
+            .GetFileContentsAsync(default!, default!, default!, default!, default, default!, default);
+        fixture.LlmFactory.DidNotReceiveWithAnyArgs().Create(default!);
+        await fixture.ReviewPoster.DidNotReceiveWithAnyArgs()
+            .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
+    }
+
+    [Fact]
     public async Task IgnoreGlobsDropMatchingFilesBeforeLlmAndPost()
     {
         await using var fixture = new WorkerFixture();
@@ -2490,6 +2526,9 @@ public class ReviewWorkerTests
         public TaskCompletionSource<(LogLevel Level, string Message, Exception? Exception)> WarningLogged { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        public TaskCompletionSource<(LogLevel Level, string Message, Exception? Exception)> ErrorLogged { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public IDisposable BeginScope<TState>(TState state)
             where TState : notnull =>
             NullLogger.Instance.BeginScope(state);
@@ -2507,6 +2546,10 @@ public class ReviewWorkerTests
             if (logLevel == LogLevel.Warning)
             {
                 WarningLogged.TrySetResult((logLevel, message, exception));
+            }
+            else if (logLevel == LogLevel.Error)
+            {
+                ErrorLogged.TrySetResult((logLevel, message, exception));
             }
         }
     }
