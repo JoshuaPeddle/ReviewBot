@@ -14,7 +14,7 @@ public sealed record OpenAiLlmOptions
 
     public float Temperature { get; set; } = 0.2f;
 
-    private string responseFormat = OpenAiResponseFormats.JsonObject;
+    private string responseFormat = OpenAiResponseFormats.Text;
 
     public string ResponseFormat
     {

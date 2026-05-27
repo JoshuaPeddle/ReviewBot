@@ -108,7 +108,6 @@ Shipped the context-window and heuristic-estimation primitives that unblock budg
 - Added Core tests for known-model lookup, config override, fallback, heuristic estimates, fixed-section subtraction, zero clamping, and budget exhaustion.
 - Added an API composition test proving the budgeting services resolve from DI.
 
-Corrected assumption discovered while reading the area: `OpenAiLlmOptions` and the configuration docs default to structured JSON responses, but production `appsettings.json` was overriding OpenAI-compatible reviews to `text`. The default appsettings value is now `json_object`; `appsettings.Development.json` still uses `text` for local Ollama compatibility.
 
 Remaining in Step 1: Anthropic `count_tokens`, per-section estimation in the live worker, `response_reserve_tokens` repo config, budget-aware full-file/retrieval/diff assembly, logging, and the worker integration test that triggers multi-pass when the diff exceeds budget.
 
