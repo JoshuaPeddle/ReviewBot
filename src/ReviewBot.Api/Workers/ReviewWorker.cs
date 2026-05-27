@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Options;
 using Octokit;
+using ReviewBot.Core.Context;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
@@ -29,6 +30,8 @@ public sealed class ReviewWorker : BackgroundService
     private readonly IGroundingProvider groundingProvider;
     private readonly IPrReviewStateStore prReviewStateStore;
     private readonly ReviewBotMetrics metrics;
+    private readonly IModelContextRegistry modelContextRegistry;
+    private readonly IPromptTokenEstimator tokenEstimator;
     private readonly WorkerOptions workerOptions;
     private readonly ILogger<ReviewWorker> logger;
 
@@ -42,6 +45,8 @@ public sealed class ReviewWorker : BackgroundService
         IGroundingProvider groundingProvider,
         IPrReviewStateStore prReviewStateStore,
         ReviewBotMetrics metrics,
+        IModelContextRegistry modelContextRegistry,
+        IPromptTokenEstimator tokenEstimator,
         IOptions<WorkerOptions> options,
         ILogger<ReviewWorker> logger)
     {
@@ -54,6 +59,8 @@ public sealed class ReviewWorker : BackgroundService
         this.groundingProvider = groundingProvider ?? throw new ArgumentNullException(nameof(groundingProvider));
         this.prReviewStateStore = prReviewStateStore ?? throw new ArgumentNullException(nameof(prReviewStateStore));
         this.metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
+        this.modelContextRegistry = modelContextRegistry ?? throw new ArgumentNullException(nameof(modelContextRegistry));
+        this.tokenEstimator = tokenEstimator ?? throw new ArgumentNullException(nameof(tokenEstimator));
         this.workerOptions = options?.Value ?? throw new ArgumentNullException(nameof(options));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -279,24 +286,27 @@ public sealed class ReviewWorker : BackgroundService
             return JobProcessStatus.Skipped;
         }
 
-        var fullFileContentsTask = FetchFullFileContentsAsync(
-                files,
-                config,
-                job,
-                metadata.HeadSha,
-                installationToken.Token,
-                ct);
-
         var groundingRequest = new GroundingRequest(
             Owner: job.Owner,
             Repo: job.Repo,
             HeadSha: metadata.HeadSha,
             InstallationToken: installationToken.Token,
             Config: config.Grounding);
-        var groundingTask = GetGroundingContextAsync(groundingRequest, job, ct);
-        await Task.WhenAll(fullFileContentsTask, groundingTask).ConfigureAwait(false);
-        var fullFileContents = await fullFileContentsTask.ConfigureAwait(false);
-        var grounding = await groundingTask.ConfigureAwait(false);
+        var grounding = await GetGroundingContextAsync(groundingRequest, job, ct).ConfigureAwait(false);
+        var promptBudget = CreatePromptBudget(config, grounding, metadata);
+        var fullFileContext = await FetchFullFileContentsAsync(
+                files,
+                config,
+                promptBudget,
+                job,
+                metadata.HeadSha,
+                installationToken.Token,
+                ct)
+            .ConfigureAwait(false);
+        var fullFileContents = fullFileContext.Contents;
+        promptBudget = fullFileContext.Budget;
+        promptBudget = ConsumeDiffBudget(files, config, promptBudget, job);
+        LogPromptBudget(promptBudget, config, job);
 
         var request = new ReviewRequest(
             metadata.Title,
@@ -378,6 +388,10 @@ public sealed class ReviewWorker : BackgroundService
     }
 
     private enum JobProcessStatus { Success, Skipped }
+
+    private sealed record FullFileContextResult(
+        IReadOnlyDictionary<string, string>? Contents,
+        PromptBudget Budget);
 
     private SelfCritiqueRun? StartSelfCritiqueIfNeeded(
         IReviewLlm llm,
@@ -496,9 +510,99 @@ public sealed class ReviewWorker : BackgroundService
         return grounding;
     }
 
-    private async Task<IReadOnlyDictionary<string, string>?> FetchFullFileContentsAsync(
+    private PromptBudget CreatePromptBudget(
+        ReviewConfig config,
+        GroundingContext grounding,
+        PullRequestMetadata metadata)
+    {
+        var estimationRequestWithoutGrounding = new ReviewRequest(
+            metadata.Title,
+            metadata.Body,
+            metadata.BaseSha,
+            metadata.HeadSha,
+            [],
+            config);
+        var estimationRequestWithGrounding = estimationRequestWithoutGrounding with
+        {
+            Grounding = grounding
+        };
+
+        var baseSystemPrompt = PromptBuilder.Build(estimationRequestWithoutGrounding).SystemPrompt;
+        var groundedSystemPrompt = PromptBuilder.Build(estimationRequestWithGrounding).SystemPrompt;
+        var systemPromptTokens = tokenEstimator.EstimateTokens(baseSystemPrompt);
+        var groundingTokens = Math.Max(
+            0,
+            tokenEstimator.EstimateTokens(groundedSystemPrompt) - systemPromptTokens);
+
+        var budget = PromptBudget.Create(
+            modelContextRegistry.GetContextWindowTokens(config.Model.Name),
+            systemPromptTokens,
+            groundingTokens,
+            config.Review.ResponseReserveTokens);
+
+        var metadataTokens = tokenEstimator.EstimateTokens(metadata.Title) +
+            tokenEstimator.EstimateTokens(metadata.Body);
+        return budget.ConsumeAvailable("pull_request_metadata", metadataTokens, out _);
+    }
+
+    private PromptBudget ConsumeDiffBudget(
         IReadOnlyList<FileChange> files,
         ReviewConfig config,
+        PromptBudget budget,
+        ReviewJob job)
+    {
+        var diffTokens = EstimateDiffTokens(files, config.Review.MaxPatchLines);
+        var updated = budget.ConsumeAvailable("diff", diffTokens, out var consumedTokens);
+        if (consumedTokens < diffTokens)
+        {
+            logger.LogWarning(
+                "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} has an estimated diff cost of {DiffTokens} token(s), exceeding the remaining prompt budget of {RemainingTokens} token(s) for model {ModelName}",
+                job.DeliveryId,
+                job.Owner,
+                job.Repo,
+                job.PrNumber,
+                diffTokens,
+                budget.RemainingContentTokens,
+                config.Model.Name);
+        }
+
+        return updated;
+    }
+
+    private int EstimateDiffTokens(IReadOnlyList<FileChange> files, int maxPatchLines)
+    {
+        var tokens = 0;
+        foreach (var file in files)
+        {
+            tokens += tokenEstimator.EstimateTokens(
+                $"{file.Path} {file.Status} +{file.AdditionsCount} -{file.DeletionsCount}\n{TakePatchLines(file.Patch, maxPatchLines)}");
+        }
+
+        return tokens;
+    }
+
+    private void LogPromptBudget(PromptBudget budget, ReviewConfig config, ReviewJob job)
+    {
+        logger.LogDebug(
+            "Prompt budget for {Owner}/{Repo}#{PrNumber} on {ModelName}: model limit {ModelLimitTokens}, system {SystemPromptTokens}, grounding {GroundingTokens}, response reserve {ResponseReserveTokens}, content budget {ContentBudgetTokens}, consumed {ConsumedContentTokens}, remaining {RemainingContentTokens}, sections {Sections}",
+            job.Owner,
+            job.Repo,
+            job.PrNumber,
+            config.Model.Name,
+            budget.ModelContextLimitTokens,
+            budget.SystemPromptTokens,
+            budget.GroundingTokens,
+            budget.ResponseReserveTokens,
+            budget.ContentBudgetTokens,
+            budget.ConsumedContentTokens,
+            budget.RemainingContentTokens,
+            string.Join(", ", budget.ConsumedSections.Select(section => $"{section.Name}={section.Tokens}")));
+    }
+
+    private async Task<FullFileContextResult> FetchFullFileContentsAsync(
+        IReadOnlyList<FileChange> files,
+        ReviewConfig config,
+        PromptBudget budget,
         ReviewJob job,
         string headSha,
         string installationToken,
@@ -506,25 +610,41 @@ public sealed class ReviewWorker : BackgroundService
     {
         if (config.Review.FullFileMaxBytes <= 0)
         {
-            return null;
+            return new FullFileContextResult(null, budget);
         }
 
-        var requests = files
+        var candidates = files
             .Where(file => file.Status != FileChangeStatus.Removed)
             .Where(file => !IsMostlyNewFile(file))
             .Where(file => EstimatePatchBytes(file) <= config.Review.FullFileMaxBytes)
-            .Select(file => new ContextRequest(file.Path, "full-file context for small changed file"))
             .ToArray();
+
+        var selectedRequests = new List<ContextRequest>();
+        var selectionBudget = budget;
+        foreach (var file in candidates)
+        {
+            var estimatedTokens = tokenEstimator.EstimateTokens(file.Patch);
+            if (!selectionBudget.TryConsume("full_file_request_estimate", estimatedTokens, out var updatedBudget))
+            {
+                continue;
+            }
+
+            selectionBudget = updatedBudget;
+            selectedRequests.Add(new ContextRequest(file.Path, "full-file context for small changed file"));
+        }
+
+        var requests = selectedRequests.ToArray();
 
         if (requests.Length == 0)
         {
             logger.LogDebug(
-                "Full-file context enabled for {Owner}/{Repo}#{PrNumber}, but no changed files needed fetching under the {MaxBytes} byte limit",
+                "Full-file context enabled for {Owner}/{Repo}#{PrNumber}, but no changed files fit under the {MaxBytes} byte and {RemainingTokens} token limits",
                 job.Owner,
                 job.Repo,
                 job.PrNumber,
-                config.Review.FullFileMaxBytes);
-            return null;
+                config.Review.FullFileMaxBytes,
+                budget.RemainingContentTokens);
+            return new FullFileContextResult(null, budget);
         }
 
         IReadOnlyList<(string Path, string Content)> fetchedFiles;
@@ -544,7 +664,7 @@ public sealed class ReviewWorker : BackgroundService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Full-file context fetch failed; continuing with diff-only prompt");
-            return null;
+            return new FullFileContextResult(null, budget);
         }
 
         if (fetchedFiles.Count == 0)
@@ -555,18 +675,65 @@ public sealed class ReviewWorker : BackgroundService
                 job.Owner,
                 job.Repo,
                 job.PrNumber);
-            return null;
+            return new FullFileContextResult(null, budget);
+        }
+
+        var included = new Dictionary<string, string>(StringComparer.Ordinal);
+        var updated = budget;
+        foreach (var fetchedFile in fetchedFiles)
+        {
+            var estimatedTokens = tokenEstimator.EstimateTokens(fetchedFile.Content);
+            if (!updated.TryConsume("full_file", estimatedTokens, out var afterFullFile))
+            {
+                logger.LogDebug(
+                    "Full-file context: dropping {Path} for {Owner}/{Repo}#{PrNumber} because it needs {EstimatedTokens} token(s) and only {RemainingTokens} remain",
+                    fetchedFile.Path,
+                    job.Owner,
+                    job.Repo,
+                    job.PrNumber,
+                    estimatedTokens,
+                    updated.RemainingContentTokens);
+                continue;
+            }
+
+            updated = afterFullFile;
+            included[fetchedFile.Path] = fetchedFile.Content;
+        }
+
+        if (included.Count == 0)
+        {
+            logger.LogInformation(
+                "Full-file context: fetched {FetchedCount} candidate file(s) for {Owner}/{Repo}#{PrNumber} but none fit the remaining prompt budget",
+                fetchedFiles.Count,
+                job.Owner,
+                job.Repo,
+                job.PrNumber);
+            return new FullFileContextResult(null, budget);
         }
 
         logger.LogInformation(
-            "Full-file context: fetched {FetchedCount}/{CandidateCount} file(s) for {Owner}/{Repo}#{PrNumber}",
+            "Full-file context: included {IncludedCount}/{FetchedCount} fetched file(s) for {Owner}/{Repo}#{PrNumber}",
+            included.Count,
             fetchedFiles.Count,
-            requests.Length,
             job.Owner,
             job.Repo,
             job.PrNumber);
 
-        return fetchedFiles.ToDictionary(file => file.Path, file => file.Content, StringComparer.Ordinal);
+        return new FullFileContextResult(included, updated);
+    }
+
+    private static string TakePatchLines(string patch, int maxPatchLines)
+    {
+        if (maxPatchLines <= 0 || string.IsNullOrEmpty(patch))
+        {
+            return string.Empty;
+        }
+
+        return string.Join('\n', patch
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Split('\n')
+            .Take(maxPatchLines));
     }
 
     private static int EstimatePatchBytes(FileChange file) => Encoding.UTF8.GetByteCount(file.Patch);

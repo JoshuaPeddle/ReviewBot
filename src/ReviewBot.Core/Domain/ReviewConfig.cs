@@ -97,7 +97,8 @@ public sealed record ReviewOutputConfig(
     int MaxContextFileBytes = 50_000,
     bool RequestChangesOnError = false,
     bool ApproveIfClean = false,
-    int FullFileMaxBytes = 0);
+    int FullFileMaxBytes = 0,
+    int ResponseReserveTokens = 4_096);
 
 public sealed record TriggerConfig(
     bool OnReviewRequest,

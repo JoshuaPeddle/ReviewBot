@@ -108,8 +108,18 @@ Shipped the context-window and heuristic-estimation primitives that unblock budg
 - Added Core tests for known-model lookup, config override, fallback, heuristic estimates, fixed-section subtraction, zero clamping, and budget exhaustion.
 - Added an API composition test proving the budgeting services resolve from DI.
 
+#### Completed worker budget slice (May 27, 2026)
 
-Remaining in Step 1: Anthropic `count_tokens`, per-section estimation in the live worker, `response_reserve_tokens` repo config, budget-aware full-file/retrieval/diff assembly, logging, and the worker integration test that triggers multi-pass when the diff exceeds budget.
+Shipped the first live worker integration for prompt budgeting:
+
+- Added repo YAML support for `review.response_reserve_tokens` with a 4,096-token default, non-negative validation, documentation, and config-fetcher tests.
+- Injected `IModelContextRegistry` and `IPromptTokenEstimator` into `ReviewWorker`; the worker now computes a per-review `PromptBudget` from model limit, base system prompt, grounding delta, response reserve, and PR metadata.
+- Made full-file context budget-aware: candidate fetches are selected only while estimated patch tokens fit the remaining content budget, fetched contents are re-estimated before prompt inclusion, and oversized fetched files are dropped instead of silently inflating the prompt.
+- Added debug logging for prompt budget inputs, consumed sections, and remaining budget; added a warning when estimated diff tokens exceed the remaining content budget.
+- Added worker tests for grounding-before-full-file budget ordering and budget-limited full-file fetches.
+- Corrected a Phase 21 latency assumption: full-file context cannot always race grounding anymore, because budget-aware selection needs the grounding token cost first.
+
+Remaining in Step 1: Anthropic `count_tokens`, retrieval budget integration, and the worker integration test that hands oversized diffs to multi-pass instead of merely logging overflow. Diff content is now estimated and logged, but the diff is still included as one unit until Step 2 chunking lands.
 
 ---
 
@@ -300,7 +310,9 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 
 ## Risks
 
-**Context estimation accuracy.** Heuristic token counting (chars/3.5) can be off by 20–30% for mixed-language diffs with heavy Unicode or whitespace. The Anthropic count_tokens API is accurate but adds a round-trip. If chunk boundaries are calculated from an underestimate, the assembled prompt still overflows — just less often. Status: open after the May 27 foundation slice; the registry, heuristic estimator, and budget accounting now exist, but the worker does not yet enforce them. Mitigation: apply a conservative headroom factor (0.85 per chunk, response_reserve 4096) and log when actual token usage from the response differs more than 15% from the estimate. Tune the heuristic against the eval corpus once token usage reporting is in place.
+**Context estimation accuracy.** Heuristic token counting (chars/3.5) can be off by 20–30% for mixed-language diffs with heavy Unicode or whitespace. The Anthropic count_tokens API is accurate but adds a round-trip. If chunk boundaries are calculated from an underestimate, the assembled prompt still overflows — just less often. Status: partially mitigated after the May 27 worker budget slice; the worker enforces the budget for full-file context and warns when the diff exceeds remaining budget, but oversized diffs still need Step 2 multi-pass before overflow is prevented end-to-end. Mitigation: apply a conservative headroom factor (0.85 per chunk, response_reserve 4096) and log when actual token usage from the response differs more than 15% from the estimate. Tune the heuristic against the eval corpus once token usage reporting is in place.
+
+**Budget-aware full-file latency tradeoff.** Full-file context used to fetch in parallel with grounding. It now waits for grounding because the full prompt budget depends on grounding token cost. Status: opened May 27. The correctness tradeoff is intentional for small-context models, but it may give back part of the Phase 21 latency win on repos with both grounding and full-file context enabled. Mitigation: keep full-file context opt-in (`full_file_max_bytes: 0` by default), measure stage timings in Phase 23 traces, and revisit speculative fetch-with-post-filtering if latency becomes visible in real deployments.
 
 **Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. The eval corpus should have 3–5 cross-chunk fixtures to measure how bad this gap actually is. Expect multi-pass alone (without retrieval) to miss these; retrieval's job is to close the gap.
 

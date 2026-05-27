@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Octokit;
+using ReviewBot.Core.Context;
 using ReviewBot.Api.Workers;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
@@ -193,16 +194,15 @@ public class ReviewWorkerTests
     }
 
     [Fact]
-    public async Task FullFileContextAndGroundingRunInParallelBeforeLlm()
+    public async Task FullFileContextWaitsForGroundingBeforeBudgetedFetch()
     {
         await using var fixture = new WorkerFixture();
         var config = ReviewConfig.Default with
         {
             Review = ReviewConfig.Default.Review with { FullFileMaxBytes = 10_000 }
         };
-        var groundingStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var groundingCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var fileContentFetchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseBoth = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
@@ -210,19 +210,16 @@ public class ReviewWorkerTests
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
-            .ReturnsForAnyArgs(async _ =>
+            .ReturnsForAnyArgs(_ =>
             {
+                groundingCompleted.Task.IsCompletedSuccessfully.Should().BeTrue();
                 fileContentFetchStarted.SetResult();
-                await groundingStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-                await releaseBoth.Task.WaitAsync(TimeSpan.FromSeconds(2));
                 return [("src/App.cs", "public class App { }")];
             });
         fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
-            .Returns(async _ =>
+            .Returns(_ =>
             {
-                groundingStarted.SetResult();
-                await fileContentFetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-                await releaseBoth.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                groundingCompleted.SetResult();
                 return new GroundingContext(new LanguageMetadata("dotnet", "10.0", null, []), null, null);
             });
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
@@ -237,9 +234,7 @@ public class ReviewWorkerTests
         await fixture.StartAsync();
         await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
 
-        await groundingStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await fileContentFetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        releaseBoth.SetResult();
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
     }
 
@@ -511,6 +506,69 @@ public class ReviewWorkerTests
         capturedRequest!.FullFileContents.Should().NotBeNull();
         capturedRequest.FullFileContents.Should().ContainSingle()
             .Which.Should().Be(new KeyValuePair<string, string>("src/Small.cs", "public class Small { }"));
+    }
+
+    [Fact]
+    public async Task FullFileContextUsesRemainingPromptBudgetToLimitFetchRequests()
+    {
+        var estimator = new KeywordTokenEstimator(
+            new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                ["small patch"] = 5,
+                ["large patch"] = 50,
+                ["public class Small"] = 5
+            });
+        await using var fixture = new WorkerFixture(
+            modelContextRegistry: new FixedModelContextRegistry(20),
+            tokenEstimator: estimator);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                FullFileMaxBytes = 10_000,
+                ResponseReserveTokens = 0
+            }
+        };
+        var files = new[]
+        {
+            CreateFile("src/Small.cs", "@@ -1 +1 @@\n+small patch", new HashSet<int> { 1 }),
+            CreateFile("src/Large.cs", "@@ -1 +1 @@\n+large patch", new HashSet<int> { 1 })
+        };
+        IReadOnlyList<ContextRequest>? fetchedRequests = null;
+        ReviewRequest? capturedRequest = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                fetchedRequests = call.ArgAt<IReadOnlyList<ContextRequest>>(2);
+                return [("src/Small.cs", "public class Small { }")];
+            });
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedRequest = call.Arg<ReviewRequest>();
+                return new ReviewResult("Reviewed.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        fetchedRequests!.Select(request => request.Path).Should().Equal("src/Small.cs");
+        capturedRequest!.FullFileContents.Should().ContainSingle()
+            .Which.Key.Should().Be("src/Small.cs");
     }
 
     [Fact]
@@ -2308,11 +2366,41 @@ public class ReviewWorkerTests
             status);
     }
 
+    private sealed class FixedModelContextRegistry(int contextWindowTokens) : IModelContextRegistry
+    {
+        public int GetContextWindowTokens(string modelIdentifier) => contextWindowTokens;
+    }
+
+    private sealed class KeywordTokenEstimator(IReadOnlyDictionary<string, int> tokenMap) : IPromptTokenEstimator
+    {
+        public int EstimateTokens(string? text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return 0;
+            }
+
+            foreach (var pair in tokenMap)
+            {
+                if (text.Contains(pair.Key, StringComparison.Ordinal))
+                {
+                    return pair.Value;
+                }
+            }
+
+            return 0;
+        }
+    }
+
     private sealed class WorkerFixture : IAsyncDisposable
     {
         private readonly ReviewWorker worker;
 
-        public WorkerFixture(int concurrency = 1, ILogger<ReviewWorker>? logger = null)
+        public WorkerFixture(
+            int concurrency = 1,
+            ILogger<ReviewWorker>? logger = null,
+            IModelContextRegistry? modelContextRegistry = null,
+            IPromptTokenEstimator? tokenEstimator = null)
         {
             Queue = new ChannelReviewJobQueue();
             TokenProvider = Substitute.For<IInstallationTokenProvider>();
@@ -2324,9 +2412,16 @@ public class ReviewWorkerTests
             GroundingProvider = Substitute.For<IGroundingProvider>();
             PrReviewStateStore = Substitute.For<IPrReviewStateStore>();
             Metrics = new ReviewBotMetrics();
+            ModelContextRegistry = modelContextRegistry ?? Substitute.For<IModelContextRegistry>();
+            TokenEstimator = tokenEstimator ?? new HeuristicTokenEstimator();
 
             TokenProvider.GetTokenAsync(98765, Arg.Any<CancellationToken>())
                 .Returns(new InstallationToken("install-token", DateTimeOffset.UtcNow.AddHours(1)));
+            if (modelContextRegistry is null)
+            {
+                ModelContextRegistry.GetContextWindowTokens(Arg.Any<string>())
+                    .Returns(call => new ModelContextRegistry().GetContextWindowTokens(call.Arg<string>()));
+            }
             LlmFactory.Create(Arg.Any<ModelConfig>()).Returns(Llm);
             GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
                 .Returns(new GroundingContext(null, null, null));
@@ -2347,6 +2442,8 @@ public class ReviewWorkerTests
                 GroundingProvider,
                 PrReviewStateStore,
                 Metrics,
+                ModelContextRegistry,
+                TokenEstimator,
                 Microsoft.Extensions.Options.Options.Create(new WorkerOptions { Concurrency = concurrency }),
                 logger ?? NullLogger<ReviewWorker>.Instance);
         }
@@ -2370,6 +2467,10 @@ public class ReviewWorkerTests
         public IPrReviewStateStore PrReviewStateStore { get; }
 
         public ReviewBotMetrics Metrics { get; }
+
+        public IModelContextRegistry ModelContextRegistry { get; }
+
+        public IPromptTokenEstimator TokenEstimator { get; }
 
         public async Task StartAsync()
         {
