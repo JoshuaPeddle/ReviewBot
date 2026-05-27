@@ -293,7 +293,7 @@ public sealed class ReviewWorker : BackgroundService
             InstallationToken: installationToken.Token,
             Config: config.Grounding);
         var grounding = await GetGroundingContextAsync(groundingRequest, job, ct).ConfigureAwait(false);
-        var promptBudget = CreatePromptBudget(config, grounding, metadata);
+        var promptBudget = CreatePromptBudget(config, grounding, metadata, job);
         var fullFileContext = await FetchFullFileContentsAsync(
                 files,
                 config,
@@ -513,7 +513,8 @@ public sealed class ReviewWorker : BackgroundService
     private PromptBudget CreatePromptBudget(
         ReviewConfig config,
         GroundingContext grounding,
-        PullRequestMetadata metadata)
+        PullRequestMetadata metadata,
+        ReviewJob job)
     {
         var estimationRequestWithoutGrounding = new ReviewRequest(
             metadata.Title,
@@ -542,7 +543,21 @@ public sealed class ReviewWorker : BackgroundService
 
         var metadataTokens = tokenEstimator.EstimateTokens(metadata.Title) +
             tokenEstimator.EstimateTokens(metadata.Body);
-        return budget.ConsumeAvailable("pull_request_metadata", metadataTokens, out _);
+        var updated = budget.ConsumeAvailable("pull_request_metadata", metadataTokens, out var consumedTokens);
+        if (consumedTokens < metadataTokens)
+        {
+            logger.LogWarning(
+                "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} has estimated PR metadata cost of {MetadataTokens} token(s), exceeding the remaining prompt budget of {RemainingTokens} token(s) for model {ModelName}",
+                job.DeliveryId,
+                job.Owner,
+                job.Repo,
+                job.PrNumber,
+                metadataTokens,
+                budget.RemainingContentTokens,
+                config.Model.Name);
+        }
+
+        return updated;
     }
 
     private PromptBudget ConsumeDiffBudget(
@@ -621,11 +636,25 @@ public sealed class ReviewWorker : BackgroundService
 
         var selectedRequests = new List<ContextRequest>();
         var selectionBudget = budget;
+        var loggedBudgetLimitedSelection = false;
         foreach (var file in candidates)
         {
             var estimatedTokens = tokenEstimator.EstimateTokens(file.Patch);
             if (!selectionBudget.TryConsume("full_file_request_estimate", estimatedTokens, out var updatedBudget))
             {
+                if (!loggedBudgetLimitedSelection)
+                {
+                    logger.LogWarning(
+                        "Full-file context for {Owner}/{Repo}#{PrNumber} is limited by prompt budget; skipping candidate {Path} because its estimated patch cost is {EstimatedTokens} token(s) and only {RemainingTokens} token(s) remain",
+                        job.Owner,
+                        job.Repo,
+                        job.PrNumber,
+                        file.Path,
+                        estimatedTokens,
+                        selectionBudget.RemainingContentTokens);
+                    loggedBudgetLimitedSelection = true;
+                }
+
                 continue;
             }
 

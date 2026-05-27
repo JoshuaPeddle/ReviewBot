@@ -119,7 +119,7 @@ Shipped the first live worker integration for prompt budgeting:
 - Added worker tests for grounding-before-full-file budget ordering and budget-limited full-file fetches.
 - Corrected a Phase 21 latency assumption: full-file context cannot always race grounding anymore, because budget-aware selection needs the grounding token cost first.
 
-Remaining in Step 1: Anthropic `count_tokens`, retrieval budget integration, and the worker integration test that hands oversized diffs to multi-pass instead of merely logging overflow. Diff content is now estimated and logged, but the diff is still included as one unit until Step 2 chunking lands.
+Remaining in Step 1: Anthropic `count_tokens` and retrieval budget integration. Oversized diffs are a known limitation of this slice: the worker estimates and warns, but still includes the diff as one unit. The required fix is Step 2's chunk planner/dispatcher, where `estimated_diff_tokens > content_budget` becomes the branch into multi-pass review instead of a warning-only path.
 
 ---
 
