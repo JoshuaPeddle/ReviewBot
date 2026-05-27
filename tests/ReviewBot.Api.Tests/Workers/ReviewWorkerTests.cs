@@ -739,6 +739,77 @@ public class ReviewWorkerTests
         selfCritiqueCalls.Should().Be(1);
     }
 
+    [Fact]
+    public async Task ChunkedReviewSelfCritiqueUsesOnlyReviewedFilesWhenMaxChunksCapsReview()
+    {
+        var estimator = new KeywordTokenEstimator(
+            new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                ["chunk-token"] = 10
+            });
+        await using var fixture = new WorkerFixture(
+            modelContextRegistry: new FixedModelContextRegistry(20),
+            tokenEstimator: estimator);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                ResponseReserveTokens = 0,
+                ChunkHeadroom = 0.5,
+                MaxChunks = 2,
+                SelfCritique = true
+            }
+        };
+        var files = new[]
+        {
+            CreateFile("src/A.cs", "@@ -1 +1 @@\n+chunk-token", new HashSet<int> { 1 }),
+            CreateFile("src/B.cs", "@@ -1 +1 @@\n+chunk-token", new HashSet<int> { 1 }),
+            CreateFile("src/C.cs", "@@ -1 +1 @@\n+chunk-token", new HashSet<int> { 1 })
+        };
+        PromptPayload? selfCritiquePrompt = null;
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var file = call.Arg<ReviewRequest>().Files.Single();
+                return new ReviewResult(
+                    $"Reviewed {file.Path}.",
+                    [new InlineComment(file.Path, 1, "RIGHT", $"Issue in {file.Path}.", Severity.Warning, Confidence.Medium)]);
+            });
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
+            .Returns(call =>
+            {
+                call.ArgAt<string>(2).Should().Be("self_critique");
+                selfCritiquePrompt = call.Arg<PromptPayload>();
+                return """{"retained_indices":[0,1],"rationale":"reviewed chunk comments are valid"}""";
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        selfCritiquePrompt.Should().NotBeNull();
+        selfCritiquePrompt!.UserPrompt.Should().Contain("=== src/A.cs");
+        selfCritiquePrompt.UserPrompt.Should().Contain("=== src/B.cs");
+        selfCritiquePrompt.UserPrompt.Should().NotContain("=== src/C.cs");
+        postedResult!.Summary.Should().Contain("files_skipped:");
+        postedResult.Summary.Should().Contain("`src/C.cs`");
+    }
+
     [Theory]
     [InlineData(false, 1)]
     [InlineData(true, 2)]

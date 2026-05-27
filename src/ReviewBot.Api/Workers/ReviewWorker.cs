@@ -314,6 +314,7 @@ public sealed class ReviewWorker : BackgroundService
 
         if (reviewChunks.Count > 1)
         {
+            var reviewedFiles = GetReviewedChunkFiles(reviewChunks);
             LogPromptBudget(promptBudget, config, job);
             result = await ReviewChunksAsync(
                     llm,
@@ -327,7 +328,7 @@ public sealed class ReviewWorker : BackgroundService
                     ct)
                 .ConfigureAwait(false);
             candidateComments = FilterCandidateComments(result, config);
-            candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
+            candidateComments = await ApplySelfCritiqueAsync(llm, reviewedFiles, candidateComments, config, ct)
                 .ConfigureAwait(false);
             result = result with { Summary = BuildChunkedSummary(candidateComments, reviewChunks) };
             result = AppendFilesSkippedNote(result, GetSkippedChunkPaths(files, reviewChunks, patchBudgetResult.SkippedPaths));
@@ -603,6 +604,11 @@ public sealed class ReviewWorker : BackgroundService
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToArray();
     }
+
+    private static IReadOnlyList<FileChange> GetReviewedChunkFiles(IReadOnlyList<ReviewChunk> chunks) =>
+        chunks
+            .SelectMany(chunk => chunk.Files)
+            .ToArray();
 
     private static string BuildChunkedSummary(
         IReadOnlyList<InlineComment> comments,
