@@ -319,9 +319,26 @@ Corrected assumptions discovered during implementation:
 - `ReviewWorker` did not have `TimeProvider` injected before this slice; it now receives it alongside `IReviewTraceWriter` for consistent timestamp capture.
 - All existing `WorkerFixture` tests default to `NullReviewTraceWriter.Instance` and `TimeProvider.System`; no existing test behavior changed.
 
-Remaining in Phase 23 trace slice: per-chunk prompts and raw LLM responses are not yet captured in the trace (the worker does not thread prompt payloads through `ReviewChunkAsync` as return values). Those will be added in a follow-on slice that also adds agentic context capture and per-stage timings.
+#### Completed per-chunk prompt and timing slice (May 27, 2026)
 
+Shipped per-chunk prompt content, raw LLM responses, and per-stage timings in review traces:
 
+- Added `string? RawLlmResponse` to `ReviewResult`; both Anthropic and OpenAI adapters now attach the first raw LLM response to every returned result, including repair and empty-result fallback paths.
+- Added `bool IncludePrompts` to `IReviewTraceWriter`; `JsonReviewTraceWriter` exposes `TracingOptions.IncludePrompts`, `NullReviewTraceWriter` returns `false`.
+- Added `TraceChunk` POCO (per-chunk: index, total, file list, prompt system/user bytes and text, raw response bytes and text, elapsed ms) and `TraceTimings` POCO (grounding, retrieval, full-file-context, total ms) to `ReviewTrace.cs`.
+- Changed `ReviewChunkAsync` to return a new `ChunkReviewOutcome` record that packages `ReviewResult`, built `PromptPayload`, and elapsed `TimeSpan`. The worker builds the prompt via `PromptBuilder.Build(request)` before calling `ReviewAsync`, capturing the same payload the adapter will send.
+- Single-chunk reviews produce one `ChunkReviewOutcome` inline in `ProcessAsync` so the trace always has a `ChunkTraces` array regardless of chunking.
+- `BuildTrace` now receives `chunkOutcomes`, `TraceTimings`, and `includePrompts`; `BuildTraceChunk` maps each outcome to a `TraceChunk` respecting the `IncludePrompts` flag.
+- Added per-stage stopwatches in `ProcessAsync` for grounding, retrieval, and full-file-context; `TraceTimings.TotalMs` is the wall time from job-start to trace-write.
+- Fixed pre-existing build errors in the staged tracing test files: `TraceCleanupService.RunCleanup` was `internal` with no `InternalsVisibleTo` for the test assembly; added `Properties/AssemblyInfo.cs` to the Api project. `Options.Create(...)` was ambiguous due to the `ReviewBot.Api.Options` namespace; fixed via `MsOptions` alias.
+- Updated failing `ReviewAsyncReturnsEmptyResultWhenRepairIsMalformed` tests in both Anthropic and OpenAI adapter suites to include the expected `RawLlmResponse = "not json"`.
+- Added `JsonReviewTraceWriterTests` coverage for `ChunkTraces` serialization with and without `IncludePrompts`, and for `TraceTimings` serialization.
+- Added worker integration test verifying `ChunkTraces` and `Timings` are populated in the trace after a single-chunk review.
+
+Corrected assumptions discovered during implementation:
+- The worker previously re-started a new `Stopwatch` for grounding inside `GetGroundingContextAsync`; those internal timings already flow to metrics. The new outer stopwatches in `ProcessAsync` measure stage wall time for the trace independently, which is acceptable.
+
+Remaining in Phase 23 trace slice: per-chunk agentic context capture (files requested, files fetched, drop reasons) is not yet in the trace. The `ReviewChunkAsync` agentic context results flow into the final `ReviewResult` but the requests/fetched paths are not recorded as a separate trace field.
 
 The existing metrics (queue depth, processing rate, LLM duration) diagnose system health. They do not explain *why a specific review was wrong*, which is the question every user bug report starts with.
 

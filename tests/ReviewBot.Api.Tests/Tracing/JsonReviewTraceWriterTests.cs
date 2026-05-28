@@ -3,6 +3,7 @@ using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using ReviewBot.Api.Tracing;
+using MsOptions = Microsoft.Extensions.Options.Options;
 
 namespace ReviewBot.Api.Tests.Tracing;
 
@@ -135,6 +136,100 @@ public class JsonReviewTraceWriterTests : IDisposable
         sections.Should().Contain(s => s.GetProperty("name").GetString() == "diff");
     }
 
+    [Fact]
+    public async Task WriteAsync_SerializesChunkTracesWithPromptsWhenIncludePromptsIsTrue()
+    {
+        var writer = CreateWriter(enabled: true, includePrompts: true);
+        var trace = CreateTrace(chunkTraces:
+        [
+            new TraceChunk
+            {
+                ChunkIndex = 1,
+                TotalChunks = 2,
+                Files = ["src/A.cs"],
+                ElapsedMs = 1234.5,
+                PromptSystemBytes = 100,
+                PromptUserBytes = 200,
+                PromptSystem = "You are a reviewer.",
+                PromptUser = "Review this diff.",
+                RawLlmResponseBytes = 50,
+                RawLlmResponse = "{\"comments\":[]}"
+            }
+        ]);
+
+        await writer.WriteAsync(trace);
+
+        var filePath = Path.Combine(tempDir, "octo-org", "reviewbot", "42-delivery-abc.json");
+        var json = await File.ReadAllTextAsync(filePath);
+        var doc = JsonDocument.Parse(json);
+        var chunks = doc.RootElement.GetProperty("chunk_traces").EnumerateArray().ToArray();
+        chunks.Should().HaveCount(1);
+        chunks[0].GetProperty("chunk_index").GetInt32().Should().Be(1);
+        chunks[0].GetProperty("total_chunks").GetInt32().Should().Be(2);
+        chunks[0].GetProperty("elapsed_ms").GetDouble().Should().BeApproximately(1234.5, 0.1);
+        chunks[0].GetProperty("prompt_system").GetString().Should().Be("You are a reviewer.");
+        chunks[0].GetProperty("prompt_user").GetString().Should().Be("Review this diff.");
+        chunks[0].GetProperty("raw_llm_response").GetString().Should().Be("{\"comments\":[]}");
+        chunks[0].GetProperty("prompt_system_bytes").GetInt32().Should().Be(100);
+    }
+
+    [Fact]
+    public async Task WriteAsync_OmitsPromptTextWhenIncludePromptsIsFalse()
+    {
+        var writer = CreateWriter(enabled: true, includePrompts: false);
+        var trace = CreateTrace(chunkTraces:
+        [
+            new TraceChunk
+            {
+                ChunkIndex = 1,
+                TotalChunks = 1,
+                Files = ["src/A.cs"],
+                ElapsedMs = 500,
+                PromptSystemBytes = 100,
+                PromptUserBytes = 200,
+                PromptSystem = null,
+                PromptUser = null,
+                RawLlmResponseBytes = 0,
+                RawLlmResponse = null
+            }
+        ]);
+
+        await writer.WriteAsync(trace);
+
+        var filePath = Path.Combine(tempDir, "octo-org", "reviewbot", "42-delivery-abc.json");
+        var json = await File.ReadAllTextAsync(filePath);
+        var doc = JsonDocument.Parse(json);
+        var chunks = doc.RootElement.GetProperty("chunk_traces").EnumerateArray().ToArray();
+        chunks.Should().HaveCount(1);
+        chunks[0].TryGetProperty("prompt_system", out var ps).Should().BeTrue();
+        ps.ValueKind.Should().Be(JsonValueKind.Null);
+        chunks[0].GetProperty("prompt_system_bytes").GetInt32().Should().Be(100);
+        chunks[0].GetProperty("prompt_user_bytes").GetInt32().Should().Be(200);
+    }
+
+    [Fact]
+    public async Task WriteAsync_SerializesTimings()
+    {
+        var writer = CreateWriter(enabled: true);
+        var trace = CreateTrace(timings: new TraceTimings
+        {
+            GroundingMs = 120.5,
+            RetrievalMs = 45.0,
+            FullFileContextMs = 30.0,
+            TotalMs = 3200.0
+        });
+
+        await writer.WriteAsync(trace);
+
+        var filePath = Path.Combine(tempDir, "octo-org", "reviewbot", "42-delivery-abc.json");
+        var json = await File.ReadAllTextAsync(filePath);
+        var doc = JsonDocument.Parse(json);
+        var timings = doc.RootElement.GetProperty("timings");
+        timings.GetProperty("grounding_ms").GetDouble().Should().BeApproximately(120.5, 0.01);
+        timings.GetProperty("retrieval_ms").GetDouble().Should().BeApproximately(45.0, 0.01);
+        timings.GetProperty("total_ms").GetDouble().Should().BeApproximately(3200.0, 0.01);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(tempDir))
@@ -143,14 +238,16 @@ public class JsonReviewTraceWriterTests : IDisposable
         }
     }
 
-    private JsonReviewTraceWriter CreateWriter(bool enabled) =>
+    private JsonReviewTraceWriter CreateWriter(bool enabled, bool includePrompts = true) =>
         new(
-            Options.Create(new TracingOptions { Enabled = enabled, TracesDir = tempDir }),
+            MsOptions.Create(new TracingOptions { Enabled = enabled, TracesDir = tempDir, IncludePrompts = includePrompts }),
             NullLogger<JsonReviewTraceWriter>.Instance);
 
     private static ReviewTrace CreateTrace(
         TraceLlmTokenUsage? tokenUsage = null,
-        ReviewBot.Core.Context.PromptBudget? promptBudget = null)
+        ReviewBot.Core.Context.PromptBudget? promptBudget = null,
+        IReadOnlyList<TraceChunk>? chunkTraces = null,
+        TraceTimings? timings = null)
     {
         var budget = promptBudget ?? ReviewBot.Core.Context.PromptBudget.Create(32768, 500, 100, 4096);
         return new ReviewTrace
@@ -193,7 +290,9 @@ public class JsonReviewTraceWriterTests : IDisposable
             [
                 new TraceComment { Path = "src/Foo.cs", Line = 5, Side = "RIGHT", Body = "Null check missing.", Severity = "error", Confidence = "high" }
             ],
-            TokenUsage = tokenUsage
+            TokenUsage = tokenUsage,
+            ChunkTraces = chunkTraces,
+            Timings = timings
         };
     }
 }

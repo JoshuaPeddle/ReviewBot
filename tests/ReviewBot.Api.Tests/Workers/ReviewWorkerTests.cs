@@ -3036,6 +3036,55 @@ public class ReviewWorkerTests
             .Which.Path.Should().Be("src/A.cs");
     }
 
+    [Fact]
+    public async Task TraceContainsChunkDataAndTimingsAfterReview()
+    {
+        ReviewTrace? capturedTrace = null;
+        var traceWriter = Substitute.For<IReviewTraceWriter>();
+        traceWriter.IncludePrompts.Returns(true);
+        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedTrace = call.Arg<ReviewTrace>();
+                return Task.CompletedTask;
+            });
+
+        await using var fixture = new WorkerFixture(traceWriter: traceWriter);
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/A.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("Looks fine.", []) { RawLlmResponse = "{\"summary\":\"ok\",\"comments\":[]}" });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+        capturedTrace.Should().NotBeNull();
+        capturedTrace!.ChunkTraces.Should().NotBeNull().And.HaveCount(1);
+        var chunk = capturedTrace.ChunkTraces![0];
+        chunk.ChunkIndex.Should().Be(1);
+        chunk.TotalChunks.Should().Be(1);
+        chunk.ElapsedMs.Should().BeGreaterThan(0);
+        chunk.PromptSystem.Should().NotBeNullOrEmpty();
+        chunk.PromptUser.Should().NotBeNullOrEmpty();
+        chunk.PromptSystemBytes.Should().BeGreaterThan(0);
+        chunk.RawLlmResponse.Should().Be("{\"summary\":\"ok\",\"comments\":[]}");
+
+        capturedTrace.Timings.Should().NotBeNull();
+        capturedTrace.Timings!.TotalMs.Should().BeGreaterThan(0);
+    }
+
     private static ReviewJob CreateJob(string deliveryId = "delivery-123", string reason = "review_requested")
     {
         return new ReviewJob(

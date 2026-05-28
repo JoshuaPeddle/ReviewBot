@@ -80,7 +80,7 @@ public sealed class AnthropicReviewLlmTests
 
         var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
 
-        result.Should().BeEquivalentTo(new ReviewResult(string.Empty, []));
+        result.Should().BeEquivalentTo(new ReviewResult(string.Empty, []) { RawLlmResponse = "not json" });
         client.Requests.Should().HaveCount(2);
     }
 

@@ -22,6 +22,8 @@ public sealed class JsonReviewTraceWriter : IReviewTraceWriter
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
+    public bool IncludePrompts => options.IncludePrompts;
+
     public async Task WriteAsync(ReviewTrace trace, CancellationToken ct = default)
     {
         if (!options.Enabled)

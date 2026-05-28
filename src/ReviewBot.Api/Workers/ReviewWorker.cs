@@ -316,8 +316,11 @@ public sealed class ReviewWorker : BackgroundService
             HeadSha: metadata.HeadSha,
             InstallationToken: installationToken.Token,
             Config: config.Grounding);
+        var groundingSw = Stopwatch.StartNew();
         var grounding = await GetGroundingContextAsync(groundingRequest, job, ct).ConfigureAwait(false);
+        var groundingElapsed = groundingSw.Elapsed;
         var promptBudget = CreatePromptBudget(config, grounding, metadata, job);
+        var retrievalSw = Stopwatch.StartNew();
         var retrievalContext = await GetRetrievalContextAsync(
                 files,
                 config,
@@ -330,8 +333,10 @@ public sealed class ReviewWorker : BackgroundService
                 changedPathsSinceLastReview,
                 ct)
             .ConfigureAwait(false);
+        var retrievalElapsed = retrievalSw.Elapsed;
         var repositoryContext = retrievalContext.Snippets;
         promptBudget = retrievalContext.Budget;
+        var fullFileContextSw = Stopwatch.StartNew();
         var fullFileContext = await FetchFullFileContentsAsync(
                 files,
                 config,
@@ -341,18 +346,20 @@ public sealed class ReviewWorker : BackgroundService
                 installationToken.Token,
                 ct)
             .ConfigureAwait(false);
+        var fullFileContextElapsed = fullFileContextSw.Elapsed;
         var fullFileContents = fullFileContext.Contents;
         promptBudget = fullFileContext.Budget;
         var llm = llmFactory.Create(config.Model);
         var reviewChunks = PlanReviewChunks(files, config, promptBudget, job);
         ReviewResult result;
         IReadOnlyList<InlineComment> candidateComments;
+        IReadOnlyList<ChunkReviewOutcome>? chunkOutcomes = null;
 
         if (reviewChunks.Count > 1)
         {
             var reviewedFiles = GetReviewedChunkFiles(reviewChunks);
             LogPromptBudget(promptBudget, config, job);
-            result = await ReviewChunksAsync(
+            chunkOutcomes = await ReviewChunksAsync(
                     llm,
                     reviewChunks,
                     metadata,
@@ -364,6 +371,7 @@ public sealed class ReviewWorker : BackgroundService
                     installationToken.Token,
                     ct)
                 .ConfigureAwait(false);
+            result = ReviewResultMerger.Merge(chunkOutcomes.Select(o => o.Result).ToArray());
             candidateComments = FilterCandidateComments(result, config);
             candidateComments = await ApplySelfCritiqueAsync(llm, reviewedFiles, candidateComments, config, ct)
                 .ConfigureAwait(false);
@@ -386,6 +394,7 @@ public sealed class ReviewWorker : BackgroundService
                 fullFileContents,
                 repositoryContext);
 
+            var prompt = PromptBuilder.Build(request);
             var sw = Stopwatch.StartNew();
             result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
             sw.Stop();
@@ -432,6 +441,10 @@ public sealed class ReviewWorker : BackgroundService
                 candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
                     .ConfigureAwait(false);
             }
+
+            // Build a single-chunk outcome for tracing; carry the raw response from the initial call
+            // since result may have been replaced by agentic context with a new summary.
+            chunkOutcomes = [new ChunkReviewOutcome(result with { RawLlmResponse = initialResult.RawLlmResponse }, prompt, sw.Elapsed)];
         }
 
         result = ApplyOutputConfig(result, candidateComments, config);
@@ -460,8 +473,16 @@ public sealed class ReviewWorker : BackgroundService
             .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct, reviewEvent)
             .ConfigureAwait(false);
 
+        var timings = new TraceTimings
+        {
+            GroundingMs = groundingElapsed.TotalMilliseconds,
+            RetrievalMs = retrievalElapsed.TotalMilliseconds,
+            FullFileContextMs = fullFileContextElapsed.TotalMilliseconds,
+            TotalMs = (clock.GetUtcNow() - reviewStartTime).TotalMilliseconds
+        };
+
         await traceWriter
-            .WriteAsync(BuildTrace(job, metadata, config, reviewStartTime, incrementalType, files, reviewChunks.Count, repositoryContext?.Count ?? 0, promptBudget, candidateComments, result), ct)
+            .WriteAsync(BuildTrace(job, metadata, config, reviewStartTime, incrementalType, files, reviewChunks.Count, repositoryContext?.Count ?? 0, promptBudget, candidateComments, result, chunkOutcomes, timings, traceWriter.IncludePrompts), ct)
             .ConfigureAwait(false);
 
         await prReviewStateStore
@@ -471,6 +492,11 @@ public sealed class ReviewWorker : BackgroundService
 
         return JobProcessStatus.Success;
     }
+
+    private sealed record ChunkReviewOutcome(
+        ReviewResult Result,
+        PromptPayload Prompt,
+        TimeSpan Elapsed);
 
     private static ReviewTrace BuildTrace(
         ReviewJob job,
@@ -483,7 +509,10 @@ public sealed class ReviewWorker : BackgroundService
         int retrievalSnippetsCount,
         PromptBudget promptBudget,
         IReadOnlyList<InlineComment> candidateComments,
-        ReviewResult result)
+        ReviewResult result,
+        IReadOnlyList<ChunkReviewOutcome>? chunkOutcomes,
+        TraceTimings timings,
+        bool includePrompts)
     {
         return new ReviewTrace
         {
@@ -545,7 +574,31 @@ public sealed class ReviewWorker : BackgroundService
                     CompletionTokens = usage.CompletionTokens,
                     CachedPromptTokens = usage.CachedPromptTokens
                 }
-                : null
+                : null,
+            ChunkTraces = chunkOutcomes?.Select((o, i) => BuildTraceChunk(o, i, chunkOutcomes.Count, includePrompts)).ToArray(),
+            Timings = timings
+        };
+    }
+
+    private static TraceChunk BuildTraceChunk(ChunkReviewOutcome outcome, int index, int totalChunks, bool includePrompts)
+    {
+        var systemBytes = System.Text.Encoding.UTF8.GetByteCount(outcome.Prompt.SystemPrompt);
+        var userBytes = System.Text.Encoding.UTF8.GetByteCount(outcome.Prompt.UserPrompt);
+        var rawBytes = outcome.Result.RawLlmResponse is { } raw ? System.Text.Encoding.UTF8.GetByteCount(raw) : 0;
+        return new TraceChunk
+        {
+            ChunkIndex = index + 1,
+            TotalChunks = totalChunks,
+            Files = outcome.Result.Comments.Count > 0
+                ? outcome.Result.Comments.Select(c => c.Path).Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal).ToArray()
+                : [],
+            ElapsedMs = outcome.Elapsed.TotalMilliseconds,
+            PromptSystemBytes = systemBytes,
+            PromptUserBytes = userBytes,
+            PromptSystem = includePrompts ? outcome.Prompt.SystemPrompt : null,
+            PromptUser = includePrompts ? outcome.Prompt.UserPrompt : null,
+            RawLlmResponseBytes = rawBytes,
+            RawLlmResponse = includePrompts ? outcome.Result.RawLlmResponse : null
         };
     }
 
@@ -607,7 +660,7 @@ public sealed class ReviewWorker : BackgroundService
         return chunks;
     }
 
-    private async Task<ReviewResult> ReviewChunksAsync(
+    private async Task<IReadOnlyList<ChunkReviewOutcome>> ReviewChunksAsync(
         IReviewLlm llm,
         IReadOnlyList<ReviewChunk> chunks,
         PullRequestMetadata metadata,
@@ -619,10 +672,9 @@ public sealed class ReviewWorker : BackgroundService
         string installationToken,
         CancellationToken ct)
     {
-        IReadOnlyList<ReviewResult> results;
         if (llm.SupportsParallelRequests)
         {
-            results = await Task.WhenAll(chunks.Select(chunk => ReviewChunkAsync(
+            return await Task.WhenAll(chunks.Select(chunk => ReviewChunkAsync(
                     llm,
                     chunk,
                     metadata,
@@ -635,32 +687,28 @@ public sealed class ReviewWorker : BackgroundService
                     ct)))
                 .ConfigureAwait(false);
         }
-        else
-        {
-            var sequentialResults = new List<ReviewResult>(chunks.Count);
-            foreach (var chunk in chunks)
-            {
-                sequentialResults.Add(await ReviewChunkAsync(
-                        llm,
-                        chunk,
-                        metadata,
-                        config,
-                        grounding,
-                        repositoryContext,
-                        fullFileContents,
-                        job,
-                        installationToken,
-                        ct)
-                    .ConfigureAwait(false));
-            }
 
-            results = sequentialResults;
+        var sequentialResults = new List<ChunkReviewOutcome>(chunks.Count);
+        foreach (var chunk in chunks)
+        {
+            sequentialResults.Add(await ReviewChunkAsync(
+                    llm,
+                    chunk,
+                    metadata,
+                    config,
+                    grounding,
+                    repositoryContext,
+                    fullFileContents,
+                    job,
+                    installationToken,
+                    ct)
+                .ConfigureAwait(false));
         }
 
-        return ReviewResultMerger.Merge(results);
+        return sequentialResults;
     }
 
-    private async Task<ReviewResult> ReviewChunkAsync(
+    private async Task<ChunkReviewOutcome> ReviewChunkAsync(
         IReviewLlm llm,
         ReviewChunk chunk,
         PullRequestMetadata metadata,
@@ -685,6 +733,7 @@ public sealed class ReviewWorker : BackgroundService
             ChunkIndex: chunk.Index,
             TotalChunks: chunk.TotalChunks);
 
+        var prompt = PromptBuilder.Build(request);
         var sw = Stopwatch.StartNew();
         var result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
         sw.Stop();
@@ -696,7 +745,7 @@ public sealed class ReviewWorker : BackgroundService
             job.DeliveryId);
         metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
 
-        return await ApplyAgenticContextAsync(
+        var finalResult = await ApplyAgenticContextAsync(
                 llm,
                 request,
                 result,
@@ -706,6 +755,8 @@ public sealed class ReviewWorker : BackgroundService
                 installationToken,
                 ct)
             .ConfigureAwait(false);
+
+        return new ChunkReviewOutcome(finalResult with { RawLlmResponse = result.RawLlmResponse }, prompt, sw.Elapsed);
     }
 
     private static IReadOnlyDictionary<string, string>? FilterFullFileContents(

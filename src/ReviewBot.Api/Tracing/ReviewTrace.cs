@@ -22,6 +22,8 @@ public sealed class ReviewTrace
     public required IReadOnlyList<TraceComment> CandidateComments { get; init; }
     public required IReadOnlyList<TraceComment> FinalComments { get; init; }
     public TraceLlmTokenUsage? TokenUsage { get; init; }
+    public IReadOnlyList<TraceChunk>? ChunkTraces { get; init; }
+    public TraceTimings? Timings { get; init; }
 }
 
 public sealed class TraceBudgetSnapshot
@@ -57,4 +59,26 @@ public sealed class TraceLlmTokenUsage
     public required int PromptTokens { get; init; }
     public required int CompletionTokens { get; init; }
     public int CachedPromptTokens { get; init; }
+}
+
+public sealed class TraceChunk
+{
+    public required int ChunkIndex { get; init; }
+    public required int TotalChunks { get; init; }
+    public required IReadOnlyList<string> Files { get; init; }
+    public required double ElapsedMs { get; init; }
+    public int PromptSystemBytes { get; init; }
+    public int PromptUserBytes { get; init; }
+    public string? PromptSystem { get; init; }
+    public string? PromptUser { get; init; }
+    public int RawLlmResponseBytes { get; init; }
+    public string? RawLlmResponse { get; init; }
+}
+
+public sealed class TraceTimings
+{
+    public double GroundingMs { get; init; }
+    public double RetrievalMs { get; init; }
+    public double FullFileContextMs { get; init; }
+    public double TotalMs { get; init; }
 }

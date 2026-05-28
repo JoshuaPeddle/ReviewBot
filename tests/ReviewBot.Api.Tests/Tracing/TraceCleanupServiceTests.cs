@@ -2,6 +2,7 @@ using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using ReviewBot.Api.Tracing;
+using MsOptions = Microsoft.Extensions.Options.Options;
 
 namespace ReviewBot.Api.Tests.Tracing;
 
@@ -80,7 +81,7 @@ public class TraceCleanupServiceTests : IDisposable
         int maxDiskMb,
         string? tracesDir = null) =>
         new(
-            Options.Create(new TracingOptions
+            MsOptions.Create(new TracingOptions
             {
                 Enabled = true,
                 RetentionDays = retentionDays,

@@ -55,7 +55,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
         var firstParse = LlmResultParser.Parse(firstResponse, logger);
         if (firstParse is { Success: true, Value: not null })
         {
-            return firstParse.Value with { TokenUsage = firstUsage };
+            return firstParse.Value with { TokenUsage = firstUsage, RawLlmResponse = firstResponse };
         }
 
         logger.LogWarning(
@@ -71,7 +71,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
         if (repairParse is { Success: true, Value: not null })
         {
             ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: true);
-            return repairParse.Value with { TokenUsage = totalUsage };
+            return repairParse.Value with { TokenUsage = totalUsage, RawLlmResponse = firstResponse };
         }
 
         logger.LogWarning(
@@ -79,7 +79,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
             repairParse.Error,
             Truncate(repairResponse, MaxLoggedRawResponseLength));
         ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: false);
-        return new ReviewResult(string.Empty, []) { TokenUsage = totalUsage };
+        return new ReviewResult(string.Empty, []) { TokenUsage = totalUsage, RawLlmResponse = firstResponse };
     }
 
     public async Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review")
