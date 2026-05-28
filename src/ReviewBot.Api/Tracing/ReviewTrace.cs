@@ -74,6 +74,28 @@ public sealed class TraceChunk
     public string? PromptUser { get; init; }
     public int RawLlmResponseBytes { get; init; }
     public string? RawLlmResponse { get; init; }
+    public TraceAgenticContext? AgenticContext { get; init; }
+}
+
+public sealed class TraceAgenticContext
+{
+    public required IReadOnlyList<TraceContextRequest> Requested { get; init; }
+    public required IReadOnlyList<TraceContextRequest> Accepted { get; init; }
+    public required IReadOnlyList<string> FetchedPaths { get; init; }
+    public required IReadOnlyList<TraceDropCount> DropCounts { get; init; }
+    public bool SecondPassRan { get; init; }
+}
+
+public sealed class TraceContextRequest
+{
+    public required string Path { get; init; }
+    public string? Reason { get; init; }
+}
+
+public sealed class TraceDropCount
+{
+    public required string Reason { get; init; }
+    public required int Count { get; init; }
 }
 
 public sealed class TraceTimings

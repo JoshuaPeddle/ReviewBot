@@ -3090,6 +3090,102 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task TraceContainsAgenticContextRequestsFetchesAndDrops()
+    {
+        ReviewTrace? capturedTrace = null;
+        var traceWriter = Substitute.For<IReviewTraceWriter>();
+        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedTrace = call.Arg<ReviewTrace>();
+                return Task.CompletedTask;
+            });
+
+        await using var fixture = new WorkerFixture(traceWriter: traceWriter);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                AgenticContext = true,
+                MaxContextRequests = 2
+            },
+            Ignore = ["docs/**"]
+        };
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Initial.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "Initial comment.", Severity.Info)],
+                [
+                    new ContextRequest("../bad.cs", "unsafe"),
+                    new ContextRequest("docs/Guide.md", "ignored docs"),
+                    new ContextRequest("src/IFoo.cs", "contract"),
+                    new ContextRequest("src/Base.cs", "base class"),
+                    new ContextRequest("src/TooMany.cs", "over cap")
+                ])
+            {
+                TokenUsage = new LlmTokenUsage(1000, 200)
+            });
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs([("src/IFoo.cs", "public interface IFoo {}")]);
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
+            .Returns("""
+            {
+              "summary": "Final summary.",
+              "comments": [
+                {
+                  "path": "src/App.cs",
+                  "line": 1,
+                  "side": "RIGHT",
+                  "severity": "warning",
+                  "confidence": "high",
+                  "body": "Final context-informed comment."
+                }
+              ]
+            }
+            """);
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+        capturedTrace.Should().NotBeNull();
+        var chunk = capturedTrace!.ChunkTraces.Should().ContainSingle().Subject;
+        chunk.AgenticContext.Should().NotBeNull();
+        var agentic = chunk.AgenticContext!;
+        agentic.SecondPassRan.Should().BeTrue();
+        agentic.Requested.Select(request => request.Path)
+            .Should().Equal("../bad.cs", "docs/Guide.md", "src/IFoo.cs", "src/Base.cs", "src/TooMany.cs");
+        agentic.Accepted.Select(request => request.Path)
+            .Should().Equal("src/IFoo.cs", "src/Base.cs");
+        agentic.FetchedPaths.Should().Equal("src/IFoo.cs");
+        agentic.DropCounts.Should().BeEquivalentTo(
+        [
+            new TraceDropCount { Reason = "invalid_path", Count = 1 },
+            new TraceDropCount { Reason = "ignored", Count = 1 },
+            new TraceDropCount { Reason = "cap", Count = 1 }
+        ]);
+        capturedTrace.TokenUsage.Should().BeEquivalentTo(new TraceLlmTokenUsage
+        {
+            PromptTokens = 1000,
+            CompletionTokens = 200,
+            CachedPromptTokens = 0
+        });
+    }
+
+    [Fact]
     public async Task TraceContainsEstimatedCostWhenCostCalculatorReturnsValue()
     {
         ReviewTrace? capturedTrace = null;

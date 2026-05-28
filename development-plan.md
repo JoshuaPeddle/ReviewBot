@@ -433,7 +433,19 @@ Corrected assumptions discovered during implementation:
 - `AddOtlpExporter()` on `TracerProviderBuilder` requires `using OpenTelemetry.Trace;` — distinct from the metrics extension in `OpenTelemetry.Metrics`.
 - Sub-spans inside the grounding and retrieval providers (tier1_language, tier2_build, extract_symbols, index_sha, lookup) are not yet emitted because those providers don't reference `ReviewBotActivitySource`. They are a follow-on: each project would need to reference a shared source or define its own. `retrieval.symbols_queried` is similarly not available from the current `RetrievalContextResult` interface.
 
-Remaining in Phase 23: per-chunk agentic context capture (files requested, fetched, drop reasons) in the trace JSON. This is smaller than the spans slice; the agentic context data flows into `ReviewResult.ContextRequests` but is not surfaced in `TraceChunk`.
+#### Completed per-chunk agentic trace slice (May 28, 2026)
+
+Shipped the remaining trace-detail gap for agentic context:
+
+- Added `TraceAgenticContext` under each `TraceChunk`, capturing requested context files, accepted context files after validation, fetched file paths, drop-reason counts, and whether the second-pass review ran.
+- Wired `ReviewWorker` so both single-chunk and multi-chunk review outcomes carry agentic context trace data without changing review posting behavior.
+- Added trace serialization coverage for the new snake_case fields and a worker integration test proving requested/accepted/fetched/drop data appears in the emitted review trace.
+- Fixed a bug discovered while reading the agentic-context path: successful agentic second-pass results replaced the initial `ReviewResult` and dropped the primary LLM call's `TokenUsage`, hiding token/cost data for those reviews. The worker now preserves the initial token usage when the enriched parsed result replaces the review.
+
+Corrected assumptions discovered during implementation:
+
+- `ReviewResult.ContextRequests` only preserves what the model asked for; it does not include validation outcomes or fetch results. Trace data needs to be captured at the agentic-context boundary before the final result is filtered or merged.
+- Agentic second-pass completions currently use `CompleteRawAsync`, which does not return token usage. Until raw-completion usage is exposed, the trace/cost surface can preserve the primary review token usage but cannot count the second-pass completion separately.
 
 Span attributes: `review.owner`, `review.repo`, `review.pr_number`, `review.sha`, `review.model`, `review.chunk_index`, `review.total_chunks`, `llm.prompt_tokens`, `llm.completion_tokens`, `retrieval.symbols_queried`, `retrieval.snippets_returned`, `retrieval.bytes_used`.
 
@@ -516,5 +528,7 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 **SQLite index contention.** The repo index uses SQLite. Concurrent reviews of the same repo could race on index writes. SQLite with WAL mode handles concurrent reads fine but serializes writes. For the expected deployment scale (single-maintainer self-hosted), this is acceptable. If concurrent review volume grows, the contention will show up as index write latency in OTel spans (now available as of May 28).
 
 **OTel sub-provider span coverage gap.** Grounding and retrieval provider internals (tier1_language, tier2_build, extract_symbols, index_sha, lookup) are not yet spanned; only the top-level call from `ReviewWorker` is. Status: opened May 28. Mitigation: the top-level spans give the stage-level timing needed for Phase 24 dashboards; sub-provider spans are a follow-on once Phase 24 is underway.
+
+**Agentic trace blind spot.** The trace previously showed final review outputs but not the files requested by agentic context, validation drops, or fetched paths, making second-pass review behavior difficult to debug. Status: closed May 28; `TraceChunk.AgenticContext` now records requested, accepted, fetched, drop counts, and whether the second pass ran. Remaining limitation: second-pass raw-completion token usage is not available from `CompleteRawAsync`, so only primary review token usage is preserved for enriched results.
 
 **Anthropic SDK stability.** `Anthropic.SDK` 5.x remains unofficial. Prompt caching and fine-grained cache control are version-sensitive. Pin the version in `Directory.Packages.props` and document. Watch for an official Anthropic .NET SDK; migrate when one ships.

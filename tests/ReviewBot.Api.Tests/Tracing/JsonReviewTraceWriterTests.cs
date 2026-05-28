@@ -239,6 +239,63 @@ public class JsonReviewTraceWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task WriteAsync_SerializesAgenticContextOnChunkTrace()
+    {
+        var writer = CreateWriter(enabled: true);
+        var trace = CreateTrace(chunkTraces:
+        [
+            new TraceChunk
+            {
+                ChunkIndex = 1,
+                TotalChunks = 1,
+                Files = ["src/A.cs"],
+                ElapsedMs = 500,
+                PromptSystemBytes = 100,
+                PromptUserBytes = 200,
+                RawLlmResponseBytes = 0,
+                AgenticContext = new TraceAgenticContext
+                {
+                    Requested =
+                    [
+                        new TraceContextRequest { Path = "../bad.cs", Reason = "unsafe" },
+                        new TraceContextRequest { Path = "src/IFoo.cs", Reason = "contract" }
+                    ],
+                    Accepted =
+                    [
+                        new TraceContextRequest { Path = "src/IFoo.cs", Reason = "contract" }
+                    ],
+                    FetchedPaths = ["src/IFoo.cs"],
+                    DropCounts =
+                    [
+                        new TraceDropCount { Reason = "invalid_path", Count = 1 }
+                    ],
+                    SecondPassRan = true
+                }
+            }
+        ]);
+
+        await writer.WriteAsync(trace);
+
+        var filePath = Path.Combine(tempDir, "octo-org", "reviewbot", "42-delivery-abc.json");
+        var json = await File.ReadAllTextAsync(filePath);
+        var doc = JsonDocument.Parse(json);
+        var agentic = doc.RootElement
+            .GetProperty("chunk_traces")[0]
+            .GetProperty("agentic_context");
+
+        agentic.GetProperty("second_pass_ran").GetBoolean().Should().BeTrue();
+        agentic.GetProperty("requested").EnumerateArray().Select(e => e.GetProperty("path").GetString())
+            .Should().Equal("../bad.cs", "src/IFoo.cs");
+        agentic.GetProperty("accepted").EnumerateArray().Select(e => e.GetProperty("path").GetString())
+            .Should().Equal("src/IFoo.cs");
+        agentic.GetProperty("fetched_paths").EnumerateArray().Select(e => e.GetString())
+            .Should().Equal("src/IFoo.cs");
+        var drop = agentic.GetProperty("drop_counts").EnumerateArray().Should().ContainSingle().Subject;
+        drop.GetProperty("reason").GetString().Should().Be("invalid_path");
+        drop.GetProperty("count").GetInt32().Should().Be(1);
+    }
+
+    [Fact]
     public async Task WriteAsync_SerializesTimings()
     {
         var writer = CreateWriter(enabled: true);

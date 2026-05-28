@@ -446,10 +446,11 @@ public sealed class ReviewWorker : BackgroundService
             var initialResult = result;
             var initialCandidateComments = FilterCandidateComments(initialResult, config);
             var speculativeSelfCritique = StartSelfCritiqueIfNeeded(llm, files, initialCandidateComments, config, ct);
+            AgenticContextReviewOutcome agenticOutcome;
 
             try
             {
-                result = await ApplyAgenticContextAsync(
+                agenticOutcome = await ApplyAgenticContextAsync(
                         llm,
                         request,
                         result,
@@ -459,6 +460,7 @@ public sealed class ReviewWorker : BackgroundService
                         installationToken.Token,
                         ct)
                     .ConfigureAwait(false);
+                result = agenticOutcome.Result;
             }
             catch
             {
@@ -483,7 +485,15 @@ public sealed class ReviewWorker : BackgroundService
 
             // Build a single-chunk outcome for tracing; carry the raw response from the initial call
             // since result may have been replaced by agentic context with a new summary.
-            chunkOutcomes = [new ChunkReviewOutcome(result with { RawLlmResponse = initialResult.RawLlmResponse }, prompt, sw.Elapsed, files)];
+            chunkOutcomes =
+            [
+                new ChunkReviewOutcome(
+                    result with { RawLlmResponse = initialResult.RawLlmResponse },
+                    prompt,
+                    sw.Elapsed,
+                    files,
+                    agenticOutcome.Trace)
+            ];
         }
 
         result = ApplyOutputConfig(result, candidateComments, config);
@@ -553,7 +563,19 @@ public sealed class ReviewWorker : BackgroundService
         ReviewResult Result,
         PromptPayload Prompt,
         TimeSpan Elapsed,
-        IReadOnlyList<FileChange>? ChunkFiles = null);
+        IReadOnlyList<FileChange>? ChunkFiles = null,
+        AgenticContextTraceData? AgenticContext = null);
+
+    private sealed record AgenticContextReviewOutcome(
+        ReviewResult Result,
+        AgenticContextTraceData? Trace);
+
+    private sealed record AgenticContextTraceData(
+        IReadOnlyList<ContextRequest> Requested,
+        IReadOnlyList<ContextRequest> Accepted,
+        IReadOnlyList<string> FetchedPaths,
+        IReadOnlyDictionary<string, int> DropCounts,
+        bool SecondPassRan);
 
     private static ReviewTrace BuildTrace(
         ReviewJob job,
@@ -658,7 +680,38 @@ public sealed class ReviewWorker : BackgroundService
             PromptSystem = includePrompts ? outcome.Prompt.SystemPrompt : null,
             PromptUser = includePrompts ? outcome.Prompt.UserPrompt : null,
             RawLlmResponseBytes = rawBytes,
-            RawLlmResponse = includePrompts ? outcome.Result.RawLlmResponse : null
+            RawLlmResponse = includePrompts ? outcome.Result.RawLlmResponse : null,
+            AgenticContext = outcome.AgenticContext is { } agenticContext
+                ? new TraceAgenticContext
+                {
+                    Requested = agenticContext.Requested
+                        .Select(request => new TraceContextRequest
+                        {
+                            Path = request.Path,
+                            Reason = request.Reason
+                        })
+                        .ToArray(),
+                    Accepted = agenticContext.Accepted
+                        .Select(request => new TraceContextRequest
+                        {
+                            Path = request.Path,
+                            Reason = request.Reason
+                        })
+                        .ToArray(),
+                    FetchedPaths = agenticContext.FetchedPaths
+                        .OrderBy(path => path, StringComparer.Ordinal)
+                        .ToArray(),
+                    DropCounts = agenticContext.DropCounts
+                        .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                        .Select(pair => new TraceDropCount
+                        {
+                            Reason = pair.Key,
+                            Count = pair.Value
+                        })
+                        .ToArray(),
+                    SecondPassRan = agenticContext.SecondPassRan
+                }
+                : null
         };
     }
 
@@ -819,7 +872,7 @@ public sealed class ReviewWorker : BackgroundService
             job.DeliveryId);
         metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
 
-        var finalResult = await ApplyAgenticContextAsync(
+        var agenticOutcome = await ApplyAgenticContextAsync(
                 llm,
                 request,
                 result,
@@ -830,7 +883,12 @@ public sealed class ReviewWorker : BackgroundService
                 ct)
             .ConfigureAwait(false);
 
-        return new ChunkReviewOutcome(finalResult with { RawLlmResponse = result.RawLlmResponse }, prompt, sw.Elapsed, chunk.Files);
+        return new ChunkReviewOutcome(
+            agenticOutcome.Result with { RawLlmResponse = result.RawLlmResponse },
+            prompt,
+            sw.Elapsed,
+            chunk.Files,
+            agenticOutcome.Trace);
     }
 
     private static IReadOnlyDictionary<string, string>? FilterFullFileContents(
@@ -1592,7 +1650,7 @@ public sealed class ReviewWorker : BackgroundService
         return result with { Summary = summary };
     }
 
-    private async Task<ReviewResult> ApplyAgenticContextAsync(
+    private async Task<AgenticContextReviewOutcome> ApplyAgenticContextAsync(
         IReviewLlm llm,
         ReviewRequest request,
         ReviewResult initialResult,
@@ -1604,15 +1662,21 @@ public sealed class ReviewWorker : BackgroundService
     {
         if (!config.Review.AgenticContext || initialResult.ContextRequests.Count == 0)
         {
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, null);
         }
 
         var validation = FilterContextRequests(initialResult.ContextRequests, config);
         LogContextRequestDrops(validation.DropCounts, initialResult.ContextRequests.Count, validation.Requests.Count, job);
+        var trace = new AgenticContextTraceData(
+            initialResult.ContextRequests.ToArray(),
+            validation.Requests.ToArray(),
+            Array.Empty<string>(),
+            new Dictionary<string, int>(validation.DropCounts, StringComparer.Ordinal),
+            SecondPassRan: false);
 
         if (validation.Requests.Count == 0)
         {
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, trace);
         }
 
         logger.LogInformation(
@@ -1640,8 +1704,16 @@ public sealed class ReviewWorker : BackgroundService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Agentic context file fetch failed; using initial comments");
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, trace);
         }
+
+        trace = trace with
+        {
+            FetchedPaths = fetchedFiles
+                .Select(file => file.Path)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray()
+        };
 
         if (fetchedFiles.Count == 0)
         {
@@ -1651,7 +1723,7 @@ public sealed class ReviewWorker : BackgroundService
                 job.Owner,
                 job.Repo,
                 job.PrNumber);
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, trace);
         }
 
         logger.LogInformation(
@@ -1675,6 +1747,7 @@ public sealed class ReviewWorker : BackgroundService
                 "agentic_context");
 
             var enrichedParsed = LlmResultParser.Parse(enrichedRaw, logger);
+            trace = trace with { SecondPassRan = true };
             if (enrichedParsed.Success)
             {
                 logger.LogInformation(
@@ -1683,18 +1756,20 @@ public sealed class ReviewWorker : BackgroundService
                     job.Repo,
                     job.PrNumber,
                     enrichedParsed.Value!.Comments.Count);
-                return enrichedParsed.Value!;
+                return new AgenticContextReviewOutcome(
+                    enrichedParsed.Value! with { TokenUsage = initialResult.TokenUsage },
+                    trace);
             }
 
             logger.LogWarning(
                 "Agentic context second-pass response was invalid: {Error}; using initial comments",
                 enrichedParsed.Error);
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, trace);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Agentic context second pass failed; using initial comments");
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, trace with { SecondPassRan = true });
         }
     }
 
