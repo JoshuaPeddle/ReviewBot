@@ -46,16 +46,12 @@ public sealed class TraceCleanupService(
         }
 
         var cutoff = clock.GetUtcNow().UtcDateTime - TimeSpan.FromDays(options.RetentionDays);
-        var allFiles = Directory
-            .GetFiles(tracesDir, "*.json", SearchOption.AllDirectories)
-            .Select(path => new FileInfo(path))
-            .OrderBy(fi => fi.LastWriteTimeUtc)
-            .ToArray();
-
         var deletedByAge = 0;
-        var remainingFiles = new List<FileInfo>(allFiles.Length);
+        var remainingFiles = new List<FileInfo>();
 
-        foreach (var fi in allFiles)
+        foreach (var fi in Directory
+            .EnumerateFiles(tracesDir, "*.json", SearchOption.AllDirectories)
+            .Select(path => new FileInfo(path)))
         {
             if (fi.LastWriteTimeUtc < cutoff)
             {
@@ -72,7 +68,7 @@ public sealed class TraceCleanupService(
         var totalBytes = remainingFiles.Sum(fi => fi.Length);
         var deletedBySize = 0;
 
-        foreach (var fi in remainingFiles)
+        foreach (var fi in remainingFiles.OrderBy(fi => fi.LastWriteTimeUtc))
         {
             if (totalBytes <= maxBytes)
             {

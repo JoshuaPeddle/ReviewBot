@@ -6,7 +6,7 @@ public sealed class TracingOptions
 
     public bool Enabled { get; set; } = false;
 
-    public bool IncludePrompts { get; set; } = true;
+    public bool IncludePrompts { get; set; } = false;
 
     public int MaxDiskMb { get; set; } = 500;
 

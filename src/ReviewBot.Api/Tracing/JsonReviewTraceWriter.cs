@@ -39,12 +39,19 @@ public sealed class JsonReviewTraceWriter : IReviewTraceWriter
             var filePath = Path.Combine(dir, fileName);
             var tempPath = filePath + ".tmp";
 
-            await using (var stream = File.Open(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            try
             {
-                await JsonSerializer.SerializeAsync(stream, trace, SerializerOptions, ct).ConfigureAwait(false);
-            }
+                await using (var stream = File.Open(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    await JsonSerializer.SerializeAsync(stream, trace, SerializerOptions, ct).ConfigureAwait(false);
+                }
 
-            File.Move(tempPath, filePath, overwrite: true);
+                File.Move(tempPath, filePath, overwrite: true);
+            }
+            finally
+            {
+                DeleteTempFileIfPresent(tempPath);
+            }
 
             logger.LogDebug(
                 "Review trace written for {DeliveryId} to {FilePath}",
@@ -60,6 +67,18 @@ public sealed class JsonReviewTraceWriter : IReviewTraceWriter
                 trace.Owner,
                 trace.Repo,
                 trace.PrNumber);
+        }
+    }
+
+    private void DeleteTempFileIfPresent(string tempPath)
+    {
+        try
+        {
+            File.Delete(tempPath);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Failed to delete temporary review trace file {TempPath}", tempPath);
         }
     }
 }
