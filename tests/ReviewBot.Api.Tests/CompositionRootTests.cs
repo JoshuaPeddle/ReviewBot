@@ -10,6 +10,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using ReviewBot.Core.Context;
 using NSubstitute;
 using ReviewBot.Core.Domain;
@@ -20,6 +21,9 @@ using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding.Build;
 using ReviewBot.Persistence;
+using ReviewBot.Retrieval;
+using ReviewBot.Retrieval.Indexing;
+using ReviewBot.Retrieval.Symbols;
 
 namespace ReviewBot.Api.Tests;
 
@@ -73,6 +77,28 @@ public class CompositionRootTests
             .Should().Be(128_000);
         scope.ServiceProvider.GetRequiredService<IPromptTokenEstimator>()
             .Should().BeOfType<HeuristicTokenEstimator>();
+        scope.ServiceProvider.GetRequiredService<IReviewPromptTokenEstimator>()
+            .Should().BeOfType<ReviewPromptTokenEstimator>();
+        scope.ServiceProvider.GetServices<IProviderPromptTokenEstimator>()
+            .Should().ContainSingle(estimator => estimator.ProviderName == "anthropic");
+    }
+
+    [Fact]
+    public async Task RetrievalServicesAreRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<IDiffSymbolExtractor>()
+            .Should().BeOfType<CSharpDiffSymbolExtractor>();
+        scope.ServiceProvider.GetRequiredService<IRepoIndexFactory>()
+            .Should().BeOfType<SqliteRepoIndexFactory>();
+        scope.ServiceProvider.GetServices<IRepoSymbolParser>()
+            .Should().ContainSingle(parser => parser.GetType() == typeof(CSharpRepoSymbolParser));
+        scope.ServiceProvider.GetRequiredService<IRetrievalProvider>()
+            .Should().BeOfType<SqliteRetrievalProvider>();
+        factory.Services.GetServices<IHostedService>()
+            .Should().Contain(service => service.GetType() == typeof(RepoIndexCleanupService));
     }
 
     [Fact]

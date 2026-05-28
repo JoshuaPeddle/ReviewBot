@@ -4,6 +4,8 @@ namespace ReviewBot.Evals.Tests;
 
 public sealed class EvalQuickFixtureTests
 {
+    private const int ExpectedQuickFixtureCount = 5;
+
     [Fact]
     public async Task QuickFixtureCorpusScoresCleanly()
     {
@@ -14,8 +16,8 @@ public sealed class EvalQuickFixtureTests
         var runScore = await new EvalRunScorer().ScoreAsync(fixturesDirectory, resultsDirectory);
 
         runScore.Passed.Should().BeTrue();
-        runScore.TotalFixtures.Should().Be(3);
-        runScore.PassedFixtures.Should().Be(3);
+        runScore.TotalFixtures.Should().Be(ExpectedQuickFixtureCount);
+        runScore.PassedFixtures.Should().Be(ExpectedQuickFixtureCount);
         runScore.Precision.Should().Be(1);
         runScore.Recall.Should().Be(1);
         runScore.F1.Should().Be(1);
@@ -32,9 +34,26 @@ public sealed class EvalQuickFixtureTests
             .Where(directory => File.Exists(Path.Combine(directory, "fixture.yaml")))
             .ToArray();
 
-        fixtureDirectories.Should().HaveCount(3);
+        fixtureDirectories.Should().HaveCount(ExpectedQuickFixtureCount);
         fixtureDirectories.Should().OnlyContain(directory =>
             Directory.Exists(Path.Combine(directory, "repo-state")));
+    }
+
+    [Fact]
+    public void QuickFixturesCoverChunkedReviewRetrievalGaps()
+    {
+        var repoRoot = FindRepoRoot();
+        var fixturesDirectory = Path.Combine(repoRoot, "tests", "ReviewBot.Evals", "Fixtures");
+        var loader = new EvalFixtureLoader();
+
+        var categories = Directory
+            .EnumerateDirectories(fixturesDirectory)
+            .Where(directory => File.Exists(Path.Combine(directory, "fixture.yaml")))
+            .Select(directory => loader.Load(directory).Metadata.Category)
+            .ToArray();
+
+        categories.Should().Contain("large_pr_chunking");
+        categories.Should().Contain("cross_chunk_reference");
     }
 
     private static string FindRepoRoot()

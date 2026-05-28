@@ -340,6 +340,20 @@ public class PullRequestFetcherTests
     }
 
     [Fact]
+    public async Task GetChangedFilesSinceAsyncIncludesPreviousFileNameForRenames()
+    {
+        var (clientFactory, commits) = CreateClientFactoryWithCommits();
+        commits.Compare("octo", "repo", "base-sha", "head-sha")
+            .Returns(Task.FromResult(CreateCompareResult(CreateCommitFile("src/NewName.cs", "src/OldName.cs"))));
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var result = await fetcher.GetChangedFilesSinceAsync("octo", "repo", "base-sha", "head-sha", "ghs_token", CancellationToken.None);
+
+        result.Paths.Should().BeEquivalentTo(["src/NewName.cs", "src/OldName.cs"]);
+        result.IsComplete.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task GetChangedFilesSinceAsyncMarksExactly300FilesAsIncomplete()
     {
         var (clientFactory, commits) = CreateClientFactoryWithCommits();
@@ -580,7 +594,7 @@ public class PullRequestFetcherTests
         return new RateLimitExceededException(response);
     }
 
-    private static GitHubCommitFile CreateCommitFile(string filename) => new(
+    private static GitHubCommitFile CreateCommitFile(string filename, string? previousFileName = null) => new(
         filename,
         additions: 1,
         deletions: 0,
@@ -591,7 +605,7 @@ public class PullRequestFetcherTests
         rawUrl: $"https://raw.githubusercontent.com/octo/repo/sha/{filename}",
         sha: "file-sha",
         patch: null,
-        previousFileName: null);
+        previousFileName: previousFileName);
 
     private static CompareResult CreateCompareResult(params GitHubCommitFile[] files) => new(
         url: "https://api.github.com/repos/octo/repo/compare/base...head",

@@ -4,11 +4,16 @@ namespace ReviewBot.Core.Context;
 
 public sealed class ReviewChunkPlanner
 {
-    private readonly IPromptTokenEstimator tokenEstimator;
+    private readonly Func<string?, int> estimateTokens;
 
     public ReviewChunkPlanner(IPromptTokenEstimator tokenEstimator)
+        : this(GetEstimateTokens(tokenEstimator))
     {
-        this.tokenEstimator = tokenEstimator ?? throw new ArgumentNullException(nameof(tokenEstimator));
+    }
+
+    public ReviewChunkPlanner(Func<string?, int> estimateTokens)
+    {
+        this.estimateTokens = estimateTokens ?? throw new ArgumentNullException(nameof(estimateTokens));
     }
 
     public int EstimateDiffTokens(IReadOnlyList<FileChange> files, int maxPatchLines)
@@ -85,7 +90,7 @@ public sealed class ReviewChunkPlanner
     }
 
     private int EstimateFileTokens(FileChange file, int maxPatchLines) =>
-        tokenEstimator.EstimateTokens(
+        estimateTokens(
             $"{file.Path} {file.Status} +{file.AdditionsCount} -{file.DeletionsCount}\n{TakePatchLines(file.Patch, maxPatchLines)}");
 
     private static string TakePatchLines(string patch, int maxPatchLines)
@@ -106,6 +111,12 @@ public sealed class ReviewChunkPlanner
     {
         var lastSlash = path.LastIndexOf('/');
         return lastSlash <= 0 ? string.Empty : path[..lastSlash];
+    }
+
+    private static Func<string?, int> GetEstimateTokens(IPromptTokenEstimator tokenEstimator)
+    {
+        ArgumentNullException.ThrowIfNull(tokenEstimator);
+        return tokenEstimator.EstimateTokens;
     }
 
     private sealed record FileTokenEstimate(FileChange File, int Tokens);

@@ -3,6 +3,7 @@ using Anthropic.SDK.Messaging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using ReviewBot.Core.Context;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Llm;
 using ReviewBot.Core.Prompting;
@@ -133,6 +134,7 @@ public sealed class AnthropicReviewLlmTests
     {
         var services = new ServiceCollection();
         services.AddSingleton<ILogger<AnthropicReviewLlm>>(NullLogger<AnthropicReviewLlm>.Instance);
+        services.AddSingleton<ILogger<AnthropicTokenEstimator>>(NullLogger<AnthropicTokenEstimator>.Instance);
 
         services.AddAnthropicReviewLlm(options =>
         {
@@ -145,6 +147,8 @@ public sealed class AnthropicReviewLlmTests
         provider.GetRequiredService<IReviewLlm>().Should().BeOfType<AnthropicReviewLlm>();
         provider.GetRequiredService<IConfigurableReviewLlm>().Should().BeOfType<AnthropicReviewLlm>();
         provider.GetRequiredService<AnthropicLlmOptions>().ModelName.Should().Be("claude-test");
+        provider.GetServices<IProviderPromptTokenEstimator>()
+            .Should().ContainSingle(estimator => estimator.ProviderName == "anthropic");
     }
 
     [Fact]
@@ -238,6 +242,72 @@ public sealed class AnthropicReviewLlmTests
             .Which.CacheControl.Should().BeNull();
     }
 
+    [Fact]
+    public void BuildTokenCountParametersMapsSystemAndUserMessages()
+    {
+        var request = new AnthropicTokenCountRequest(
+            ModelName: "claude-test",
+            SystemPrompt: "system",
+            UserMessages: ["first", "second"]);
+
+        var parameters = AnthropicSdkClient.BuildTokenCountParameters(request);
+
+        parameters.Model.Should().Be("claude-test");
+        parameters.System.Should().ContainSingle()
+            .Which.Text.Should().Be("system");
+        parameters.Messages.Select(message => ((TextContent)message.Content.Single()).Text)
+            .Should().Equal("first", "second");
+    }
+
+    [Fact]
+    public void AnthropicTokenEstimatorUsesHeuristicBelowThreshold()
+    {
+        var client = new FakeAnthropicClient();
+        var estimator = CreateTokenEstimator(
+            client,
+            thresholdTokens: 10,
+            heuristicTokens: 9);
+
+        var tokens = estimator.EstimateTokens(new ModelConfig("anthropic", "claude-test", null), "large-ish");
+
+        tokens.Should().Be(9);
+        client.TokenCountRequests.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void AnthropicTokenEstimatorCallsCountTokensForLargePrompts()
+    {
+        var client = new FakeAnthropicClient(123);
+        var estimator = CreateTokenEstimator(
+            client,
+            thresholdTokens: 10,
+            heuristicTokens: 10);
+
+        var tokens = estimator.EstimateTokens(new ModelConfig("anthropic", "claude-override", null), "large prompt");
+
+        tokens.Should().Be(123);
+        client.TokenCountRequests.Should().ContainSingle()
+            .Which.Should().BeEquivalentTo(new AnthropicTokenCountRequest(
+                ModelName: "claude-override",
+                SystemPrompt: null,
+                UserMessages: ["large prompt"]));
+    }
+
+    [Fact]
+    public void AnthropicTokenEstimatorFallsBackToHeuristicWhenCountFails()
+    {
+        var client = new FakeAnthropicClient(new HttpRequestException("unavailable"));
+        var estimator = CreateTokenEstimator(
+            client,
+            thresholdTokens: 10,
+            heuristicTokens: 10);
+
+        var tokens = estimator.EstimateTokens(new ModelConfig("anthropic", "claude-test", null), "large prompt");
+
+        tokens.Should().Be(10);
+        client.TokenCountRequests.Should().ContainSingle();
+    }
+
     private static AnthropicReviewLlm CreateLlm(FakeAnthropicClient client) =>
         CreateLlm(client, _ => Task.CompletedTask);
 
@@ -263,6 +333,21 @@ public sealed class AnthropicReviewLlmTests
             NullLogger<AnthropicReviewLlm>.Instance,
             client,
             (delay, _) => delayAsync(delay));
+
+    private static AnthropicTokenEstimator CreateTokenEstimator(
+        FakeAnthropicClient client,
+        int thresholdTokens,
+        int heuristicTokens) =>
+        new(
+            new AnthropicLlmOptions
+            {
+                ApiKey = "test-key",
+                ModelName = "claude-test",
+                TokenCountingHeuristicThresholdTokens = thresholdTokens
+            },
+            new FixedTokenEstimator(heuristicTokens),
+            NullLogger<AnthropicTokenEstimator>.Instance,
+            client);
 
     private static ReviewRequest CreateRequest() =>
         new(
@@ -292,6 +377,8 @@ public sealed class AnthropicReviewLlmTests
 
         public List<AnthropicMessageRequest> Requests { get; } = [];
 
+        public List<AnthropicTokenCountRequest> TokenCountRequests { get; } = [];
+
         public List<CancellationToken> CancellationTokens { get; } = [];
 
         public Task<string> CreateMessageAsync(AnthropicMessageRequest request, CancellationToken ct)
@@ -312,5 +399,29 @@ public sealed class AnthropicReviewLlmTests
                 _ => throw new InvalidOperationException($"Unsupported fake outcome type {outcome.GetType().FullName}."),
             };
         }
+
+        public Task<int> CountTokensAsync(AnthropicTokenCountRequest request, CancellationToken ct)
+        {
+            TokenCountRequests.Add(request);
+            CancellationTokens.Add(ct);
+
+            if (outcomes.Count == 0)
+            {
+                throw new InvalidOperationException("No fake Anthropic token count was configured.");
+            }
+
+            var outcome = outcomes.Dequeue();
+            return outcome switch
+            {
+                int tokens => Task.FromResult(tokens),
+                Exception exception => Task.FromException<int>(exception),
+                _ => throw new InvalidOperationException($"Unsupported fake outcome type {outcome.GetType().FullName}."),
+            };
+        }
+    }
+
+    private sealed class FixedTokenEstimator(int tokens) : IPromptTokenEstimator
+    {
+        public int EstimateTokens(string? text) => tokens;
     }
 }

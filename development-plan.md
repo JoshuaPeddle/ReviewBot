@@ -114,13 +114,28 @@ Shipped the context-window and heuristic-estimation primitives that unblock budg
 Shipped the first live worker integration for prompt budgeting:
 
 - Added repo YAML support for `review.response_reserve_tokens` with a 4,096-token default, non-negative validation, documentation, and config-fetcher tests.
-- Injected `IModelContextRegistry` and `IPromptTokenEstimator` into `ReviewWorker`; the worker now computes a per-review `PromptBudget` from model limit, base system prompt, grounding delta, response reserve, and PR metadata.
+- Injected `IModelContextRegistry` and a provider-aware token estimator into `ReviewWorker`; the worker now computes a per-review `PromptBudget` from model limit, base system prompt, grounding delta, response reserve, and PR metadata.
 - Made full-file context budget-aware: candidate fetches are selected only while estimated patch tokens fit the remaining content budget, fetched contents are re-estimated before prompt inclusion, and oversized fetched files are dropped instead of silently inflating the prompt.
 - Added debug logging for prompt budget inputs, consumed sections, and remaining budget; added a warning when estimated diff tokens exceed the remaining content budget.
 - Added worker tests for grounding-before-full-file budget ordering and budget-limited full-file fetches.
 - Corrected a Phase 21 latency assumption: full-file context cannot always race grounding anymore, because budget-aware selection needs the grounding token cost first.
 
-Remaining in Step 1: Anthropic `count_tokens` and retrieval budget integration. Oversized diffs are no longer warning-only when `review.chunked_review` is enabled; the worker now branches into the Step 2 chunk planner/dispatcher. The legacy patch-budget truncation path remains available only when chunking is disabled.
+#### Completed Anthropic token-counting slice (May 28, 2026)
+
+Shipped provider-aware token estimation for Anthropic-backed reviews:
+
+- Added `IReviewPromptTokenEstimator` plus provider-specific estimator registration so the worker can use Anthropic counting only when the selected model provider is `anthropic`; OpenAI-compatible and local providers continue to use the heuristic estimator.
+- Added `AnthropicTokenEstimator`, backed by the SDK `CountMessageTokensAsync` endpoint. It first runs the existing chars/3 heuristic and only calls `count_tokens` when the estimate reaches `Anthropic:TokenCountingHeuristicThresholdTokens` (default 8,000); `Anthropic:TokenCountingEnabled` can disable the API call path.
+- Count-token failures fall back to the heuristic estimate with a warning instead of failing the review.
+- Threaded provider-aware estimates through prompt-budget creation, diff accounting, chunk planning, and full-file budget checks.
+- Added Core tests for provider estimator selection, Anthropic tests for request mapping/threshold/fallback behavior, API DI coverage, and a worker integration test proving provider-aware estimates can trigger chunking.
+
+Corrected assumptions discovered during implementation:
+
+- Anthropic `count_tokens` cannot be registered as the global `IPromptTokenEstimator` because the app registers Anthropic and OpenAI-compatible adapters at the same time. The worker needs provider-aware estimation based on the effective repo model config.
+- The current estimator interface is synchronous, so Anthropic counting blocks on the SDK async call at the budgeting boundary. This keeps the slice scoped but should be revisited if token counting latency shows up in Phase 23 traces.
+
+Remaining in Step 1: no known code slice remains. Retrieval budget integration is covered by the Step 3 worker slice below. Oversized diffs are no longer warning-only when `review.chunked_review` is enabled; the worker now branches into the Step 2 chunk planner/dispatcher. The legacy patch-budget truncation path remains available only when chunking is disabled.
 
 ---
 
@@ -207,6 +222,67 @@ The retrieval foundation (diff symbol extractor, SQLite repo index, C# parser, c
 **Remaining known limitation:** the C# parser is lexical/regex, not tree-sitter or Roslyn. Retrieval quality will be bounded by this. The tree-sitter migration is a separate follow-on slice, not a blocker for shipping the worker integration.
 
 **Stop tests:** `IRetrievalProvider` unit tests with a mock index. Worker integration test: with `retrieval.enabled: true`, symbols extracted from a synthetic diff are looked up, snippets injected into the request, snippets appear in the rendered prompt. Budget cap: if snippets would exceed the retrieval budget fraction, they are trimmed to fit. SHA-not-indexed triggers `IndexAsync` before review continues.
+
+#### Completed retrieval provider and worker integration slice (May 27, 2026)
+
+Shipped the first live retrieval path:
+
+- Added `IRetrievalProvider` / `SqliteRetrievalProvider`; it extracts symbols from changed C# diffs, looks up definitions and top-3 callers in the SQLite index, deduplicates hits, ranks definitions before callers, and emits `RepositoryContextSnippet` entries under a retrieval cap of `min(retrieval.max_bytes / 3, content_budget * 0.3, remaining_budget)`.
+- Added `IRepoIndex.IsIndexedAsync` plus `IRepoIndexFactory` so the worker and provider both honor the effective repo config's `retrieval.index_cache_dir` rather than using a single process-wide cache path.
+- Extended PR metadata with the head clone URL so the worker can materialize the PR head SHA when indexing is needed.
+- Wired `ReviewWorker` so `retrieval.enabled: true` checks whether the head SHA is indexed, clones/indexes it before lookup if not, injects returned snippets into `ReviewRequest.RepositoryContext`, and charges retrieval against the prompt budget before full-file context and diff budgeting.
+- Registered retrieval services in the API composition root and added DI coverage.
+- Added provider tests for symbol lookup/ranking and retrieval-budget trimming, plus a worker test proving a missing head-SHA index triggers `IndexAsync` before review, and that retrieved snippets appear in the rendered prompt.
+
+Corrected assumptions discovered during implementation:
+
+- Retrieval cannot safely run in parallel with grounding in this design because the retrieval cap depends on the grounded prompt budget. The worker now runs grounding first, retrieval second, then full-file context.
+- The first worker integration indexed a full checked-out head SHA. Changed-path incremental reparse was left as a follow-on and is now covered by the May 28 incremental indexing slice below.
+
+#### Completed retrieval index eviction slice (May 28, 2026)
+
+Shipped the nightly cleanup path for retrieval index rows:
+
+- Added `RepoIndexCleanupService`, registered through `AddRetrieval()`, which runs daily and calls `IRepoIndex.DeleteUnusedBeforeAsync(clock.GetUtcNow() - 30 days)` for each cache directory opened by the current process.
+- Tightened `SqliteRepoIndexFactory` so it tracks normalized cache directories, reuses DI-provided symbol parsers, and uses the shared `TimeProvider`.
+- Registered `CSharpRepoSymbolParser` in DI so future parser additions can flow through the index factory instead of being hard-coded inside every index instance.
+- Added tests for factory cache-directory tracking, cleanup cutoff calculation, multi-cache deletion totals, per-cache failure isolation, and API composition wiring.
+
+Corrected assumptions discovered during implementation:
+
+- A process-local hosted service cannot discover arbitrary per-repo `retrieval.index_cache_dir` values that were used before the current process started. The cleanup now sweeps cache directories observed through `IRepoIndexFactory` during this process lifetime; a persisted cache-directory registry remains a follow-on if custom cache locations become common.
+
+#### Completed changed-path incremental indexing slice (May 28, 2026)
+
+Shipped changed-path retrieval indexing for delta reviews:
+
+- Added explicit SHA metadata to the SQLite repo index so a SHA with zero parseable symbols is still marked indexed; cleanup now evicts stale index metadata as well as symbol rows.
+- Added `IRepoIndex.IndexChangesAsync`, which copies unchanged symbols forward from an indexed base SHA, removes changed/deleted paths, and reparses only the compare-changed paths from the head checkout.
+- Wired `ReviewWorker` to reuse the complete GitHub compare path set from delta reviews for retrieval indexing. If the previous SHA is indexed, the worker calls `IndexChangesAsync`; if the compare result is missing, truncated, failed, or the prior SHA was never indexed, it falls back to the full head-SHA index.
+- Forced a full retrieval index rebuild when `.github/review-bot.yml` or `.github/review-bot.yaml` changes, because ignore rules may have changed and unchanged files may need to be newly included or excluded.
+- Included GitHub compare `previous_file_name` paths for renames so stale symbols from the old path are invalidated during incremental indexing.
+- Added index tests for symbol-less SHA markers and changed-path reparse/copy behavior; GitHub tests for rename path handling; and worker tests for incremental indexing plus config-change full-index fallback.
+
+Corrected assumptions discovered during implementation:
+
+- `IsIndexedAsync` cannot infer index completion from symbol rows. Repos or SHAs with only unsupported/no-symbol files would otherwise be indexed repeatedly forever.
+- GitHub compare `filename` alone is insufficient for retrieval invalidation on renames; the previous filename must be treated as changed too.
+- Incremental indexing is only safe across stable ReviewBot config. When the repo config file changes, the worker intentionally rebuilds the head index.
+
+#### Completed initial retrieval eval fixture slice (May 28, 2026)
+
+Shipped the first eval corpus expansion aimed at the multi-pass/retrieval quality gap:
+
+- Added `004-large-pr-multi-directory`, a broad five-file fixture with must-flag findings in different directories so chunked review must preserve recall across chunk boundaries.
+- Added `005-cross-chunk-state-default`, a cross-file state/default drift fixture where the worker bug is only clear when the reviewer connects the changed PR-state model with the changed worker null check.
+- Added canned quick-run results for both fixtures and expanded the quick corpus tests from 3 to 5 fixtures, including explicit coverage for `large_pr_chunking` and `cross_chunk_reference` categories.
+- Fixed the eval harness project so `.cs` files under fixture `repo-state/` are treated as fixture data rather than compiled into `ReviewBot.Evals`.
+
+Corrected assumptions discovered during implementation:
+
+- Eval `repo-state` files are not automatically data-only just because they live under fixture directories. The SDK project glob was compiling nested `.cs` fixture files; the eval project now excludes `Fixtures/**/repo-state/**/*.cs` from compilation.
+
+Remaining in Step 3: run the expanded fixtures against live no-retrieval and retrieval-enabled review modes to measure whether retrieval improves large/cross-chunk quality. The initial corpus now has one cross-chunk benchmark; add 2-4 more cross-chunk fixtures after the first live eval run shows which failure modes are most common.
 
 ---
 
@@ -328,13 +404,17 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 
 ## Risks
 
-**Context estimation accuracy.** Heuristic token counting (chars/3.0) can still be off for mixed-language diffs with heavy Unicode or whitespace, but is intentionally conservative for source code. The Anthropic count_tokens API is accurate but adds a round-trip. If chunk boundaries are calculated from an underestimate, an individual chunk can still overflow. Status: further mitigated after the May 27 chunk planner/dispatcher slice; oversized diffs now branch into chunked review with a 0.85 headroom factor instead of being sent as one prompt. Remaining exposure is estimator error inside a chunk and any full-file/retrieval context added before chunk sizing. Mitigation: keep `response_reserve_tokens` at 4096 by default, tune `chunk_headroom` from eval data, and add Anthropic `count_tokens` for large prompts.
+**Context estimation accuracy.** Heuristic token counting (chars/3.0) can still be off for mixed-language diffs with heavy Unicode or whitespace, but is intentionally conservative for source code. Anthropic-backed reviews now call `count_tokens` for large prompt sections above the configured heuristic threshold and fall back to the heuristic on count failures. Status: further mitigated after the May 28 Anthropic token-counting slice; oversized diffs branch into chunked review with headroom instead of being sent as one prompt. Remaining exposure is estimator error for OpenAI-compatible/local providers, Anthropic sections below the threshold, and any single chunk whose provider count still differs from final provider-side assembly. Mitigation: keep `response_reserve_tokens` at 4096 by default, tune `chunk_headroom` from eval data, and use Phase 23 traces to decide whether OpenAI-compatible providers need tokenizer-specific estimators.
 
 **Budget-aware full-file latency tradeoff.** Full-file context used to fetch in parallel with grounding. It now waits for grounding because the full prompt budget depends on grounding token cost. Status: opened May 27. The correctness tradeoff is intentional for small-context models, but it may give back part of the Phase 21 latency win on repos with both grounding and full-file context enabled. Mitigation: keep full-file context opt-in (`full_file_max_bytes: 0` by default), measure stage timings in Phase 23 traces, and revisit speculative fetch-with-post-filtering if latency becomes visible in real deployments.
 
-**Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. Status: opened by the May 27 chunked-review slice. The eval corpus should have 3–5 cross-chunk fixtures to measure how bad this gap actually is. Expect multi-pass alone (without retrieval) to miss these; retrieval's job is to close the gap.
+**Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. Status: partially measured as of May 28; the quick eval corpus now includes one cross-chunk reference fixture and one large multi-directory fixture. This remains open until live no-retrieval vs retrieval-enabled eval runs show the delta, and until the corpus has 3–5 cross-chunk fixtures covering the common failure shapes. Expect multi-pass alone (without retrieval) to miss these; retrieval's job is to close the gap.
 
 **Retrieval parser quality.** The lexical C# parser misclassifies edge-case syntax and produces false positives on symbol extraction. Symbol lookup hits with wrong matches dilute the retrieval context budget. Measure via eval: if retrieval is on but scores lower than no retrieval, the parser noise is the cause. Switching to tree-sitter or Roslyn is the fix; do it after the measurement confirms the gap.
+
+**Retrieval cold-start latency.** The first retrieval-enabled review of a SHA still clones a temporary checkout and may full-parse the head when there is no indexed base SHA, the GitHub compare result is unavailable/truncated, or ReviewBot repo config changed. Status: narrowed May 28; delta reviews with an indexed base SHA now copy unchanged symbols and reparse only compare-changed paths, and symbol-less SHAs are tracked explicitly. Mitigation: keep retrieval opt-in (`retrieval.enabled: false` by default), measure first-review/index spans in Phase 23, and revisit persistent clone/index workspaces if cold-start latency remains visible.
+
+**Retrieval index eviction discovery.** The May 28 eviction service prevents unbounded symbol-row growth for cache directories opened by the running process, but it does not discover custom `retrieval.index_cache_dir` values that were only used before a restart. Status: opened May 28. Mitigation: the default single-cache deployment is covered once retrieval runs; add a persisted cache-directory registry if real deployments rely on many custom cache directories.
 
 **Chunked review cost.** A 10-chunk review is 10× the LLM cost. For cloud models at scale, this matters. The `max_chunks` config is the safety cap, but users may not know what value to set. The WebUI cost dashboard (Phase 23) is the feedback loop. Until then, log total token usage and estimated cost at the review completion level so it shows up in standard logs.
 

@@ -1,0 +1,7 @@
+name: Cross-chunk review state default drift
+category: cross_chunk_reference
+difficulty: high
+description: |
+  One file changes the stored PR state to use an empty-string default while
+  another file changes the worker to test only for null. The bug is visible
+  only when the reviewer connects the two chunks.

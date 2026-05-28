@@ -101,7 +101,7 @@ public sealed record ReviewOutputConfig(
     int ResponseReserveTokens = 4_096,
     bool ChunkedReview = true,
     int MaxChunks = 10,
-    double ChunkHeadroom = 0.85);
+    double ChunkHeadroom = 0.80);
 
 public sealed record TriggerConfig(
     bool OnReviewRequest,

@@ -20,6 +20,7 @@ using ReviewBot.Grounding.Languages.Python;
 using ReviewBot.Llm.Anthropic;
 using ReviewBot.Llm.OpenAi;
 using ReviewBot.Persistence;
+using ReviewBot.Retrieval;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -55,6 +56,7 @@ builder.Services.AddOptions<WorkerOptions>()
 builder.Services.AddReviewLlmFactory();
 builder.Services.AddPromptBudgeting(options =>
     builder.Configuration.GetSection(ModelContextOptions.SectionName).Bind(options));
+builder.Services.AddRetrieval();
 builder.Services.AddAnthropicReviewLlm(options =>
     builder.Configuration.GetSection(AnthropicLlmOptions.SectionName).Bind(options));
 builder.Services.AddOpenAiReviewLlm(options =>

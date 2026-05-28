@@ -94,6 +94,107 @@ public sealed class SqliteRepoIndex : IRepoIndex
             }
         }
 
+        await UpsertKeyAsync(connection, transaction, request.Owner, request.Repo, request.Sha, now, ct)
+            .ConfigureAwait(false);
+        await transaction.CommitAsync(ct).ConfigureAwait(false);
+    }
+
+    public async Task IndexChangesAsync(
+        RepoIndexRequest request,
+        RepoIndexKey baseKey,
+        IReadOnlyCollection<string> changedPaths,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(baseKey);
+        ArgumentNullException.ThrowIfNull(changedPaths);
+        ValidateKey(new RepoIndexKey(request.Owner, request.Repo, request.Sha));
+        ValidateKey(baseKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.RepositoryRoot);
+
+        var root = Path.GetFullPath(request.RepositoryRoot);
+        if (!Directory.Exists(root))
+        {
+            throw new DirectoryNotFoundException($"Repository root does not exist: {root}");
+        }
+
+        var normalizedChangedPaths = changedPaths
+            .Select(NormalizeChangedPath)
+            .Where(path => path is not null)
+            .Cast<string>()
+            .ToHashSet(StringComparer.Ordinal);
+
+        await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await EnsureSchemaAsync(connection, ct).ConfigureAwait(false);
+
+        await using var transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+        if (!await KeyExistsAsync(connection, transaction, baseKey, ct).ConfigureAwait(false))
+        {
+            throw new InvalidOperationException(
+                $"Cannot incrementally index {request.Owner}/{request.Repo}@{request.Sha} because base SHA {baseKey.Sha} is not indexed.");
+        }
+
+        await DeleteKeyAsync(connection, transaction, request.Owner, request.Repo, request.Sha, ct).ConfigureAwait(false);
+
+        var ignore = new GlobMatcher(request.Ignore ?? []);
+        var now = FormatTimestamp(clock.GetUtcNow());
+        var baseSymbols = await ReadSymbolsForKeyAsync(connection, transaction, baseKey, ct).ConfigureAwait(false);
+        foreach (var symbol in baseSymbols)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (normalizedChangedPaths.Contains(symbol.Path) || ShouldSkip(symbol.Path, ignore))
+            {
+                continue;
+            }
+
+            await InsertSymbolAsync(
+                connection,
+                transaction,
+                request.Owner,
+                request.Repo,
+                request.Sha,
+                symbol,
+                now,
+                ct).ConfigureAwait(false);
+        }
+
+        foreach (var relativePath in normalizedChangedPaths.Order(StringComparer.Ordinal))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (ShouldSkip(relativePath, ignore))
+            {
+                continue;
+            }
+
+            var parser = parsers.FirstOrDefault(candidate => candidate.CanParse(relativePath));
+            if (parser is null)
+            {
+                continue;
+            }
+
+            var fullPath = GetSafeFullPath(root, relativePath);
+            if (fullPath is null || !File.Exists(fullPath))
+            {
+                continue;
+            }
+
+            var content = await File.ReadAllTextAsync(fullPath, ct).ConfigureAwait(false);
+            foreach (var symbol in parser.Parse(relativePath, content))
+            {
+                await InsertSymbolAsync(
+                    connection,
+                    transaction,
+                    request.Owner,
+                    request.Repo,
+                    request.Sha,
+                    symbol,
+                    now,
+                    ct).ConfigureAwait(false);
+            }
+        }
+
+        await UpsertKeyAsync(connection, transaction, request.Owner, request.Repo, request.Sha, now, ct)
+            .ConfigureAwait(false);
         await transaction.CommitAsync(ct).ConfigureAwait(false);
     }
 
@@ -149,15 +250,58 @@ public sealed class SqliteRepoIndex : IRepoIndex
         return results;
     }
 
+    public async Task<bool> IsIndexedAsync(RepoIndexKey key, CancellationToken ct = default)
+    {
+        ValidateKey(key);
+
+        await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await EnsureSchemaAsync(connection, ct).ConfigureAwait(false);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT 1
+            FROM repo_index_keys
+            WHERE owner = $owner AND repo = $repo AND sha = $sha
+            LIMIT 1
+            """;
+        AddKeyParameters(command, key.Owner, key.Repo, key.Sha);
+
+        var result = await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
+        return result is not null;
+    }
+
     public async Task<int> DeleteUnusedBeforeAsync(DateTimeOffset cutoff, CancellationToken ct = default)
     {
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await EnsureSchemaAsync(connection, ct).ConfigureAwait(false);
 
+        var cutoffValue = FormatTimestamp(cutoff);
+        var deleted = 0;
+
         await using var command = connection.CreateCommand();
-        command.CommandText = "DELETE FROM repo_symbols WHERE last_accessed_at < $cutoff";
-        command.Parameters.AddWithValue("$cutoff", FormatTimestamp(cutoff));
-        return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        command.CommandText =
+            """
+            DELETE FROM repo_symbols
+            WHERE last_accessed_at < $cutoff
+               OR EXISTS (
+                   SELECT 1
+                   FROM repo_index_keys keys
+                   WHERE keys.owner = repo_symbols.owner
+                     AND keys.repo = repo_symbols.repo
+                     AND keys.sha = repo_symbols.sha
+                     AND keys.last_accessed_at < $cutoff
+               )
+            """;
+        command.Parameters.AddWithValue("$cutoff", cutoffValue);
+        deleted += await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        await using var keyCommand = connection.CreateCommand();
+        keyCommand.CommandText = "DELETE FROM repo_index_keys WHERE last_accessed_at < $cutoff";
+        keyCommand.Parameters.AddWithValue("$cutoff", cutoffValue);
+        deleted += await keyCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        return deleted;
     }
 
     private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken ct)
@@ -187,6 +331,15 @@ public sealed class SqliteRepoIndex : IRepoIndex
                 PRIMARY KEY (owner, repo, sha, name, kind, role, path, line)
             );
 
+            CREATE TABLE IF NOT EXISTS repo_index_keys (
+                owner TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                sha TEXT NOT NULL,
+                indexed_at TEXT NOT NULL,
+                last_accessed_at TEXT NOT NULL,
+                PRIMARY KEY (owner, repo, sha)
+            );
+
             CREATE INDEX IF NOT EXISTS ix_repo_symbols_lookup
                 ON repo_symbols (owner, repo, sha, name, kind);
 
@@ -210,6 +363,12 @@ public sealed class SqliteRepoIndex : IRepoIndex
         command.CommandText = "DELETE FROM repo_symbols WHERE owner = $owner AND repo = $repo AND sha = $sha";
         AddKeyParameters(command, owner, repo, sha);
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        await using var keyCommand = connection.CreateCommand();
+        keyCommand.Transaction = (SqliteTransaction)transaction;
+        keyCommand.CommandText = "DELETE FROM repo_index_keys WHERE owner = $owner AND repo = $repo AND sha = $sha";
+        AddKeyParameters(keyCommand, owner, repo, sha);
+        await keyCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
     private static async Task InsertSymbolAsync(
@@ -247,8 +406,92 @@ public sealed class SqliteRepoIndex : IRepoIndex
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
+    private static async Task UpsertKeyAsync(
+        SqliteConnection connection,
+        IDbTransaction transaction,
+        string owner,
+        string repo,
+        string sha,
+        string now,
+        CancellationToken ct)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText =
+            """
+            INSERT OR REPLACE INTO repo_index_keys (
+                owner, repo, sha, indexed_at, last_accessed_at
+            )
+            VALUES (
+                $owner, $repo, $sha, $indexedAt, $lastAccessedAt
+            )
+            """;
+
+        AddKeyParameters(command, owner, repo, sha);
+        command.Parameters.AddWithValue("$indexedAt", now);
+        command.Parameters.AddWithValue("$lastAccessedAt", now);
+        await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    private static async Task<bool> KeyExistsAsync(
+        SqliteConnection connection,
+        IDbTransaction transaction,
+        RepoIndexKey key,
+        CancellationToken ct)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText =
+            """
+            SELECT 1
+            FROM repo_index_keys
+            WHERE owner = $owner AND repo = $repo AND sha = $sha
+            LIMIT 1
+            """;
+
+        AddKeyParameters(command, key.Owner, key.Repo, key.Sha);
+        var result = await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
+        return result is not null;
+    }
+
+    private static async Task<IReadOnlyList<RepoSymbol>> ReadSymbolsForKeyAsync(
+        SqliteConnection connection,
+        IDbTransaction transaction,
+        RepoIndexKey key,
+        CancellationToken ct)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText =
+            """
+            SELECT name, kind, role, path, line, signature
+            FROM repo_symbols
+            WHERE owner = $owner AND repo = $repo AND sha = $sha
+            ORDER BY path ASC, line ASC, name ASC, kind ASC, role ASC
+            """;
+
+        AddKeyParameters(command, key.Owner, key.Repo, key.Sha);
+
+        var symbols = new List<RepoSymbol>();
+        await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            symbols.Add(new RepoSymbol(
+                reader.GetString(0),
+                (RepoSymbolKind)reader.GetInt32(1),
+                (RepoSymbolRole)reader.GetInt32(2),
+                reader.GetString(3),
+                reader.GetInt32(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5)));
+        }
+
+        return symbols;
+    }
+
     private async Task TouchKeyAsync(SqliteConnection connection, RepoIndexKey key, CancellationToken ct)
     {
+        var now = FormatTimestamp(clock.GetUtcNow());
+
         await using var command = connection.CreateCommand();
         command.CommandText =
             """
@@ -258,8 +501,20 @@ public sealed class SqliteRepoIndex : IRepoIndex
             """;
 
         AddKeyParameters(command, key.Owner, key.Repo, key.Sha);
-        command.Parameters.AddWithValue("$lastAccessedAt", FormatTimestamp(clock.GetUtcNow()));
+        command.Parameters.AddWithValue("$lastAccessedAt", now);
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        await using var keyCommand = connection.CreateCommand();
+        keyCommand.CommandText =
+            """
+            UPDATE repo_index_keys
+            SET last_accessed_at = $lastAccessedAt
+            WHERE owner = $owner AND repo = $repo AND sha = $sha
+            """;
+
+        AddKeyParameters(keyCommand, key.Owner, key.Repo, key.Sha);
+        keyCommand.Parameters.AddWithValue("$lastAccessedAt", now);
+        await keyCommand.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
     private static void AddKeyParameters(SqliteCommand command, string owner, string repo, string sha)
@@ -293,6 +548,32 @@ public sealed class SqliteRepoIndex : IRepoIndex
     {
         var relative = Path.GetRelativePath(root, file);
         return relative.Replace(Path.DirectorySeparatorChar, '/').Replace(Path.AltDirectorySeparatorChar, '/');
+    }
+
+    private static string? NormalizeChangedPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || Path.IsPathRooted(path))
+        {
+            return null;
+        }
+
+        var normalized = path.Replace('\\', '/').Trim('/');
+        if (normalized.Length == 0)
+        {
+            return null;
+        }
+
+        var parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Any(part => part is "." or "..") ? null : string.Join('/', parts);
+    }
+
+    private static string? GetSafeFullPath(string root, string relativePath)
+    {
+        var fullPath = Path.GetFullPath(Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+        var rootWithSeparator = root.EndsWith(Path.DirectorySeparatorChar)
+            ? root
+            : root + Path.DirectorySeparatorChar;
+        return fullPath.StartsWith(rootWithSeparator, StringComparison.Ordinal) ? fullPath : null;
     }
 
     private static string FormatTimestamp(DateTimeOffset value) =>

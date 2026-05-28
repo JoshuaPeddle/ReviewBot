@@ -43,6 +43,14 @@ internal sealed class AnthropicSdkClient : IAnthropicClient
         return response.Message.ToString();
     }
 
+    public async Task<int> CountTokensAsync(AnthropicTokenCountRequest request, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var response = await client.Messages.CountMessageTokensAsync(BuildTokenCountParameters(request), ct);
+        return response.InputTokens;
+    }
+
     internal static MessageParameters BuildParameters(AnthropicMessageRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -68,5 +76,21 @@ internal sealed class AnthropicSdkClient : IAnthropicClient
         };
 
         return parameters;
+    }
+
+    internal static MessageCountTokenParameters BuildTokenCountParameters(AnthropicTokenCountRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        return new MessageCountTokenParameters
+        {
+            Model = request.ModelName,
+            System = string.IsNullOrEmpty(request.SystemPrompt)
+                ? []
+                : [new SystemMessage(request.SystemPrompt)],
+            Messages = request.UserMessages
+                .Select(userMessage => new Message(RoleType.User, userMessage))
+                .ToList()
+        };
     }
 }

@@ -13,6 +13,9 @@ using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding;
+using ReviewBot.Grounding.Workspace;
+using ReviewBot.Retrieval;
+using ReviewBot.Retrieval.Indexing;
 
 namespace ReviewBot.Api.Workers;
 
@@ -31,7 +34,10 @@ public sealed class ReviewWorker : BackgroundService
     private readonly IPrReviewStateStore prReviewStateStore;
     private readonly ReviewBotMetrics metrics;
     private readonly IModelContextRegistry modelContextRegistry;
-    private readonly IPromptTokenEstimator tokenEstimator;
+    private readonly IReviewPromptTokenEstimator tokenEstimator;
+    private readonly IRetrievalProvider retrievalProvider;
+    private readonly IRepoIndexFactory repoIndexFactory;
+    private readonly IWorkspaceFactory workspaceFactory;
     private readonly WorkerOptions workerOptions;
     private readonly ILogger<ReviewWorker> logger;
 
@@ -46,7 +52,10 @@ public sealed class ReviewWorker : BackgroundService
         IPrReviewStateStore prReviewStateStore,
         ReviewBotMetrics metrics,
         IModelContextRegistry modelContextRegistry,
-        IPromptTokenEstimator tokenEstimator,
+        IReviewPromptTokenEstimator tokenEstimator,
+        IRetrievalProvider retrievalProvider,
+        IRepoIndexFactory repoIndexFactory,
+        IWorkspaceFactory workspaceFactory,
         IOptions<WorkerOptions> options,
         ILogger<ReviewWorker> logger)
     {
@@ -61,6 +70,9 @@ public sealed class ReviewWorker : BackgroundService
         this.metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
         this.modelContextRegistry = modelContextRegistry ?? throw new ArgumentNullException(nameof(modelContextRegistry));
         this.tokenEstimator = tokenEstimator ?? throw new ArgumentNullException(nameof(tokenEstimator));
+        this.retrievalProvider = retrievalProvider ?? throw new ArgumentNullException(nameof(retrievalProvider));
+        this.repoIndexFactory = repoIndexFactory ?? throw new ArgumentNullException(nameof(repoIndexFactory));
+        this.workspaceFactory = workspaceFactory ?? throw new ArgumentNullException(nameof(workspaceFactory));
         this.workerOptions = options?.Value ?? throw new ArgumentNullException(nameof(options));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -213,6 +225,7 @@ public sealed class ReviewWorker : BackgroundService
         var lastSha = await lastShaTask.ConfigureAwait(false);
 
         IReadOnlySet<string>? allowlist = null;
+        IReadOnlySet<string>? changedPathsSinceLastReview = null;
         var incrementalType = "first_review";
 
         if (lastSha is not null && !string.Equals(lastSha, metadata.HeadSha, StringComparison.Ordinal))
@@ -251,7 +264,8 @@ public sealed class ReviewWorker : BackgroundService
                 }
                 else
                 {
-                    allowlist = new HashSet<string>(compareResult.Paths, StringComparer.Ordinal);
+                    changedPathsSinceLastReview = new HashSet<string>(compareResult.Paths, StringComparer.Ordinal);
+                    allowlist = changedPathsSinceLastReview;
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -296,6 +310,20 @@ public sealed class ReviewWorker : BackgroundService
             Config: config.Grounding);
         var grounding = await GetGroundingContextAsync(groundingRequest, job, ct).ConfigureAwait(false);
         var promptBudget = CreatePromptBudget(config, grounding, metadata, job);
+        var retrievalContext = await GetRetrievalContextAsync(
+                files,
+                config,
+                promptBudget,
+                grounding,
+                metadata,
+                job,
+                installationToken.Token,
+                lastSha,
+                changedPathsSinceLastReview,
+                ct)
+            .ConfigureAwait(false);
+        var repositoryContext = retrievalContext.Snippets;
+        promptBudget = retrievalContext.Budget;
         var fullFileContext = await FetchFullFileContentsAsync(
                 files,
                 config,
@@ -322,6 +350,7 @@ public sealed class ReviewWorker : BackgroundService
                     metadata,
                     config,
                     grounding,
+                    repositoryContext,
                     fullFileContents,
                     job,
                     installationToken.Token,
@@ -346,7 +375,8 @@ public sealed class ReviewWorker : BackgroundService
                 files,
                 config,
                 grounding,
-                fullFileContents);
+                fullFileContents,
+                repositoryContext);
 
             var sw = Stopwatch.StartNew();
             result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
@@ -429,7 +459,7 @@ public sealed class ReviewWorker : BackgroundService
         PromptBudget promptBudget,
         ReviewJob job)
     {
-        var planner = new ReviewChunkPlanner(tokenEstimator);
+        var planner = new ReviewChunkPlanner(text => EstimateTokens(config, text));
         var estimatedDiffTokens = planner.EstimateDiffTokens(files, config.Review.MaxPatchLines);
         if (!config.Review.ChunkedReview || estimatedDiffTokens <= promptBudget.RemainingContentTokens)
         {
@@ -481,6 +511,7 @@ public sealed class ReviewWorker : BackgroundService
         PullRequestMetadata metadata,
         ReviewConfig config,
         GroundingContext grounding,
+        IReadOnlyList<RepositoryContextSnippet>? repositoryContext,
         IReadOnlyDictionary<string, string>? fullFileContents,
         ReviewJob job,
         string installationToken,
@@ -495,6 +526,7 @@ public sealed class ReviewWorker : BackgroundService
                     metadata,
                     config,
                     grounding,
+                    repositoryContext,
                     fullFileContents,
                     job,
                     installationToken,
@@ -512,6 +544,7 @@ public sealed class ReviewWorker : BackgroundService
                         metadata,
                         config,
                         grounding,
+                        repositoryContext,
                         fullFileContents,
                         job,
                         installationToken,
@@ -531,6 +564,7 @@ public sealed class ReviewWorker : BackgroundService
         PullRequestMetadata metadata,
         ReviewConfig config,
         GroundingContext grounding,
+        IReadOnlyList<RepositoryContextSnippet>? repositoryContext,
         IReadOnlyDictionary<string, string>? fullFileContents,
         ReviewJob job,
         string installationToken,
@@ -545,6 +579,7 @@ public sealed class ReviewWorker : BackgroundService
             config,
             grounding,
             FilterFullFileContents(fullFileContents, chunk.Files),
+            repositoryContext,
             ChunkIndex: chunk.Index,
             TotalChunks: chunk.TotalChunks);
 
@@ -752,6 +787,143 @@ public sealed class ReviewWorker : BackgroundService
         return grounding;
     }
 
+    private async Task<RetrievalContextResult> GetRetrievalContextAsync(
+        IReadOnlyList<FileChange> files,
+        ReviewConfig config,
+        PromptBudget promptBudget,
+        GroundingContext grounding,
+        PullRequestMetadata metadata,
+        ReviewJob job,
+        string installationToken,
+        string? lastIndexedSha,
+        IReadOnlySet<string>? changedPathsSinceLastReview,
+        CancellationToken ct)
+    {
+        if (!config.Retrieval.Enabled)
+        {
+            return new RetrievalContextResult([], promptBudget);
+        }
+
+        var indexReady = await EnsureRepositoryIndexedAsync(
+                config,
+                metadata,
+                job,
+                installationToken,
+                lastIndexedSha,
+                changedPathsSinceLastReview,
+                ct)
+            .ConfigureAwait(false);
+        if (!indexReady)
+        {
+            return new RetrievalContextResult([], promptBudget);
+        }
+
+        var request = new ReviewRequest(
+            metadata.Title,
+            metadata.Body,
+            metadata.BaseSha,
+            metadata.HeadSha,
+            files,
+            config,
+            grounding);
+
+        try
+        {
+            var retrieval = await retrievalProvider
+                .GetContextAsync(job.Owner, job.Repo, request, promptBudget, ct)
+                .ConfigureAwait(false);
+            if (retrieval.Snippets.Count > 0)
+            {
+                logger.LogInformation(
+                    "Retrieval context: included {SnippetCount} snippet(s) for {Owner}/{Repo}#{PrNumber}",
+                    retrieval.Snippets.Count,
+                    job.Owner,
+                    job.Repo,
+                    job.PrNumber);
+            }
+
+            return retrieval;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Retrieval context lookup failed; continuing without repository snippets");
+            return new RetrievalContextResult([], promptBudget);
+        }
+    }
+
+    private async Task<bool> EnsureRepositoryIndexedAsync(
+        ReviewConfig config,
+        PullRequestMetadata metadata,
+        ReviewJob job,
+        string installationToken,
+        string? lastIndexedSha,
+        IReadOnlySet<string>? changedPathsSinceLastReview,
+        CancellationToken ct)
+    {
+        var repoIndex = repoIndexFactory.Create(config.Retrieval.IndexCacheDir);
+        var key = new RepoIndexKey(job.Owner, job.Repo, metadata.HeadSha);
+        if (await repoIndex.IsIndexedAsync(key, ct).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        var cloneUrl = string.IsNullOrWhiteSpace(metadata.HeadCloneUrl)
+            ? $"https://github.com/{job.Owner}/{job.Repo}.git"
+            : metadata.HeadCloneUrl;
+
+        try
+        {
+            logger.LogInformation(
+                "Retrieval index: indexing {Owner}/{Repo}@{HeadSha} before reviewing PR #{PrNumber}",
+                job.Owner,
+                job.Repo,
+                metadata.HeadSha,
+                job.PrNumber);
+
+            await using var workspace = await workspaceFactory
+                .CreateAsync(new WorkspaceRequest(cloneUrl, metadata.HeadSha, installationToken), ct)
+                .ConfigureAwait(false);
+            var request = new RepoIndexRequest(job.Owner, job.Repo, metadata.HeadSha, workspace.LocalPath, config.Ignore);
+            if (lastIndexedSha is not null &&
+                changedPathsSinceLastReview is { Count: > 0 } &&
+                CanUseIncrementalRetrievalIndex(changedPathsSinceLastReview) &&
+                await repoIndex.IsIndexedAsync(new RepoIndexKey(job.Owner, job.Repo, lastIndexedSha), ct).ConfigureAwait(false))
+            {
+                logger.LogInformation(
+                    "Retrieval index: incrementally indexing {Owner}/{Repo}@{HeadSha} from {BaseSha} with {ChangedPathCount} changed path(s)",
+                    job.Owner,
+                    job.Repo,
+                    metadata.HeadSha,
+                    lastIndexedSha,
+                    changedPathsSinceLastReview.Count);
+                await repoIndex
+                    .IndexChangesAsync(
+                        request,
+                        new RepoIndexKey(job.Owner, job.Repo, lastIndexedSha),
+                        changedPathsSinceLastReview,
+                        ct)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await repoIndex
+                    .IndexAsync(request, ct)
+                    .ConfigureAwait(false);
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Retrieval index update failed; continuing without repository snippets");
+            return false;
+        }
+    }
+
+    private static bool CanUseIncrementalRetrievalIndex(IReadOnlySet<string> changedPaths) =>
+        !changedPaths.Contains(".github/review-bot.yml") &&
+        !changedPaths.Contains(".github/review-bot.yaml");
+
     private PromptBudget CreatePromptBudget(
         ReviewConfig config,
         GroundingContext grounding,
@@ -772,10 +944,10 @@ public sealed class ReviewWorker : BackgroundService
 
         var baseSystemPrompt = PromptBuilder.Build(estimationRequestWithoutGrounding).SystemPrompt;
         var groundedSystemPrompt = PromptBuilder.Build(estimationRequestWithGrounding).SystemPrompt;
-        var systemPromptTokens = tokenEstimator.EstimateTokens(baseSystemPrompt);
+        var systemPromptTokens = EstimateTokens(config, baseSystemPrompt);
         var groundingTokens = Math.Max(
             0,
-            tokenEstimator.EstimateTokens(groundedSystemPrompt) - systemPromptTokens);
+            EstimateTokens(config, groundedSystemPrompt) - systemPromptTokens);
 
         var budget = PromptBudget.Create(
             modelContextRegistry.GetContextWindowTokens(config.Model.Name),
@@ -783,8 +955,8 @@ public sealed class ReviewWorker : BackgroundService
             groundingTokens,
             config.Review.ResponseReserveTokens);
 
-        var metadataTokens = tokenEstimator.EstimateTokens(metadata.Title) +
-            tokenEstimator.EstimateTokens(metadata.Body);
+        var metadataTokens = EstimateTokens(config, metadata.Title) +
+            EstimateTokens(config, metadata.Body);
         var updated = budget.ConsumeAvailable("pull_request_metadata", metadataTokens, out var consumedTokens);
         if (consumedTokens < metadataTokens)
         {
@@ -808,7 +980,7 @@ public sealed class ReviewWorker : BackgroundService
         PromptBudget budget,
         ReviewJob job)
     {
-        var diffTokens = EstimateDiffTokens(files, config.Review.MaxPatchLines);
+        var diffTokens = EstimateDiffTokens(files, config, config.Review.MaxPatchLines);
         var updated = budget.ConsumeAvailable("diff", diffTokens, out var consumedTokens);
         if (consumedTokens < diffTokens)
         {
@@ -826,17 +998,20 @@ public sealed class ReviewWorker : BackgroundService
         return updated;
     }
 
-    private int EstimateDiffTokens(IReadOnlyList<FileChange> files, int maxPatchLines)
+    private int EstimateDiffTokens(IReadOnlyList<FileChange> files, ReviewConfig config, int maxPatchLines)
     {
         var tokens = 0;
         foreach (var file in files)
         {
-            tokens += tokenEstimator.EstimateTokens(
+            tokens += EstimateTokens(config,
                 $"{file.Path} {file.Status} +{file.AdditionsCount} -{file.DeletionsCount}\n{TakePatchLines(file.Patch, maxPatchLines)}");
         }
 
         return tokens;
     }
+
+    private int EstimateTokens(ReviewConfig config, string? text) =>
+        tokenEstimator.EstimateTokens(config.Model, text);
 
     private void LogPromptBudget(PromptBudget budget, ReviewConfig config, ReviewJob job)
     {
@@ -881,7 +1056,7 @@ public sealed class ReviewWorker : BackgroundService
         var loggedBudgetLimitedSelection = false;
         foreach (var file in candidates)
         {
-            var estimatedTokens = tokenEstimator.EstimateTokens(file.Patch);
+            var estimatedTokens = EstimateTokens(config, file.Patch);
             if (!selectionBudget.TryConsume("full_file_request_estimate", estimatedTokens, out var updatedBudget))
             {
                 if (!loggedBudgetLimitedSelection)
@@ -953,7 +1128,7 @@ public sealed class ReviewWorker : BackgroundService
         var updated = budget;
         foreach (var fetchedFile in fetchedFiles)
         {
-            var estimatedTokens = tokenEstimator.EstimateTokens(fetchedFile.Content);
+            var estimatedTokens = EstimateTokens(config, fetchedFile.Content);
             if (!updated.TryConsume("full_file", estimatedTokens, out var afterFullFile))
             {
                 logger.LogDebug(

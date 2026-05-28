@@ -7,4 +7,5 @@ public sealed record PullRequestSnapshot(
     string Body,
     string BaseSha,
     string HeadSha,
-    IReadOnlyList<FileChange> Files);
+    IReadOnlyList<FileChange> Files,
+    string HeadCloneUrl = "");
