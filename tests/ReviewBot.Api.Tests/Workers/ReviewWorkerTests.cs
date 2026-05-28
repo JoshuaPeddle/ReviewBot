@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using DiagActivity = System.Diagnostics.Activity;
 using FluentAssertions;
-using ReviewBot.Api.Otel;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
@@ -15,6 +14,7 @@ using ReviewBot.Api.Workers;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Otel;
 using ReviewBot.Core.Prompting;
 using ReviewBot.Core.Storage;
 using ReviewBot.GitHub.Auth;
@@ -988,6 +988,21 @@ public class ReviewWorkerTests
     [Fact]
     public async Task RetrievalEnabledIndexesHeadShaAndPassesSnippetsToPrompt()
     {
+        var activities = new List<DiagActivity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == ReviewBotActivitySource.SourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = activity =>
+            {
+                lock (activities)
+                {
+                    activities.Add(activity);
+                }
+            }
+        };
+        ActivitySource.AddActivityListener(listener);
+
         await using var fixture = new WorkerFixture();
         var capturedRequest = new TaskCompletionSource<ReviewRequest>(TaskCreationOptions.RunContinuationsAsynchronously);
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1084,6 +1099,20 @@ public class ReviewWorkerTests
         PromptBuilder.Build(request).UserPrompt.Should()
             .Contain("## Repository context")
             .And.Contain("Task<User?> GetAsync(int id);");
+
+        List<DiagActivity> snapshot;
+        lock (activities)
+        {
+            snapshot = [..activities];
+        }
+
+        var indexActivity = snapshot.Should()
+            .Contain(activity => activity.OperationName == "reviewbot.retrieval.index_sha")
+            .Which;
+        indexActivity.GetTagItem("review.owner").Should().Be("octo-org");
+        indexActivity.GetTagItem("review.repo").Should().Be("reviewbot");
+        indexActivity.GetTagItem("review.sha").Should().Be("snapshot-head");
+        indexActivity.GetTagItem("retrieval.index_mode").Should().Be("full");
     }
 
     [Fact]

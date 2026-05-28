@@ -1,5 +1,6 @@
 using ReviewBot.Core.Context;
 using ReviewBot.Core.Domain;
+using ReviewBot.Core.Otel;
 using ReviewBot.Retrieval.Indexing;
 using ReviewBot.Retrieval.Symbols;
 
@@ -50,16 +51,16 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
 
         var index = indexFactory.Create(request.Config.Retrieval.IndexCacheDir);
         var key = new RepoIndexKey(owner, repo, request.HeadSha);
-        var rankedSymbols = await LookupRankedSymbolsAsync(index, key, request, ct).ConfigureAwait(false);
-        if (rankedSymbols.Count == 0)
+        var lookup = await LookupRankedSymbolsAsync(index, key, request, ct).ConfigureAwait(false);
+        if (lookup.Symbols.Count == 0)
         {
-            return new RetrievalContextResult([], budget);
+            return new RetrievalContextResult([], budget, lookup.SymbolsQueried);
         }
 
         var snippets = new List<RepositoryContextSnippet>();
         var updated = budget;
         var remainingRetrievalTokens = tokenLimit;
-        foreach (var symbol in rankedSymbols)
+        foreach (var symbol in lookup.Symbols)
         {
             var content = symbol.Signature ?? symbol.Name;
             var tokens = tokenEstimator.EstimateTokens(content);
@@ -93,7 +94,7 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
             }
         }
 
-        return new RetrievalContextResult(snippets, updated);
+        return new RetrievalContextResult(snippets, updated, lookup.SymbolsQueried);
     }
 
     private static int CalculateRetrievalTokenLimit(RetrievalConfig config, PromptBudget budget)
@@ -103,7 +104,7 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
         return Math.Min(Math.Min(maxBytesAsTokens, budgetFractionTokens), budget.RemainingContentTokens);
     }
 
-    private async Task<IReadOnlyList<RepoSymbol>> LookupRankedSymbolsAsync(
+    private async Task<RankedSymbolLookup> LookupRankedSymbolsAsync(
         IRepoIndex index,
         RepoIndexKey key,
         ReviewRequest request,
@@ -111,23 +112,38 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
     {
         var results = new List<RankedRepoSymbol>();
         var seen = new HashSet<(string Name, DiffSymbolKind Kind)>();
+        var queries = new List<DiffSymbol>();
 
-        foreach (var fileSymbols in symbolExtractor.Extract(request.Files))
+        using (var extractActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.retrieval.extract_symbols"))
         {
-            foreach (var diffSymbol in fileSymbols.Symbols)
+            foreach (var fileSymbols in symbolExtractor.Extract(request.Files))
             {
-                if (!seen.Add((diffSymbol.Name, diffSymbol.Kind)))
+                foreach (var diffSymbol in fileSymbols.Symbols)
                 {
-                    continue;
+                    if (seen.Add((diffSymbol.Name, diffSymbol.Kind)))
+                    {
+                        queries.Add(diffSymbol);
+                    }
                 }
+            }
 
+            extractActivity?.SetTag("retrieval.symbols_extracted", queries.Count);
+        }
+
+        using (var lookupActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.retrieval.lookup"))
+        {
+            foreach (var diffSymbol in queries)
+            {
                 var kind = MapKind(diffSymbol.Kind);
                 var matches = await index.FindAsync(key, diffSymbol.Name, kind, ct).ConfigureAwait(false);
                 AddMatches(results, matches, request.Config.Retrieval.SymbolLookupDepth);
             }
+
+            lookupActivity?.SetTag("retrieval.symbols_queried", queries.Count);
+            lookupActivity?.SetTag("retrieval.matches_returned", results.Count);
         }
 
-        return results
+        var symbols = results
             .GroupBy(item => (item.Symbol.Path, item.Symbol.Line, item.Symbol.Signature), item => item)
             .Select(group => group.OrderBy(item => item.Rank).First())
             .OrderBy(item => item.Rank)
@@ -135,6 +151,8 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
             .ThenBy(item => item.Symbol.Line)
             .Select(item => item.Symbol)
             .ToArray();
+
+        return new RankedSymbolLookup(symbols, queries.Count);
     }
 
     private static void AddMatches(
@@ -184,4 +202,6 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
     }
 
     private sealed record RankedRepoSymbol(RepoSymbol Symbol, int Rank);
+
+    private sealed record RankedSymbolLookup(IReadOnlyList<RepoSymbol> Symbols, int SymbolsQueried);
 }

@@ -431,7 +431,7 @@ Shipped `ActivitySource`-based distributed tracing for major review pipeline sta
 Corrected assumptions discovered during implementation:
 - `Octokit.Activity` conflicts with `System.Diagnostics.Activity` in the test project; the test file uses a `DiagActivity` alias.
 - `AddOtlpExporter()` on `TracerProviderBuilder` requires `using OpenTelemetry.Trace;` — distinct from the metrics extension in `OpenTelemetry.Metrics`.
-- Sub-spans inside the grounding and retrieval providers (tier1_language, tier2_build, extract_symbols, index_sha, lookup) are not yet emitted because those providers don't reference `ReviewBotActivitySource`. They are a follow-on: each project would need to reference a shared source or define its own. `retrieval.symbols_queried` is similarly not available from the current `RetrievalContextResult` interface.
+- Sub-spans inside grounding providers (tier1_language, tier2_build) are not yet emitted because those providers still need to reference a shared tracing source. Retrieval provider/index spans were closed by the May 28 retrieval OTel detail slice below.
 
 #### Completed per-chunk agentic trace slice (May 28, 2026)
 
@@ -446,6 +446,20 @@ Corrected assumptions discovered during implementation:
 
 - `ReviewResult.ContextRequests` only preserves what the model asked for; it does not include validation outcomes or fetch results. Trace data needs to be captured at the agentic-context boundary before the final result is filtered or merged.
 - Agentic second-pass completions currently use `CompleteRawAsync`, which does not return token usage. Until raw-completion usage is exposed, the trace/cost surface can preserve the primary review token usage but cannot count the second-pass completion separately.
+
+#### Completed retrieval OTel detail slice (May 28, 2026)
+
+Shipped the retrieval-specific span detail that the initial OTel slice left open:
+
+- Moved `ReviewBotActivitySource` from the API project into `ReviewBot.Core` so non-API projects can emit spans through the same `ReviewBot` source.
+- Added `reviewbot.retrieval.extract_symbols` and `reviewbot.retrieval.lookup` spans inside `SqliteRetrievalProvider`; lookup spans tag `retrieval.symbols_queried` and `retrieval.matches_returned`.
+- Extended `RetrievalContextResult` with `SymbolsQueried`, and the worker now tags the parent `reviewbot.retrieval` span with `retrieval.symbols_queried` alongside snippet and byte counts.
+- Added `reviewbot.retrieval.index_sha` around retrieval indexing, tagged with owner/repo/SHA and full vs incremental index mode.
+- Added retrieval provider and worker tests for the new spans and tags.
+
+Corrected assumptions discovered during implementation:
+
+- Keeping the shared `ActivitySource` internal to `ReviewBot.Api` was the structural blocker for provider-level spans. Moving the source to Core lets retrieval emit child spans without depending on the API assembly.
 
 Span attributes: `review.owner`, `review.repo`, `review.pr_number`, `review.sha`, `review.model`, `review.chunk_index`, `review.total_chunks`, `llm.prompt_tokens`, `llm.completion_tokens`, `retrieval.symbols_queried`, `retrieval.snippets_returned`, `retrieval.bytes_used`.
 
@@ -518,6 +532,8 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 **Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. Status: partially measured as of May 28; the quick eval corpus now includes one cross-chunk reference fixture and one large multi-directory fixture. This remains open until live no-retrieval vs retrieval-enabled eval runs show the delta, and until the corpus has 3–5 cross-chunk fixtures covering the common failure shapes. Expect multi-pass alone (without retrieval) to miss these; retrieval's job is to close the gap.
 
 **Retrieval parser quality.** The lexical C# parser misclassifies edge-case syntax and produces false positives on symbol extraction. Symbol lookup hits with wrong matches dilute the retrieval context budget. Measure via eval: if retrieval is on but scores lower than no retrieval, the parser noise is the cause. Switching to tree-sitter or Roslyn is the fix; do it after the measurement confirms the gap.
+
+**Retrieval observability blind spot.** Status: closed May 28. Retrieval extraction, lookup, queried-symbol count, snippet count, byte count, and index mode are now visible in OTel spans. Remaining observability follow-on is grounding tier sub-spans, not retrieval.
 
 **Retrieval cold-start latency.** The first retrieval-enabled review of a SHA still clones a temporary checkout and may full-parse the head when there is no indexed base SHA, the GitHub compare result is unavailable/truncated, or ReviewBot repo config changed. Status: narrowed May 28; delta reviews with an indexed base SHA now copy unchanged symbols and reparse only compare-changed paths, and symbol-less SHAs are tracked explicitly. Mitigation: keep retrieval opt-in (`retrieval.enabled: false` by default), measure first-review/index spans in Phase 23, and revisit persistent clone/index workspaces if cold-start latency remains visible.
 

@@ -4,12 +4,12 @@ using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Options;
 using Octokit;
 using ReviewBot.Api.Cost;
-using ReviewBot.Api.Otel;
 using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Otel;
 using ReviewBot.Core.Prompting;
 using ReviewBot.Core.Storage;
 using ReviewBot.GitHub.Auth;
@@ -353,6 +353,7 @@ public sealed class ReviewWorker : BackgroundService
                     ct)
                 .ConfigureAwait(false);
             retrievalActivity?.SetTag("retrieval.snippets_returned", retrievalContext.Snippets.Count);
+            retrievalActivity?.SetTag("retrieval.symbols_queried", retrievalContext.SymbolsQueried);
             retrievalActivity?.SetTag("retrieval.bytes_used",
                 retrievalContext.Snippets.Sum(s => Encoding.UTF8.GetByteCount(s.Content)));
         }
@@ -1156,6 +1157,11 @@ public sealed class ReviewWorker : BackgroundService
             ? $"https://github.com/{job.Owner}/{job.Repo}.git"
             : metadata.HeadCloneUrl;
 
+        using var indexActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.retrieval.index_sha");
+        indexActivity?.SetTag("review.owner", job.Owner);
+        indexActivity?.SetTag("review.repo", job.Repo);
+        indexActivity?.SetTag("review.sha", metadata.HeadSha);
+
         try
         {
             logger.LogInformation(
@@ -1174,6 +1180,8 @@ public sealed class ReviewWorker : BackgroundService
                 CanUseIncrementalRetrievalIndex(changedPathsSinceLastReview) &&
                 await repoIndex.IsIndexedAsync(new RepoIndexKey(job.Owner, job.Repo, lastIndexedSha), ct).ConfigureAwait(false))
             {
+                indexActivity?.SetTag("retrieval.index_mode", "incremental");
+                indexActivity?.SetTag("retrieval.changed_paths", changedPathsSinceLastReview.Count);
                 logger.LogInformation(
                     "Retrieval index: incrementally indexing {Owner}/{Repo}@{HeadSha} from {BaseSha} with {ChangedPathCount} changed path(s)",
                     job.Owner,
@@ -1191,6 +1199,7 @@ public sealed class ReviewWorker : BackgroundService
             }
             else
             {
+                indexActivity?.SetTag("retrieval.index_mode", "full");
                 await repoIndex
                     .IndexAsync(request, ct)
                     .ConfigureAwait(false);

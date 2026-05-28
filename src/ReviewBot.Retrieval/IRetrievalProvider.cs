@@ -15,4 +15,5 @@ public interface IRetrievalProvider
 
 public sealed record RetrievalContextResult(
     IReadOnlyList<RepositoryContextSnippet> Snippets,
-    PromptBudget Budget);
+    PromptBudget Budget,
+    int SymbolsQueried = 0);

@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using FluentAssertions;
 using ReviewBot.Core.Context;
 using ReviewBot.Core.Domain;
+using ReviewBot.Core.Otel;
 using ReviewBot.Retrieval.Indexing;
 using ReviewBot.Retrieval.Symbols;
 
@@ -86,6 +88,66 @@ public sealed class SqliteRetrievalProviderTests
         result.Snippets.Should().ContainSingle();
         result.Snippets[0].Content.Should().HaveLength(90);
         result.Budget.ConsumedSections.Should().Contain(new PromptBudgetSection("retrieval", 30));
+    }
+
+    [Fact]
+    public async Task GetContextAsyncEmitsRetrievalLookupSpansWithSymbolCounts()
+    {
+        var activities = new List<Activity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == ReviewBotActivitySource.SourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = activity =>
+            {
+                lock (activities)
+                {
+                    activities.Add(activity);
+                }
+            }
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        var index = new FakeRepoIndex();
+        index.Results[("GetAsync", RepoSymbolKind.Method)] =
+        [
+            new RepoSymbol("GetAsync", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/IUsers.cs", 4, "Task<User?> GetAsync(int id);")
+        ];
+        var provider = new SqliteRetrievalProvider(
+            new FakeRepoIndexFactory(index),
+            new CSharpDiffSymbolExtractor(),
+            new HeuristicTokenEstimator());
+        var request = CreateRequest(
+            """
+            @@ -0,0 +1,2 @@
+            +    => repository.GetAsync(id);
+            +    => backup.GetAsync(id);
+            """,
+            ReviewConfig.Default with
+            {
+                Retrieval = ReviewConfig.Default.Retrieval with
+                {
+                    Enabled = true,
+                    SymbolLookupDepth = RetrievalConfig.DefinitionsDepth
+                }
+            });
+        var budget = PromptBudget.Create(1_000, 10, 0, 100);
+
+        var result = await provider.GetContextAsync("octo", "reviewbot", request, budget);
+
+        result.SymbolsQueried.Should().Be(1);
+        List<Activity> snapshot;
+        lock (activities)
+        {
+            snapshot = [..activities];
+        }
+
+        snapshot.Should().Contain(activity => activity.OperationName == "reviewbot.retrieval.extract_symbols");
+        var lookupActivity = snapshot.Should()
+            .ContainSingle(activity => activity.OperationName == "reviewbot.retrieval.lookup")
+            .Subject;
+        lookupActivity.GetTagItem("retrieval.symbols_queried").Should().Be(1);
+        lookupActivity.GetTagItem("retrieval.matches_returned").Should().Be(1);
     }
 
     private static ReviewRequest CreateRequest(string patch, ReviewConfig config) =>
