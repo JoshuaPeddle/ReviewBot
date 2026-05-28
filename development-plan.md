@@ -410,6 +410,31 @@ reviewbot.review
 
 Add OTLP exporter (`OpenTelemetry.Extensions.Hosting` plus `OpenTelemetry.Exporter.OpenTelemetryProtocol`). Self-hosters wire to Jaeger, Tempo, or any OTLP-compatible collector. Document in README with a `docker-compose.yml` Jaeger example.
 
+#### Completed OTel spans slice (May 28, 2026)
+
+Shipped `ActivitySource`-based distributed tracing for major review pipeline stages:
+
+- Added `ReviewBotActivitySource` (source name `ReviewBot`, v1.0.0) in `src/ReviewBot.Api/Otel/`.
+- Added `OpenTelemetry.Exporter.OpenTelemetryProtocol` 1.15.3 and wired `.WithTracing()` in `Program.cs`; the OTLP exporter reads `OTEL_EXPORTER_OTLP_ENDPOINT` — if not set it falls back to `http://localhost:4317`. Prometheus metrics exporter is unchanged.
+- `ReviewWorker` now emits the following spans for every review job:
+  - `reviewbot.review` (parent): tags `review.owner`, `review.repo`, `review.pr_number`, `review.sha`, `review.model`.
+  - `reviewbot.grounding`: wraps the composite grounding provider call.
+  - `reviewbot.retrieval`: wraps retrieval lookup; tags `retrieval.snippets_returned` and `retrieval.bytes_used`.
+  - `reviewbot.chunk_review` (one per chunk, including single-chunk reviews): tags `review.chunk_index`, `review.total_chunks`.
+  - `reviewbot.llm.review` (child of `reviewbot.chunk_review`): tags `llm.prompt_tokens` and `llm.completion_tokens` when token usage is reported.
+  - `reviewbot.llm.self_critique`: emitted from `ApplySelfCritiqueAsync`; parented to `reviewbot.chunk_review` in single-chunk path, to `reviewbot.review` in merged multi-chunk path.
+  - `reviewbot.post_review`: wraps `IReviewPoster.PostAsync`.
+- Also fixed a pre-existing bug: `BuildTraceChunk` was inferring the files-in-chunk from comment paths (silently omitting files with no comments). `ChunkReviewOutcome` now carries `ChunkFiles`; `BuildTraceChunk` uses them with comment-path inference as a fallback.
+- Added `OtelSpansAreEmittedForReview` worker test using `ActivityListener`; verifies all seven span names and review.owner/repo/pr_number/sha/model tags.
+- Added two composition tests: `OtelTracerProviderIsRegisteredInDiContainer` and `OtelReviewBotSourceEmitsActivitiesWhenListenerIsAttached`.
+
+Corrected assumptions discovered during implementation:
+- `Octokit.Activity` conflicts with `System.Diagnostics.Activity` in the test project; the test file uses a `DiagActivity` alias.
+- `AddOtlpExporter()` on `TracerProviderBuilder` requires `using OpenTelemetry.Trace;` — distinct from the metrics extension in `OpenTelemetry.Metrics`.
+- Sub-spans inside the grounding and retrieval providers (tier1_language, tier2_build, extract_symbols, index_sha, lookup) are not yet emitted because those providers don't reference `ReviewBotActivitySource`. They are a follow-on: each project would need to reference a shared source or define its own. `retrieval.symbols_queried` is similarly not available from the current `RetrievalContextResult` interface.
+
+Remaining in Phase 23: per-chunk agentic context capture (files requested, fetched, drop reasons) in the trace JSON. This is smaller than the spans slice; the agentic context data flows into `ReviewResult.ContextRequests` but is not surfaced in `TraceChunk`.
+
 Span attributes: `review.owner`, `review.repo`, `review.pr_number`, `review.sha`, `review.model`, `review.chunk_index`, `review.total_chunks`, `llm.prompt_tokens`, `llm.completion_tokens`, `retrieval.symbols_queried`, `retrieval.snippets_returned`, `retrieval.bytes_used`.
 
 ### Cost surface
@@ -488,6 +513,8 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 
 **Chunked review cost.** A 10-chunk review is 10× the LLM cost. For cloud models at scale, this matters. The `max_chunks` config is the safety cap, but users may not know what value to set. The WebUI cost dashboard (Phase 23) is the feedback loop. Until then, log total token usage and estimated cost at the review completion level so it shows up in standard logs.
 
-**SQLite index contention.** The repo index uses SQLite. Concurrent reviews of the same repo could race on index writes. SQLite with WAL mode handles concurrent reads fine but serializes writes. For the expected deployment scale (single-maintainer self-hosted), this is acceptable. If concurrent review volume grows, the contention will show up as index write latency in OTel spans.
+**SQLite index contention.** The repo index uses SQLite. Concurrent reviews of the same repo could race on index writes. SQLite with WAL mode handles concurrent reads fine but serializes writes. For the expected deployment scale (single-maintainer self-hosted), this is acceptable. If concurrent review volume grows, the contention will show up as index write latency in OTel spans (now available as of May 28).
+
+**OTel sub-provider span coverage gap.** Grounding and retrieval provider internals (tier1_language, tier2_build, extract_symbols, index_sha, lookup) are not yet spanned; only the top-level call from `ReviewWorker` is. Status: opened May 28. Mitigation: the top-level spans give the stage-level timing needed for Phase 24 dashboards; sub-provider spans are a follow-on once Phase 24 is underway.
 
 **Anthropic SDK stability.** `Anthropic.SDK` 5.x remains unofficial. Prompt caching and fine-grained cache control are version-sensitive. Pin the version in `Directory.Packages.props` and document. Watch for an official Anthropic .NET SDK; migrate when one ships.

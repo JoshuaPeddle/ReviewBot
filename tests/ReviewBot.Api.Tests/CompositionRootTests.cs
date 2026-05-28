@@ -1,8 +1,11 @@
+using System.Diagnostics;
 using System.Net;
+using DiagActivity = System.Diagnostics.Activity;
 using System.Security.Cryptography;
 using System.Text;
 using FluentAssertions;
 using Microsoft.AspNetCore.Hosting;
+using OpenTelemetry.Trace;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Data.Sqlite;
@@ -113,6 +116,38 @@ public class CompositionRootTests
             .Should().BeOfType<JsonReviewTraceWriter>();
         factory.Services.GetServices<IHostedService>()
             .Should().Contain(service => service.GetType() == typeof(TraceCleanupService));
+    }
+
+    [Fact]
+    public async Task OtelTracerProviderIsRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<TracerProvider>()
+            .Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task OtelReviewBotSourceEmitsActivitiesWhenListenerIsAttached()
+    {
+        var started = new List<string>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == "ReviewBot",
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStarted = a => { lock (started) started.Add(a.OperationName); }
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TracerProvider>().Should().NotBeNull();
+
+        using var src = new ActivitySource("ReviewBot", "1.0.0");
+        using DiagActivity? act = src.StartActivity("reviewbot.test_probe");
+
+        lock (started) started.Should().Contain("reviewbot.test_probe");
     }
 
     [Fact]

@@ -4,6 +4,7 @@ using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Options;
 using Octokit;
 using ReviewBot.Api.Cost;
+using ReviewBot.Api.Otel;
 using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
 using ReviewBot.Core.Domain;
@@ -161,6 +162,10 @@ public sealed class ReviewWorker : BackgroundService
     private async Task<JobProcessStatus> ProcessAsync(ReviewJob job, CancellationToken ct)
     {
         var reviewStartTime = clock.GetUtcNow();
+        using var reviewActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.review");
+        reviewActivity?.SetTag("review.owner", job.Owner);
+        reviewActivity?.SetTag("review.repo", job.Repo);
+        reviewActivity?.SetTag("review.pr_number", job.PrNumber);
         logger.LogInformation(
             "Processing review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} because of {Reason}",
             job.DeliveryId,
@@ -203,6 +208,7 @@ public sealed class ReviewWorker : BackgroundService
             throw;
         }
 
+        reviewActivity?.SetTag("review.model", config.Model.Name);
         if (!config.Enabled)
         {
             LogIfBackgroundTaskFails(metadataTask, "PR metadata fetch");
@@ -234,6 +240,7 @@ public sealed class ReviewWorker : BackgroundService
         var lastShaTask = prReviewStateStore
             .GetLastShaAsync(job.InstallationId, repoFullName, job.PrNumber, ct);
         var metadata = prefetchedMetadata ?? await metadataTask!.ConfigureAwait(false);
+        reviewActivity?.SetTag("review.sha", metadata.HeadSha);
         var lastSha = await lastShaTask.ConfigureAwait(false);
 
         IReadOnlySet<string>? allowlist = null;
@@ -321,22 +328,35 @@ public sealed class ReviewWorker : BackgroundService
             InstallationToken: installationToken.Token,
             Config: config.Grounding);
         var groundingSw = Stopwatch.StartNew();
-        var grounding = await GetGroundingContextAsync(groundingRequest, job, ct).ConfigureAwait(false);
+        GroundingContext grounding;
+        using (var _ = ReviewBotActivitySource.Instance.StartActivity("reviewbot.grounding"))
+        {
+            grounding = await GetGroundingContextAsync(groundingRequest, job, ct).ConfigureAwait(false);
+        }
+
         var groundingElapsed = groundingSw.Elapsed;
         var promptBudget = CreatePromptBudget(config, grounding, metadata, job);
         var retrievalSw = Stopwatch.StartNew();
-        var retrievalContext = await GetRetrievalContextAsync(
-                files,
-                config,
-                promptBudget,
-                grounding,
-                metadata,
-                job,
-                installationToken.Token,
-                lastSha,
-                changedPathsSinceLastReview,
-                ct)
-            .ConfigureAwait(false);
+        RetrievalContextResult retrievalContext;
+        using (var retrievalActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.retrieval"))
+        {
+            retrievalContext = await GetRetrievalContextAsync(
+                    files,
+                    config,
+                    promptBudget,
+                    grounding,
+                    metadata,
+                    job,
+                    installationToken.Token,
+                    lastSha,
+                    changedPathsSinceLastReview,
+                    ct)
+                .ConfigureAwait(false);
+            retrievalActivity?.SetTag("retrieval.snippets_returned", retrievalContext.Snippets.Count);
+            retrievalActivity?.SetTag("retrieval.bytes_used",
+                retrievalContext.Snippets.Sum(s => Encoding.UTF8.GetByteCount(s.Content)));
+        }
+
         var retrievalElapsed = retrievalSw.Elapsed;
         var repositoryContext = retrievalContext.Snippets;
         promptBudget = retrievalContext.Budget;
@@ -384,6 +404,10 @@ public sealed class ReviewWorker : BackgroundService
         }
         else
         {
+            using var chunkActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.chunk_review");
+            chunkActivity?.SetTag("review.chunk_index", 1);
+            chunkActivity?.SetTag("review.total_chunks", 1);
+
             promptBudget = ConsumeDiffBudget(files, config, promptBudget, job);
             LogPromptBudget(promptBudget, config, job);
 
@@ -399,9 +423,20 @@ public sealed class ReviewWorker : BackgroundService
                 repositoryContext);
 
             var prompt = PromptBuilder.Build(request);
+            ReviewResult singleChunkResult;
             var sw = Stopwatch.StartNew();
-            result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+            using (var llmActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.llm.review"))
+            {
+                singleChunkResult = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+                if (singleChunkResult.TokenUsage is { } u)
+                {
+                    llmActivity?.SetTag("llm.prompt_tokens", u.PromptTokens);
+                    llmActivity?.SetTag("llm.completion_tokens", u.CompletionTokens);
+                }
+            }
+
             sw.Stop();
+            result = singleChunkResult;
             logger.LogInformation(
                 "LLM review completed in {LlmDurationMs}ms for {DeliveryId}",
                 sw.Elapsed.TotalMilliseconds,
@@ -448,7 +483,7 @@ public sealed class ReviewWorker : BackgroundService
 
             // Build a single-chunk outcome for tracing; carry the raw response from the initial call
             // since result may have been replaced by agentic context with a new summary.
-            chunkOutcomes = [new ChunkReviewOutcome(result with { RawLlmResponse = initialResult.RawLlmResponse }, prompt, sw.Elapsed)];
+            chunkOutcomes = [new ChunkReviewOutcome(result with { RawLlmResponse = initialResult.RawLlmResponse }, prompt, sw.Elapsed, files)];
         }
 
         result = ApplyOutputConfig(result, candidateComments, config);
@@ -487,9 +522,12 @@ public sealed class ReviewWorker : BackgroundService
             }
         }
 
-        await reviewPoster
-            .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct, reviewEvent)
-            .ConfigureAwait(false);
+        using (var _ = ReviewBotActivitySource.Instance.StartActivity("reviewbot.post_review"))
+        {
+            await reviewPoster
+                .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct, reviewEvent)
+                .ConfigureAwait(false);
+        }
 
         var timings = new TraceTimings
         {
@@ -514,7 +552,8 @@ public sealed class ReviewWorker : BackgroundService
     private sealed record ChunkReviewOutcome(
         ReviewResult Result,
         PromptPayload Prompt,
-        TimeSpan Elapsed);
+        TimeSpan Elapsed,
+        IReadOnlyList<FileChange>? ChunkFiles = null);
 
     private static ReviewTrace BuildTrace(
         ReviewJob job,
@@ -605,13 +644,14 @@ public sealed class ReviewWorker : BackgroundService
         var systemBytes = System.Text.Encoding.UTF8.GetByteCount(outcome.Prompt.SystemPrompt);
         var userBytes = System.Text.Encoding.UTF8.GetByteCount(outcome.Prompt.UserPrompt);
         var rawBytes = outcome.Result.RawLlmResponse is { } raw ? System.Text.Encoding.UTF8.GetByteCount(raw) : 0;
+        var files = outcome.ChunkFiles is { Count: > 0 }
+            ? outcome.ChunkFiles.Select(f => f.Path).OrderBy(p => p, StringComparer.Ordinal).ToArray()
+            : outcome.Result.Comments.Select(c => c.Path).Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal).ToArray();
         return new TraceChunk
         {
             ChunkIndex = index + 1,
             TotalChunks = totalChunks,
-            Files = outcome.Result.Comments.Count > 0
-                ? outcome.Result.Comments.Select(c => c.Path).Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal).ToArray()
-                : [],
+            Files = files,
             ElapsedMs = outcome.Elapsed.TotalMilliseconds,
             PromptSystemBytes = systemBytes,
             PromptUserBytes = userBytes,
@@ -740,6 +780,10 @@ public sealed class ReviewWorker : BackgroundService
         string installationToken,
         CancellationToken ct)
     {
+        using var chunkActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.chunk_review");
+        chunkActivity?.SetTag("review.chunk_index", chunk.Index);
+        chunkActivity?.SetTag("review.total_chunks", chunk.TotalChunks);
+
         var request = new ReviewRequest(
             metadata.Title,
             metadata.Body,
@@ -754,8 +798,18 @@ public sealed class ReviewWorker : BackgroundService
             TotalChunks: chunk.TotalChunks);
 
         var prompt = PromptBuilder.Build(request);
+        ReviewResult result;
         var sw = Stopwatch.StartNew();
-        var result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+        using (var llmActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.llm.review"))
+        {
+            result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+            if (result.TokenUsage is { } u)
+            {
+                llmActivity?.SetTag("llm.prompt_tokens", u.PromptTokens);
+                llmActivity?.SetTag("llm.completion_tokens", u.CompletionTokens);
+            }
+        }
+
         sw.Stop();
         logger.LogInformation(
             "LLM review chunk {ChunkIndex}/{TotalChunks} completed in {LlmDurationMs}ms for {DeliveryId}",
@@ -776,7 +830,7 @@ public sealed class ReviewWorker : BackgroundService
                 ct)
             .ConfigureAwait(false);
 
-        return new ChunkReviewOutcome(finalResult with { RawLlmResponse = result.RawLlmResponse }, prompt, sw.Elapsed);
+        return new ChunkReviewOutcome(finalResult with { RawLlmResponse = result.RawLlmResponse }, prompt, sw.Elapsed, chunk.Files);
     }
 
     private static IReadOnlyDictionary<string, string>? FilterFullFileContents(
@@ -1667,7 +1721,12 @@ public sealed class ReviewWorker : BackgroundService
         try
         {
             var critiqueSw = Stopwatch.StartNew();
-            var rawCritique = await llm.CompleteRawAsync(critiquePayload, ct, "self_critique").ConfigureAwait(false);
+            string rawCritique;
+            using (var _ = ReviewBotActivitySource.Instance.StartActivity("reviewbot.llm.self_critique"))
+            {
+                rawCritique = await llm.CompleteRawAsync(critiquePayload, ct, "self_critique").ConfigureAwait(false);
+            }
+
             critiqueSw.Stop();
             metrics.RecordLlmDuration(
                 critiqueSw.Elapsed.TotalMilliseconds,

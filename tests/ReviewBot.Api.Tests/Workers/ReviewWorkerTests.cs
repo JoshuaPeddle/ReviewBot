@@ -1,5 +1,8 @@
+using System.Diagnostics;
 using System.Diagnostics.Metrics;
+using DiagActivity = System.Diagnostics.Activity;
 using FluentAssertions;
+using ReviewBot.Api.Otel;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
@@ -3167,6 +3170,56 @@ public class ReviewWorkerTests
 
         capturedTrace.Should().NotBeNull();
         capturedTrace!.EstimatedCostUsd.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task OtelSpansAreEmittedForReview()
+    {
+        var activities = new List<DiagActivity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == ReviewBotActivitySource.SourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = a => { lock (activities) activities.Add(a); }
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var fixture = new WorkerFixture();
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/A.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("Looks fine.", []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+        List<DiagActivity> snapshot;
+        lock (activities) snapshot = [..activities];
+
+        var reviewSpan = snapshot.Should().ContainSingle(a => a.OperationName == "reviewbot.review").Subject;
+        reviewSpan.GetTagItem("review.owner").Should().Be("octo-org");
+        reviewSpan.GetTagItem("review.repo").Should().Be("reviewbot");
+        reviewSpan.GetTagItem("review.pr_number").Should().Be(42);
+        reviewSpan.GetTagItem("review.sha").Should().Be("snapshot-head");
+        reviewSpan.GetTagItem("review.model").Should().NotBeNull();
+
+        snapshot.Should().Contain(a => a.OperationName == "reviewbot.grounding");
+        snapshot.Should().Contain(a => a.OperationName == "reviewbot.retrieval");
+        snapshot.Should().Contain(a => a.OperationName == "reviewbot.chunk_review");
+        snapshot.Should().Contain(a => a.OperationName == "reviewbot.llm.review");
+        snapshot.Should().Contain(a => a.OperationName == "reviewbot.post_review");
     }
 
     private static ReviewJob CreateJob(string deliveryId = "delivery-123", string reason = "review_requested")

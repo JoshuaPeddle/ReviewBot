@@ -1,10 +1,12 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using ReviewBot.Api;
 using ReviewBot.Api.Cost;
+using ReviewBot.Api.Otel;
 using ReviewBot.Api.Options;
 using ReviewBot.Api.Tracing;
 using ReviewBot.Api.Workers;
@@ -102,6 +104,9 @@ builder.Services.AddOptions<CostRateOptions>()
 builder.Services.AddSingleton<IReviewCostCalculator, ReviewCostCalculator>();
 builder.Services.AddSingleton<ReviewBotMetrics>();
 builder.Services.AddOpenTelemetry()
+    .WithTracing(t => t
+        .AddSource(ReviewBotActivitySource.SourceName)
+        .AddOtlpExporter())
     .WithMetrics(m => m
         .AddMeter(ReviewBotMetrics.MeterName)
         .AddPrometheusExporter());
