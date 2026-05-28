@@ -1,9 +1,11 @@
+using System.Diagnostics;
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using ReviewBot.Core.Domain;
+using ReviewBot.Core.Otel;
 using ReviewBot.GitHub.Checks;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding.Build;
@@ -712,6 +714,94 @@ public class CompositeGroundingProviderTests
         var ctx = await provider.GetContextAsync(request, CancellationToken.None);
 
         ctx.Tests.Should().Be(new TestResult(0, 0, 0, "test runner exploded"));
+    }
+
+    [Fact]
+    public async Task GetContextAsyncEmitsGroundingTierSpans()
+    {
+        var activities = new List<Activity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == ReviewBotActivitySource.SourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = activity =>
+            {
+                lock (activities)
+                {
+                    activities.Add(activity);
+                }
+            }
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        var checkFetcher = Substitute.For<ICheckRunFetcher>();
+        checkFetcher.GetHeadCheckSummaryAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new TestResult(1, 0, 0, "checks ok", "github_checks"));
+
+        var detector = Substitute.For<ILanguageDetector>();
+        detector.LanguageId.Returns("dotnet");
+        detector.CanDetect(Arg.Any<IReadOnlyList<string>>()).Returns(true);
+        detector.ExtractMetadataAsync(Arg.Any<IRepoContentReader>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new LanguageMetadata("dotnet", "10.0", null, []));
+
+        var buildRunner = Substitute.For<IBuildRunner>();
+        buildRunner.LanguageId.Returns("dotnet");
+        buildRunner.RunAsync(Arg.Any<string>(), Arg.Any<GroundingConfig>(), Arg.Any<CancellationToken>())
+            .Returns(new BuildResult(true, 0, 0, "build ok"));
+
+        var testRunner = Substitute.For<ITestRunner>();
+        testRunner.LanguageId.Returns("dotnet");
+        testRunner.RunAsync(Arg.Any<string>(), Arg.Any<GroundingConfig>(), Arg.Any<CancellationToken>())
+            .Returns(new TestResult(12, 1, 0, "local tests ran"));
+
+        var workspace = Substitute.For<IWorkspace>();
+        workspace.LocalPath.Returns("/tmp/ws");
+        workspace.DisposeAsync().Returns(ValueTask.CompletedTask);
+
+        var workspaceFactory = Substitute.For<IWorkspaceFactory>();
+        workspaceFactory.CreateAsync(Arg.Any<WorkspaceRequest>(), Arg.Any<CancellationToken>())
+            .Returns(workspace);
+
+        var reader = Substitute.For<IRepoContentReader>();
+        reader.ListRootFilesAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(["MyApp.csproj"]);
+
+        var request = Request with { Config = GroundingConfig.Default with { Tests = true, LocalTests = true, Build = true } };
+        var provider = CreateProviderWithTests([detector], [buildRunner], [testRunner], workspaceFactory, checkFetcher, reader);
+
+        await provider.GetContextAsync(request, CancellationToken.None);
+
+        List<Activity> snapshot;
+        lock (activities)
+        {
+            snapshot = [..activities];
+        }
+
+        var languageActivity = snapshot.Should()
+            .ContainSingle(activity => activity.OperationName == "reviewbot.grounding.tier1_language")
+            .Subject;
+        languageActivity.GetTagItem("grounding.detector").Should().Be("dotnet");
+        languageActivity.GetTagItem("grounding.language_id").Should().Be("dotnet");
+        languageActivity.GetTagItem("grounding.language_detected").Should().Be(true);
+
+        var buildActivity = snapshot.Should()
+            .ContainSingle(activity => activity.OperationName == "reviewbot.grounding.tier2_build")
+            .Subject;
+        buildActivity.GetTagItem("grounding.language_id").Should().Be("dotnet");
+        buildActivity.GetTagItem("grounding.build_ran").Should().Be(true);
+        buildActivity.GetTagItem("grounding.build_success").Should().Be(true);
+
+        var testActivities = snapshot
+            .Where(activity => activity.OperationName == "reviewbot.grounding.tier3_tests")
+            .ToArray();
+        testActivities.Should().HaveCount(2);
+        testActivities.Should().Contain(activity => Equals(activity.GetTagItem("grounding.test_source"), "github_checks"));
+        var localTestActivity = testActivities.Should()
+            .ContainSingle(activity => Equals(activity.GetTagItem("grounding.test_source"), "local"))
+            .Subject;
+        localTestActivity.GetTagItem("grounding.language_id").Should().Be("dotnet");
+        localTestActivity.GetTagItem("grounding.tests_found").Should().Be(true);
+        localTestActivity.GetTagItem("grounding.tests_failed").Should().Be(1);
     }
 
     private static CompositeGroundingProvider CreateProvider(

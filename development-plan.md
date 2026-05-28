@@ -461,7 +461,20 @@ Corrected assumptions discovered during implementation:
 
 - Keeping the shared `ActivitySource` internal to `ReviewBot.Api` was the structural blocker for provider-level spans. Moving the source to Core lets retrieval emit child spans without depending on the API assembly.
 
-Span attributes: `review.owner`, `review.repo`, `review.pr_number`, `review.sha`, `review.model`, `review.chunk_index`, `review.total_chunks`, `llm.prompt_tokens`, `llm.completion_tokens`, `retrieval.symbols_queried`, `retrieval.snippets_returned`, `retrieval.bytes_used`.
+#### Completed grounding OTel detail slice (May 28, 2026)
+
+Shipped the grounding-specific span detail that the initial OTel slice left open:
+
+- Added `reviewbot.grounding.tier1_language` spans inside `CompositeGroundingProvider`, covering root-file listing, detector selection, and metadata extraction.
+- Added `reviewbot.grounding.tier2_build` spans around clone/build execution, tagged with language ID, whether a build runner actually ran, and build success.
+- Added `reviewbot.grounding.tier3_tests` spans for GitHub Checks summary collection and local test execution, tagged by test source plus local failure counts when available.
+- Added grounding tests that listen to the shared `ReviewBot` activity source and verify tier1/tier2/tier3 span names and tags.
+
+Corrected assumptions discovered during implementation:
+
+- The previous risk text still grouped retrieval with the grounding observability gap. Retrieval extraction, lookup, queried-symbol counts, snippet counts, bytes used, and index mode were already covered by the retrieval OTel detail slice; the remaining Phase 23 gap was grounding tier detail only.
+
+Span attributes: `review.owner`, `review.repo`, `review.pr_number`, `review.sha`, `review.model`, `review.chunk_index`, `review.total_chunks`, `llm.prompt_tokens`, `llm.completion_tokens`, `retrieval.symbols_queried`, `retrieval.snippets_returned`, `retrieval.bytes_used`, `grounding.language_id`, `grounding.detector`, `grounding.language_detected`, `grounding.build_ran`, `grounding.build_success`, `grounding.test_source`, `grounding.tests_failed`.
 
 ### Cost surface
 
@@ -533,7 +546,7 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 
 **Retrieval parser quality.** The lexical C# parser misclassifies edge-case syntax and produces false positives on symbol extraction. Symbol lookup hits with wrong matches dilute the retrieval context budget. Measure via eval: if retrieval is on but scores lower than no retrieval, the parser noise is the cause. Switching to tree-sitter or Roslyn is the fix; do it after the measurement confirms the gap.
 
-**Retrieval observability blind spot.** Status: closed May 28. Retrieval extraction, lookup, queried-symbol count, snippet count, byte count, and index mode are now visible in OTel spans. Remaining observability follow-on is grounding tier sub-spans, not retrieval.
+**Retrieval observability blind spot.** Status: closed May 28. Retrieval extraction, lookup, queried-symbol count, snippet count, byte count, and index mode are now visible in OTel spans. The separate grounding tier-span gap is also closed by the grounding OTel detail slice.
 
 **Retrieval cold-start latency.** The first retrieval-enabled review of a SHA still clones a temporary checkout and may full-parse the head when there is no indexed base SHA, the GitHub compare result is unavailable/truncated, or ReviewBot repo config changed. Status: narrowed May 28; delta reviews with an indexed base SHA now copy unchanged symbols and reparse only compare-changed paths, and symbol-less SHAs are tracked explicitly. Mitigation: keep retrieval opt-in (`retrieval.enabled: false` by default), measure first-review/index spans in Phase 23, and revisit persistent clone/index workspaces if cold-start latency remains visible.
 
@@ -543,7 +556,7 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 
 **SQLite index contention.** The repo index uses SQLite. Concurrent reviews of the same repo could race on index writes. SQLite with WAL mode handles concurrent reads fine but serializes writes. For the expected deployment scale (single-maintainer self-hosted), this is acceptable. If concurrent review volume grows, the contention will show up as index write latency in OTel spans (now available as of May 28).
 
-**OTel sub-provider span coverage gap.** Grounding and retrieval provider internals (tier1_language, tier2_build, extract_symbols, index_sha, lookup) are not yet spanned; only the top-level call from `ReviewWorker` is. Status: opened May 28. Mitigation: the top-level spans give the stage-level timing needed for Phase 24 dashboards; sub-provider spans are a follow-on once Phase 24 is underway.
+**OTel sub-provider span coverage gap.** Status: closed May 28. Grounding tier spans (`tier1_language`, `tier2_build`, `tier3_tests`) and retrieval provider/index spans (`extract_symbols`, `lookup`, `index_sha`) now emit through the shared `ReviewBot` activity source. Remaining observability follow-ons are lower-level runner details if real traces show build/test commands need deeper breakdown.
 
 **Agentic trace blind spot.** The trace previously showed final review outputs but not the files requested by agentic context, validation drops, or fetched paths, making second-pass review behavior difficult to debug. Status: closed May 28; `TraceChunk.AgenticContext` now records requested, accepted, fetched, drop counts, and whether the second pass ran. Remaining limitation: second-pass raw-completion token usage is not available from `CompleteRawAsync`, so only primary review token usage is preserved for enriched results.
 
