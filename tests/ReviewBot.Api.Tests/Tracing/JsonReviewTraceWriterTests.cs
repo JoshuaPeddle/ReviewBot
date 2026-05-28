@@ -55,6 +55,11 @@ public class JsonReviewTraceWriterTests : IDisposable
         candidateComments[0].GetProperty("severity").GetString().Should().Be("error");
         candidateComments[0].GetProperty("confidence").GetString().Should().Be("high");
 
+        var droppedComments = root.GetProperty("dropped_comments").EnumerateArray().ToArray();
+        droppedComments.Should().HaveCount(1);
+        droppedComments[0].GetProperty("path").GetString().Should().Be("src/Bar.cs");
+        droppedComments[0].GetProperty("reason").GetString().Should().Be("below_min_confidence");
+
         var finalComments = root.GetProperty("final_comments").EnumerateArray().ToArray();
         finalComments.Should().HaveCount(1);
         finalComments[0].GetProperty("path").GetString().Should().Be("src/Foo.cs");
@@ -374,6 +379,10 @@ public class JsonReviewTraceWriterTests : IDisposable
             [
                 new TraceComment { Path = "src/Foo.cs", Line = 5, Side = "RIGHT", Body = "Null check missing.", Severity = "error", Confidence = "high" },
                 new TraceComment { Path = "src/Bar.cs", Line = 10, Side = "RIGHT", Body = "Consider extracting method.", Severity = "info", Confidence = "low" }
+            ],
+            DroppedComments =
+            [
+                new TraceDroppedComment { Path = "src/Bar.cs", Line = 10, Side = "RIGHT", Body = "Consider extracting method.", Severity = "info", Confidence = "low", Reason = "below_min_confidence" }
             ],
             FinalComments =
             [

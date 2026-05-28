@@ -2634,7 +2634,16 @@ public class ReviewWorkerTests
     [Fact]
     public async Task SelfCritiqueRetainsSelectedLowerConfidenceCommentsAndAllHighConfidenceComments()
     {
-        await using var fixture = new WorkerFixture();
+        ReviewTrace? capturedTrace = null;
+        var traceWriter = Substitute.For<IReviewTraceWriter>();
+        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedTrace = call.Arg<ReviewTrace>();
+                return Task.CompletedTask;
+            });
+
+        await using var fixture = new WorkerFixture(traceWriter: traceWriter);
         var config = ReviewConfig.Default with
         {
             Review = ReviewConfig.Default.Review with { SelfCritique = true }
@@ -2676,9 +2685,14 @@ public class ReviewWorkerTests
         await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
 
         postedResult!.Comments.Select(c => c.Body)
             .Should().Equal("High stays.", "Medium kept.", "Medium kept too.");
+        capturedTrace.Should().NotBeNull();
+        capturedTrace!.DroppedComments.Should().ContainSingle(c =>
+            c.Body == "Low dropped." &&
+            c.Reason == "self_critique");
         critiquePrompt.Should().NotBeNull();
         critiquePhase.Should().Be("self_critique");
         critiquePrompt!.UserPrompt.Should().Contain("0. src/App.cs:2");
@@ -3067,6 +3081,65 @@ public class ReviewWorkerTests
         capturedTrace.ReviewType.Should().Be("first_review");
         capturedTrace.FinalComments.Should().ContainSingle()
             .Which.Path.Should().Be("src/A.cs");
+    }
+
+    [Fact]
+    public async Task TraceRecordsRawCandidateCommentsAndDropReasons()
+    {
+        ReviewTrace? capturedTrace = null;
+        var traceWriter = Substitute.For<IReviewTraceWriter>();
+        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedTrace = call.Arg<ReviewTrace>();
+                return Task.CompletedTask;
+            });
+
+        await using var fixture = new WorkerFixture(traceWriter: traceWriter);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { MinConfidence = Confidence.High }
+        };
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Found one issue.",
+                [
+                    new InlineComment("src/App.cs", 1, "RIGHT", "This should handle null input before dereferencing the value.", Severity.Warning, Confidence.High),
+                    new InlineComment("src/App.cs", 2, "RIGHT", "Consider extracting this into a helper.", Severity.Info, Confidence.Medium),
+                    new InlineComment("src/App.cs", 3, "RIGHT", "Nice guard.", Severity.Info, Confidence.High)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+        capturedTrace.Should().NotBeNull();
+        capturedTrace!.CandidateComments.Select(c => c.Body)
+            .Should().Equal(
+                "This should handle null input before dereferencing the value.",
+                "Consider extracting this into a helper.",
+                "Nice guard.");
+        capturedTrace.FinalComments.Should().ContainSingle()
+            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
+        capturedTrace.DroppedComments.Select(c => (c.Body, c.Reason))
+            .Should().BeEquivalentTo(
+            [
+                ("Consider extracting this into a helper.", "below_min_confidence"),
+                ("Nice guard.", "praise_only")
+            ]);
     }
 
     [Fact]

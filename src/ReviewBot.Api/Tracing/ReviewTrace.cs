@@ -20,6 +20,7 @@ public sealed class ReviewTrace
     public TraceBudgetSnapshot? PromptBudget { get; init; }
     public required string ResultSummary { get; init; }
     public required IReadOnlyList<TraceComment> CandidateComments { get; init; }
+    public required IReadOnlyList<TraceDroppedComment> DroppedComments { get; init; }
     public required IReadOnlyList<TraceComment> FinalComments { get; init; }
     public TraceLlmTokenUsage? TokenUsage { get; init; }
     public decimal? EstimatedCostUsd { get; init; }
@@ -53,6 +54,17 @@ public sealed class TraceComment
     public required string Body { get; init; }
     public required string Severity { get; init; }
     public required string Confidence { get; init; }
+}
+
+public sealed class TraceDroppedComment
+{
+    public required string Path { get; init; }
+    public required int Line { get; init; }
+    public required string Side { get; init; }
+    public required string Body { get; init; }
+    public required string Severity { get; init; }
+    public required string Confidence { get; init; }
+    public required string Reason { get; init; }
 }
 
 public sealed class TraceLlmTokenUsage

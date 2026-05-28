@@ -338,7 +338,7 @@ Shipped per-chunk prompt content, raw LLM responses, and per-stage timings in re
 Corrected assumptions discovered during implementation:
 - The worker previously re-started a new `Stopwatch` for grounding inside `GetGroundingContextAsync`; those internal timings already flow to metrics. The new outer stopwatches in `ProcessAsync` measure stage wall time for the trace independently, which is acceptable.
 
-Remaining in Phase 23 trace slice: per-chunk agentic context capture (files requested, files fetched, drop reasons) is not yet in the trace. The `ReviewChunkAsync` agentic context results flow into the final `ReviewResult` but the requests/fetched paths are not recorded as a separate trace field.
+Remaining in Phase 23 trace slice: the original per-chunk agentic context gap is closed by the May 28 per-chunk agentic trace slice below. Lower-level trace detail can still be expanded as real traces show what operators need, but no known fully specified trace-persistence gap remains in this item after the filtered-comment trace slice.
 
 #### Completed cost surface slice (May 27, 2026)
 
@@ -474,6 +474,20 @@ Corrected assumptions discovered during implementation:
 
 - The previous risk text still grouped retrieval with the grounding observability gap. Retrieval extraction, lookup, queried-symbol counts, snippet counts, bytes used, and index mode were already covered by the retrieval OTel detail slice; the remaining Phase 23 gap was grounding tier detail only.
 
+#### Completed filtered-comment trace slice (May 28, 2026)
+
+Shipped trace visibility for comments removed between model output and GitHub posting:
+
+- Changed review traces so `candidate_comments` records the raw model candidate comments for the selected review pass, before confidence/content filtering and self-critique.
+- Added `dropped_comments` to each trace, preserving the comment fields plus a stable reason (`inline_comments_disabled`, `below_min_confidence`, `praise_only`, `meta_review`, `non_actionable_process`, `speculative_missing_context`, or `self_critique`).
+- Preserved existing posting behavior: only filtered final comments are sent to GitHub, while the trace now explains why raw candidates disappeared.
+- Added JSON serialization coverage and a worker integration test proving raw candidates, final comments, and drop reasons are captured after a review.
+
+Corrected assumptions discovered during implementation:
+
+- The existing `candidate_comments` trace field was not truly pre-filter. It was populated after confidence/content filtering and often after self-critique, which made trace JSON insufficient for debugging "why did the bot not post this model comment?" reports.
+- The broader stop test also exposed prompt-builder drift: Core prompt tests expected the stricter anti-meta-review and anti-speculation rules, but `PromptBuilder` still emitted an older shorter rule set. Restored the prompt contract before final verification.
+
 Span attributes: `review.owner`, `review.repo`, `review.pr_number`, `review.sha`, `review.model`, `review.chunk_index`, `review.total_chunks`, `llm.prompt_tokens`, `llm.completion_tokens`, `retrieval.symbols_queried`, `retrieval.snippets_returned`, `retrieval.bytes_used`, `grounding.language_id`, `grounding.detector`, `grounding.language_detected`, `grounding.build_ran`, `grounding.build_success`, `grounding.test_source`, `grounding.tests_failed`.
 
 ### Cost surface
@@ -559,5 +573,7 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 **OTel sub-provider span coverage gap.** Status: closed May 28. Grounding tier spans (`tier1_language`, `tier2_build`, `tier3_tests`) and retrieval provider/index spans (`extract_symbols`, `lookup`, `index_sha`) now emit through the shared `ReviewBot` activity source. Remaining observability follow-ons are lower-level runner details if real traces show build/test commands need deeper breakdown.
 
 **Agentic trace blind spot.** The trace previously showed final review outputs but not the files requested by agentic context, validation drops, or fetched paths, making second-pass review behavior difficult to debug. Status: closed May 28; `TraceChunk.AgenticContext` now records requested, accepted, fetched, drop counts, and whether the second pass ran. Remaining limitation: second-pass raw-completion token usage is not available from `CompleteRawAsync`, so only primary review token usage is preserved for enriched results.
+
+**Comment filtering trace blind spot.** The trace previously recorded `candidate_comments` only after comment filters and optional self-critique ran, so filtered model comments were invisible. Status: closed May 28; traces now preserve raw candidate comments and a `dropped_comments` list with stable drop reasons through final posting.
 
 **Anthropic SDK stability.** `Anthropic.SDK` 5.x remains unofficial. Prompt caching and fine-grained cache control are version-sensitive. Pin the version in `Directory.Packages.props` and document. Watch for an official Anthropic .NET SDK; migrate when one ships.

@@ -378,6 +378,8 @@ public sealed class ReviewWorker : BackgroundService
         var reviewChunks = PlanReviewChunks(files, config, promptBudget, job);
         ReviewResult result;
         IReadOnlyList<InlineComment> candidateComments;
+        IReadOnlyList<InlineComment> rawCandidateComments;
+        IReadOnlyList<DroppedComment> droppedComments;
         IReadOnlyList<ChunkReviewOutcome>? chunkOutcomes = null;
 
         if (reviewChunks.Count > 1)
@@ -397,9 +399,12 @@ public sealed class ReviewWorker : BackgroundService
                     ct)
                 .ConfigureAwait(false);
             result = ReviewResultMerger.Merge(chunkOutcomes.Select(o => o.Result).ToArray());
-            candidateComments = FilterCandidateComments(result, config);
-            candidateComments = await ApplySelfCritiqueAsync(llm, reviewedFiles, candidateComments, config, ct)
+            rawCandidateComments = result.Comments;
+            var filteredComments = FilterCandidateComments(result, config);
+            var critiquedComments = await ApplySelfCritiqueWithDropsAsync(llm, reviewedFiles, filteredComments.Comments, config, ct)
                 .ConfigureAwait(false);
+            candidateComments = critiquedComments.Comments;
+            droppedComments = CombineDroppedComments(filteredComments.DroppedComments, critiquedComments.DroppedComments);
             result = result with { Summary = BuildChunkedSummary(candidateComments, reviewChunks) };
             result = AppendFilesSkippedNote(result, GetSkippedChunkPaths(files, reviewChunks, patchBudgetResult.SkippedPaths));
         }
@@ -445,8 +450,8 @@ public sealed class ReviewWorker : BackgroundService
             metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
 
             var initialResult = result;
-            var initialCandidateComments = FilterCandidateComments(initialResult, config);
-            var speculativeSelfCritique = StartSelfCritiqueIfNeeded(llm, files, initialCandidateComments, config, ct);
+            var initialFilteredComments = FilterCandidateComments(initialResult, config);
+            var speculativeSelfCritique = StartSelfCritiqueIfNeeded(llm, files, initialFilteredComments.Comments, config, ct);
             AgenticContextReviewOutcome agenticOutcome;
 
             try
@@ -472,16 +477,22 @@ public sealed class ReviewWorker : BackgroundService
             result = AppendFilesSkippedNote(result, patchBudgetResult.SkippedPaths);
             if (ReferenceEquals(result, initialResult))
             {
-                candidateComments = speculativeSelfCritique is null
-                    ? initialCandidateComments
+                var critiqueResult = speculativeSelfCritique is null
+                    ? new CommentFilterResult(initialFilteredComments.Comments, [])
                     : await AwaitSelfCritiqueAsync(speculativeSelfCritique).ConfigureAwait(false);
+                rawCandidateComments = initialResult.Comments;
+                candidateComments = critiqueResult.Comments;
+                droppedComments = CombineDroppedComments(initialFilteredComments.DroppedComments, critiqueResult.DroppedComments);
             }
             else
             {
                 CancelSelfCritique(speculativeSelfCritique);
-                candidateComments = FilterCandidateComments(result, config);
-                candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
+                rawCandidateComments = result.Comments;
+                var filteredComments = FilterCandidateComments(result, config);
+                var critiquedComments = await ApplySelfCritiqueWithDropsAsync(llm, files, filteredComments.Comments, config, ct)
                     .ConfigureAwait(false);
+                candidateComments = critiquedComments.Comments;
+                droppedComments = CombineDroppedComments(filteredComments.DroppedComments, critiquedComments.DroppedComments);
             }
 
             // Build a single-chunk outcome for tracing; carry the raw response from the initial call
@@ -549,7 +560,7 @@ public sealed class ReviewWorker : BackgroundService
         };
 
         await traceWriter
-            .WriteAsync(BuildTrace(job, metadata, config, reviewStartTime, incrementalType, files, reviewChunks.Count, repositoryContext?.Count ?? 0, promptBudget, candidateComments, result, chunkOutcomes, timings, estimatedCostUsd, traceWriter.IncludePrompts), ct)
+            .WriteAsync(BuildTrace(job, metadata, config, reviewStartTime, incrementalType, files, reviewChunks.Count, repositoryContext?.Count ?? 0, promptBudget, rawCandidateComments, droppedComments, result, chunkOutcomes, timings, estimatedCostUsd, traceWriter.IncludePrompts), ct)
             .ConfigureAwait(false);
 
         await prReviewStateStore
@@ -578,6 +589,12 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyDictionary<string, int> DropCounts,
         bool SecondPassRan);
 
+    private sealed record DroppedComment(InlineComment Comment, string Reason);
+
+    private sealed record CommentFilterResult(
+        IReadOnlyList<InlineComment> Comments,
+        IReadOnlyList<DroppedComment> DroppedComments);
+
     private static ReviewTrace BuildTrace(
         ReviewJob job,
         PullRequestMetadata metadata,
@@ -588,7 +605,8 @@ public sealed class ReviewWorker : BackgroundService
         int chunkCount,
         int retrievalSnippetsCount,
         PromptBudget promptBudget,
-        IReadOnlyList<InlineComment> candidateComments,
+        IReadOnlyList<InlineComment> rawCandidateComments,
+        IReadOnlyList<DroppedComment> droppedComments,
         ReviewResult result,
         IReadOnlyList<ChunkReviewOutcome>? chunkOutcomes,
         TraceTimings timings,
@@ -626,27 +644,14 @@ public sealed class ReviewWorker : BackgroundService
                     .ToArray()
             },
             ResultSummary = result.Summary,
-            CandidateComments = candidateComments
-                .Select(c => new TraceComment
-                {
-                    Path = c.Path,
-                    Line = c.Line,
-                    Side = c.Side,
-                    Body = c.Body,
-                    Severity = c.Severity.ToString().ToLowerInvariant(),
-                    Confidence = c.Confidence.ToString().ToLowerInvariant()
-                })
+            CandidateComments = rawCandidateComments
+                .Select(ToTraceComment)
+                .ToArray(),
+            DroppedComments = droppedComments
+                .Select(c => ToTraceDroppedComment(c.Comment, c.Reason))
                 .ToArray(),
             FinalComments = result.Comments
-                .Select(c => new TraceComment
-                {
-                    Path = c.Path,
-                    Line = c.Line,
-                    Side = c.Side,
-                    Body = c.Body,
-                    Severity = c.Severity.ToString().ToLowerInvariant(),
-                    Confidence = c.Confidence.ToString().ToLowerInvariant()
-                })
+                .Select(ToTraceComment)
                 .ToArray(),
             TokenUsage = result.TokenUsage is { } usage
                 ? new TraceLlmTokenUsage
@@ -661,6 +666,29 @@ public sealed class ReviewWorker : BackgroundService
             Timings = timings
         };
     }
+
+    private static TraceComment ToTraceComment(InlineComment comment) =>
+        new()
+        {
+            Path = comment.Path,
+            Line = comment.Line,
+            Side = comment.Side,
+            Body = comment.Body,
+            Severity = comment.Severity.ToString().ToLowerInvariant(),
+            Confidence = comment.Confidence.ToString().ToLowerInvariant()
+        };
+
+    private static TraceDroppedComment ToTraceDroppedComment(InlineComment comment, string reason) =>
+        new()
+        {
+            Path = comment.Path,
+            Line = comment.Line,
+            Side = comment.Side,
+            Body = comment.Body,
+            Severity = comment.Severity.ToString().ToLowerInvariant(),
+            Confidence = comment.Confidence.ToString().ToLowerInvariant(),
+            Reason = reason
+        };
 
     private static TraceChunk BuildTraceChunk(ChunkReviewOutcome outcome, int index, int totalChunks, bool includePrompts)
     {
@@ -969,11 +997,11 @@ public sealed class ReviewWorker : BackgroundService
         }
 
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var task = ApplySelfCritiqueAsync(llm, files, candidateComments, config, cts.Token);
+        var task = ApplySelfCritiqueWithDropsAsync(llm, files, candidateComments, config, cts.Token);
         return new SelfCritiqueRun(task, cts);
     }
 
-    private static async Task<IReadOnlyList<InlineComment>> AwaitSelfCritiqueAsync(SelfCritiqueRun run)
+    private static async Task<CommentFilterResult> AwaitSelfCritiqueAsync(SelfCritiqueRun run)
     {
         try
         {
@@ -983,6 +1011,23 @@ public sealed class ReviewWorker : BackgroundService
         {
             run.Cancellation.Dispose();
         }
+    }
+
+    private static IReadOnlyList<DroppedComment> CombineDroppedComments(
+        IReadOnlyList<DroppedComment> first,
+        IReadOnlyList<DroppedComment> second)
+    {
+        if (first.Count == 0)
+        {
+            return second;
+        }
+
+        if (second.Count == 0)
+        {
+            return first;
+        }
+
+        return first.Concat(second).ToArray();
     }
 
     private void CancelSelfCritique(SelfCritiqueRun? run)
@@ -1842,24 +1887,109 @@ public sealed class ReviewWorker : BackgroundService
         }
     }
 
+    private async Task<CommentFilterResult> ApplySelfCritiqueWithDropsAsync(
+        IReviewLlm llm,
+        IReadOnlyList<FileChange> files,
+        IReadOnlyList<InlineComment> candidateComments,
+        ReviewConfig config,
+        CancellationToken ct)
+    {
+        var retained = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
+            .ConfigureAwait(false);
+        return new CommentFilterResult(
+            retained,
+            FindDroppedComments(candidateComments, retained, "self_critique"));
+    }
+
     private static bool ShouldRunSelfCritique(IReadOnlyList<InlineComment> candidateComments, ReviewConfig config) =>
         config.Review.SelfCritique &&
         candidateComments.Any(c => c.Confidence != Confidence.High);
 
-    private static IReadOnlyList<InlineComment> FilterCandidateComments(ReviewResult result, ReviewConfig config)
+    private static CommentFilterResult FilterCandidateComments(ReviewResult result, ReviewConfig config)
     {
         if (!config.Review.InlineComments)
         {
-            return Array.Empty<InlineComment>();
+            return new CommentFilterResult(
+                [],
+                result.Comments
+                    .Select(comment => new DroppedComment(comment, "inline_comments_disabled"))
+                    .ToArray());
         }
 
-        return result.Comments
-            .Where(c => c.Confidence >= config.Review.MinConfidence)
-            .Where(c => !IsPraiseOnlyComment(c.Body))
-            .Where(c => !IsMetaReviewComment(c.Body))
-            .Where(c => !IsNonActionableProcessComment(c.Body))
-            .Where(c => !IsSpeculativeMissingContextComment(c.Body))
-            .ToArray();
+        var kept = new List<InlineComment>(result.Comments.Count);
+        var dropped = new List<DroppedComment>();
+
+        foreach (var comment in result.Comments)
+        {
+            var reason = GetCommentDropReason(comment, config);
+            if (reason is null)
+            {
+                kept.Add(comment);
+                continue;
+            }
+
+            dropped.Add(new DroppedComment(comment, reason));
+        }
+
+        return new CommentFilterResult(kept.ToArray(), dropped.ToArray());
+    }
+
+    private static string? GetCommentDropReason(InlineComment comment, ReviewConfig config)
+    {
+        if (comment.Confidence < config.Review.MinConfidence)
+        {
+            return "below_min_confidence";
+        }
+
+        if (IsPraiseOnlyComment(comment.Body))
+        {
+            return "praise_only";
+        }
+
+        if (IsMetaReviewComment(comment.Body))
+        {
+            return "meta_review";
+        }
+
+        if (IsNonActionableProcessComment(comment.Body))
+        {
+            return "non_actionable_process";
+        }
+
+        if (IsSpeculativeMissingContextComment(comment.Body))
+        {
+            return "speculative_missing_context";
+        }
+
+        return null;
+    }
+
+    private static IReadOnlyList<DroppedComment> FindDroppedComments(
+        IReadOnlyList<InlineComment> original,
+        IReadOnlyList<InlineComment> retained,
+        string reason)
+    {
+        if (original.Count == retained.Count)
+        {
+            return [];
+        }
+
+        var unmatchedRetained = retained.ToList();
+        var dropped = new List<DroppedComment>();
+
+        foreach (var comment in original)
+        {
+            var retainedIndex = unmatchedRetained.FindIndex(c => c == comment);
+            if (retainedIndex >= 0)
+            {
+                unmatchedRetained.RemoveAt(retainedIndex);
+                continue;
+            }
+
+            dropped.Add(new DroppedComment(comment, reason));
+        }
+
+        return dropped.ToArray();
     }
 
     private static ReviewResult ApplyOutputConfig(
@@ -2256,6 +2386,6 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyDictionary<string, int> DropCounts);
 
     private sealed record SelfCritiqueRun(
-        Task<IReadOnlyList<InlineComment>> Task,
+        Task<CommentFilterResult> Task,
         CancellationTokenSource Cancellation);
 }
