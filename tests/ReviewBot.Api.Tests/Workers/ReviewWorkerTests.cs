@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Octokit;
+using ReviewBot.Api.Cost;
 using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
 using ReviewBot.Api.Workers;
@@ -3085,6 +3086,89 @@ public class ReviewWorkerTests
         capturedTrace.Timings!.TotalMs.Should().BeGreaterThan(0);
     }
 
+    [Fact]
+    public async Task TraceContainsEstimatedCostWhenCostCalculatorReturnsValue()
+    {
+        ReviewTrace? capturedTrace = null;
+        var traceWriter = Substitute.For<IReviewTraceWriter>();
+        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedTrace = call.Arg<ReviewTrace>();
+                return Task.CompletedTask;
+            });
+
+        var costCalculator = Substitute.For<IReviewCostCalculator>();
+        costCalculator.ComputeCostUsd(Arg.Any<string>(), Arg.Any<LlmTokenUsage>())
+            .Returns(0.042m);
+
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var fixture = new WorkerFixture(traceWriter: traceWriter, costCalculator: costCalculator);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/A.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("Looks fine.", []) { TokenUsage = new LlmTokenUsage(1000, 200) });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+        capturedTrace.Should().NotBeNull();
+        capturedTrace!.EstimatedCostUsd.Should().Be(0.042m);
+        costCalculator.Received(1).ComputeCostUsd(ReviewConfig.Default.Model.Name, Arg.Any<LlmTokenUsage>());
+    }
+
+    [Fact]
+    public async Task TraceHasNullEstimatedCostWhenCostCalculatorReturnsNull()
+    {
+        ReviewTrace? capturedTrace = null;
+        var traceWriter = Substitute.For<IReviewTraceWriter>();
+        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedTrace = call.Arg<ReviewTrace>();
+                return Task.CompletedTask;
+            });
+
+        var costCalculator = Substitute.For<IReviewCostCalculator>();
+        costCalculator.ComputeCostUsd(Arg.Any<string>(), Arg.Any<LlmTokenUsage>())
+            .Returns((decimal?)null);
+
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var fixture = new WorkerFixture(traceWriter: traceWriter, costCalculator: costCalculator);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/A.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("Looks fine.", []) { TokenUsage = new LlmTokenUsage(1000, 200) });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+        capturedTrace.Should().NotBeNull();
+        capturedTrace!.EstimatedCostUsd.Should().BeNull();
+    }
+
     private static ReviewJob CreateJob(string deliveryId = "delivery-123", string reason = "review_requested")
     {
         return new ReviewJob(
@@ -3205,7 +3289,8 @@ public class ReviewWorkerTests
             IModelContextRegistry? modelContextRegistry = null,
             IPromptTokenEstimator? tokenEstimator = null,
             IReviewPromptTokenEstimator? reviewTokenEstimator = null,
-            IReviewTraceWriter? traceWriter = null)
+            IReviewTraceWriter? traceWriter = null,
+            IReviewCostCalculator? costCalculator = null)
         {
             Queue = new ChannelReviewJobQueue();
             TokenProvider = Substitute.For<IInstallationTokenProvider>();
@@ -3224,6 +3309,7 @@ public class ReviewWorkerTests
             RepoIndexFactory = Substitute.For<IRepoIndexFactory>();
             RepoIndex = Substitute.For<IRepoIndex>();
             WorkspaceFactory = Substitute.For<IWorkspaceFactory>();
+            CostCalculator = costCalculator ?? Substitute.For<IReviewCostCalculator>();
 
             TokenProvider.GetTokenAsync(98765, Arg.Any<CancellationToken>())
                 .Returns(new InstallationToken("install-token", DateTimeOffset.UtcNow.AddHours(1)));
@@ -3265,6 +3351,7 @@ public class ReviewWorkerTests
                 RetrievalProvider,
                 RepoIndexFactory,
                 WorkspaceFactory,
+                CostCalculator,
                 traceWriter ?? NullReviewTraceWriter.Instance,
                 TimeProvider.System,
                 Microsoft.Extensions.Options.Options.Create(new WorkerOptions { Concurrency = concurrency }),
@@ -3304,6 +3391,8 @@ public class ReviewWorkerTests
         public IRepoIndex RepoIndex { get; }
 
         public IWorkspaceFactory WorkspaceFactory { get; }
+
+        public IReviewCostCalculator CostCalculator { get; }
 
         public async Task StartAsync()
         {

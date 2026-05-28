@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Options;
 using Octokit;
+using ReviewBot.Api.Cost;
 using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
 using ReviewBot.Core.Domain;
@@ -39,6 +40,7 @@ public sealed class ReviewWorker : BackgroundService
     private readonly IRetrievalProvider retrievalProvider;
     private readonly IRepoIndexFactory repoIndexFactory;
     private readonly IWorkspaceFactory workspaceFactory;
+    private readonly IReviewCostCalculator costCalculator;
     private readonly IReviewTraceWriter traceWriter;
     private readonly TimeProvider clock;
     private readonly WorkerOptions workerOptions;
@@ -59,6 +61,7 @@ public sealed class ReviewWorker : BackgroundService
         IRetrievalProvider retrievalProvider,
         IRepoIndexFactory repoIndexFactory,
         IWorkspaceFactory workspaceFactory,
+        IReviewCostCalculator costCalculator,
         IReviewTraceWriter traceWriter,
         TimeProvider clock,
         IOptions<WorkerOptions> options,
@@ -78,6 +81,7 @@ public sealed class ReviewWorker : BackgroundService
         this.retrievalProvider = retrievalProvider ?? throw new ArgumentNullException(nameof(retrievalProvider));
         this.repoIndexFactory = repoIndexFactory ?? throw new ArgumentNullException(nameof(repoIndexFactory));
         this.workspaceFactory = workspaceFactory ?? throw new ArgumentNullException(nameof(workspaceFactory));
+        this.costCalculator = costCalculator ?? throw new ArgumentNullException(nameof(costCalculator));
         this.traceWriter = traceWriter ?? throw new ArgumentNullException(nameof(traceWriter));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.workerOptions = options?.Value ?? throw new ArgumentNullException(nameof(options));
@@ -456,6 +460,7 @@ public sealed class ReviewWorker : BackgroundService
         var reviewEvent = DetermineReviewEvent(result.Comments, config);
         metrics.RecordCommentsPosted(result.Comments.Count);
 
+        decimal? estimatedCostUsd = null;
         if (result.TokenUsage is { } tokenUsage)
         {
             logger.LogInformation(
@@ -467,6 +472,19 @@ public sealed class ReviewWorker : BackgroundService
                 tokenUsage.PromptTokens,
                 tokenUsage.CompletionTokens,
                 tokenUsage.CachedPromptTokens);
+
+            estimatedCostUsd = costCalculator.ComputeCostUsd(config.Model.Name, tokenUsage);
+            if (estimatedCostUsd is { } cost)
+            {
+                metrics.RecordCost((double)cost, config.Model.Provider, config.Model.Name);
+                logger.LogInformation(
+                    "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} estimated cost ${EstimatedCostUsd:F6} USD",
+                    job.DeliveryId,
+                    job.Owner,
+                    job.Repo,
+                    job.PrNumber,
+                    cost);
+            }
         }
 
         await reviewPoster
@@ -482,7 +500,7 @@ public sealed class ReviewWorker : BackgroundService
         };
 
         await traceWriter
-            .WriteAsync(BuildTrace(job, metadata, config, reviewStartTime, incrementalType, files, reviewChunks.Count, repositoryContext?.Count ?? 0, promptBudget, candidateComments, result, chunkOutcomes, timings, traceWriter.IncludePrompts), ct)
+            .WriteAsync(BuildTrace(job, metadata, config, reviewStartTime, incrementalType, files, reviewChunks.Count, repositoryContext?.Count ?? 0, promptBudget, candidateComments, result, chunkOutcomes, timings, estimatedCostUsd, traceWriter.IncludePrompts), ct)
             .ConfigureAwait(false);
 
         await prReviewStateStore
@@ -512,6 +530,7 @@ public sealed class ReviewWorker : BackgroundService
         ReviewResult result,
         IReadOnlyList<ChunkReviewOutcome>? chunkOutcomes,
         TraceTimings timings,
+        decimal? estimatedCostUsd,
         bool includePrompts)
     {
         return new ReviewTrace
@@ -575,6 +594,7 @@ public sealed class ReviewWorker : BackgroundService
                     CachedPromptTokens = usage.CachedPromptTokens
                 }
                 : null,
+            EstimatedCostUsd = estimatedCostUsd,
             ChunkTraces = chunkOutcomes?.Select((o, i) => BuildTraceChunk(o, i, chunkOutcomes.Count, includePrompts)).ToArray(),
             Timings = timings
         };
@@ -1506,7 +1526,7 @@ public sealed class ReviewWorker : BackgroundService
             ? note
             : $"{result.Summary.TrimEnd()}\n\n{note}";
 
-        return new ReviewResult(summary, result.Comments, result.ContextRequests);
+        return result with { Summary = summary };
     }
 
     private static ReviewResult AppendRereviewHint(ReviewResult result)
@@ -1515,7 +1535,7 @@ public sealed class ReviewWorker : BackgroundService
         var summary = string.IsNullOrWhiteSpace(result.Summary)
             ? hint
             : $"{result.Summary.TrimEnd()}\n\n---\n{hint}";
-        return new ReviewResult(summary, result.Comments, result.ContextRequests);
+        return result with { Summary = summary };
     }
 
     private async Task<ReviewResult> ApplyAgenticContextAsync(
@@ -1712,7 +1732,7 @@ public sealed class ReviewWorker : BackgroundService
 
         return summary == result.Summary && ReferenceEquals(comments, result.Comments)
             ? result
-            : new ReviewResult(summary, comments, result.ContextRequests);
+            : result with { Summary = summary, Comments = comments };
     }
 
     private static bool IsPraiseOnlyComment(string body)

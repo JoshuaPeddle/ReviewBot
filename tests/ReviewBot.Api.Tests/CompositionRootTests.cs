@@ -11,6 +11,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using ReviewBot.Api.Cost;
 using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
 using NSubstitute;
@@ -112,6 +113,16 @@ public class CompositionRootTests
             .Should().BeOfType<JsonReviewTraceWriter>();
         factory.Services.GetServices<IHostedService>()
             .Should().Contain(service => service.GetType() == typeof(TraceCleanupService));
+    }
+
+    [Fact]
+    public async Task CostCalculatorIsRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<IReviewCostCalculator>()
+            .Should().BeOfType<ReviewCostCalculator>();
     }
 
     [Fact]

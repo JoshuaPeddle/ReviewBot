@@ -22,6 +22,7 @@ public sealed class ReviewTrace
     public required IReadOnlyList<TraceComment> CandidateComments { get; init; }
     public required IReadOnlyList<TraceComment> FinalComments { get; init; }
     public TraceLlmTokenUsage? TokenUsage { get; init; }
+    public decimal? EstimatedCostUsd { get; init; }
     public IReadOnlyList<TraceChunk>? ChunkTraces { get; init; }
     public TraceTimings? Timings { get; init; }
 }

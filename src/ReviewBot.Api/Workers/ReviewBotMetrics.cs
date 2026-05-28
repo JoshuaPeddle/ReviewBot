@@ -14,6 +14,7 @@ public sealed class ReviewBotMetrics : IDisposable
     private readonly Histogram<int> reviewCommentsPosted;
     private readonly Histogram<double> groundingDurationMs;
     private readonly Counter<long> incrementalReviews;
+    private readonly Counter<double> costUsdTotal;
 
     public ReviewBotMetrics()
     {
@@ -38,6 +39,10 @@ public sealed class ReviewBotMetrics : IDisposable
         incrementalReviews = meter.CreateCounter<long>(
             "reviewbot.review.incremental_type",
             description: "Number of reviews by incremental review type");
+        costUsdTotal = meter.CreateCounter<double>(
+            "reviewbot.cost.usd_total",
+            unit: "USD",
+            description: "Estimated USD cost of LLM calls, broken down by provider and model");
     }
 
     public void RecordJobProcessed(string status) =>
@@ -60,6 +65,12 @@ public sealed class ReviewBotMetrics : IDisposable
 
     public void RecordIncrementalReview(string type) =>
         incrementalReviews.Add(1, new KeyValuePair<string, object?>("type", type));
+
+    public void RecordCost(double costUsd, string provider, string model) =>
+        costUsdTotal.Add(
+            costUsd,
+            new KeyValuePair<string, object?>("provider", provider),
+            new KeyValuePair<string, object?>("model", model));
 
     public void Dispose() => meter.Dispose();
 }

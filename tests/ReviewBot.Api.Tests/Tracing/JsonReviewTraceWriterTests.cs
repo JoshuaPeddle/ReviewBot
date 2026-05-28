@@ -111,6 +111,37 @@ public class JsonReviewTraceWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task WriteAsync_IncludesEstimatedCostUsdWhenPresent()
+    {
+        var writer = CreateWriter(enabled: true);
+        var trace = CreateTrace(estimatedCostUsd: 0.042m);
+
+        await writer.WriteAsync(trace);
+
+        var filePath = Path.Combine(tempDir, "octo-org", "reviewbot", "42-delivery-abc.json");
+        var json = await File.ReadAllTextAsync(filePath);
+        var doc = JsonDocument.Parse(json);
+
+        doc.RootElement.GetProperty("estimated_cost_usd").GetDecimal().Should().Be(0.042m);
+    }
+
+    [Fact]
+    public async Task WriteAsync_OmitsEstimatedCostUsdWhenNull()
+    {
+        var writer = CreateWriter(enabled: true);
+        var trace = CreateTrace(estimatedCostUsd: null);
+
+        await writer.WriteAsync(trace);
+
+        var filePath = Path.Combine(tempDir, "octo-org", "reviewbot", "42-delivery-abc.json");
+        var json = await File.ReadAllTextAsync(filePath);
+        var doc = JsonDocument.Parse(json);
+
+        doc.RootElement.TryGetProperty("estimated_cost_usd", out var prop).Should().BeTrue();
+        prop.ValueKind.Should().Be(JsonValueKind.Null);
+    }
+
+    [Fact]
     public async Task WriteAsync_SerializesPromptBudgetSections()
     {
         var writer = CreateWriter(enabled: true);
@@ -247,7 +278,8 @@ public class JsonReviewTraceWriterTests : IDisposable
         TraceLlmTokenUsage? tokenUsage = null,
         ReviewBot.Core.Context.PromptBudget? promptBudget = null,
         IReadOnlyList<TraceChunk>? chunkTraces = null,
-        TraceTimings? timings = null)
+        TraceTimings? timings = null,
+        decimal? estimatedCostUsd = null)
     {
         var budget = promptBudget ?? ReviewBot.Core.Context.PromptBudget.Create(32768, 500, 100, 4096);
         return new ReviewTrace
@@ -291,6 +323,7 @@ public class JsonReviewTraceWriterTests : IDisposable
                 new TraceComment { Path = "src/Foo.cs", Line = 5, Side = "RIGHT", Body = "Null check missing.", Severity = "error", Confidence = "high" }
             ],
             TokenUsage = tokenUsage,
+            EstimatedCostUsd = estimatedCostUsd,
             ChunkTraces = chunkTraces,
             Timings = timings
         };

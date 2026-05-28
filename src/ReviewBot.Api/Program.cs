@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using ReviewBot.Api;
+using ReviewBot.Api.Cost;
 using ReviewBot.Api.Options;
 using ReviewBot.Api.Tracing;
 using ReviewBot.Api.Workers;
@@ -96,6 +97,9 @@ builder.Services.AddGrounding()
     .AddTestRunner<DotNetTestRunner>()
     .AddTestRunner<PythonTestRunner>();
 builder.Services.AddReviewTracing();
+builder.Services.AddOptions<CostRateOptions>()
+    .BindConfiguration(CostRateOptions.SectionName);
+builder.Services.AddSingleton<IReviewCostCalculator, ReviewCostCalculator>();
 builder.Services.AddSingleton<ReviewBotMetrics>();
 builder.Services.AddOpenTelemetry()
     .WithMetrics(m => m

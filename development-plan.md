@@ -340,6 +340,24 @@ Corrected assumptions discovered during implementation:
 
 Remaining in Phase 23 trace slice: per-chunk agentic context capture (files requested, files fetched, drop reasons) is not yet in the trace. The `ReviewChunkAsync` agentic context results flow into the final `ReviewResult` but the requests/fetched paths are not recorded as a separate trace field.
 
+#### Completed cost surface slice (May 27, 2026)
+
+Shipped estimated dollar-cost tracking per review:
+
+- Added `CostRateOptions` (`CostRates:Rates` section in appsettings) mapping model name → `{ InputPer1M, OutputPer1M }`. Empty by default; models without a configured rate produce no cost output. Local/Ollama models stay at zero by setting both rates to 0.
+- Added `IReviewCostCalculator` / `ReviewCostCalculator`: computes `(promptTokens / 1M) * inputRate + (completionTokens / 1M) * outputRate`, returns `null` when no rate is configured for the model. Registered as singleton in DI.
+- Added `reviewbot.cost.usd_total` counter to `ReviewBotMetrics` with labels `provider` and `model`; recorded immediately after the merged token usage log.
+- Added `decimal? EstimatedCostUsd` to `ReviewTrace`; propagated through `BuildTrace` alongside `TokenUsage`.
+- Injected `IReviewCostCalculator` into `ReviewWorker`; cost is computed after the merged-result token-usage log, emits the counter, and logs at Info level.
+- Fixed a pre-existing bug: `ApplyOutputConfig`, `AppendFilesSkippedNote`, and `AppendRereviewHint` all used the `new ReviewResult(summary, comments, contextRequests)` constructor which silently dropped `TokenUsage` and `RawLlmResponse`. All three now use `result with { Summary = ... }` or `result with { Summary = ..., Comments = ... }` to preserve the full record state.
+- Added `ReviewCostCalculatorTests` (6 cases: known rate, zero rate, no rate/null, cached-tokens-excluded, exact counts, null-usage throws).
+- Added `CostCalculatorIsRegisteredInDiContainer` to `CompositionRootTests`.
+- Added `WriteAsync_IncludesEstimatedCostUsdWhenPresent` and `WriteAsync_OmitsEstimatedCostUsdWhenNull` to `JsonReviewTraceWriterTests`.
+- Added `TraceContainsEstimatedCostWhenCostCalculatorReturnsValue` and `TraceHasNullEstimatedCostWhenCostCalculatorReturnsNull` to `ReviewWorkerTests`.
+
+Corrected assumptions discovered during implementation:
+- `TokenUsage` was silently discarded by three `ReviewResult` construction sites in the worker. The bug was latent — the trace writer test passes because it builds `ReviewTrace` directly, not through the worker pipeline. The new end-to-end worker test exposed it.
+
 The existing metrics (queue depth, processing rate, LLM duration) diagnose system health. They do not explain *why a specific review was wrong*, which is the question every user bug report starts with.
 
 ### Review trace persistence
