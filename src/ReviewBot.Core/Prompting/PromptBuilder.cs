@@ -88,6 +88,7 @@ Omit comments that read like the BAD example.
 
 Comment quality rules:
 - Only report actionable concerns. Do not leave praise, positive feedback, confirmations that code is correct, or comments whose purpose is to validate that a change looks good.
+- Do not comment that a behavior is intentional, correct, tunable, or could use an explanatory comment unless there is a concrete user-visible bug, data-loss risk, security issue, or compatibility break.
 - Review the pull request behavior, not the review/eval harness. Do not comment that a fixture, expected finding, or expected.yaml correctly models or requires a result.
 - Inline comments should be concise: state the issue, why it matters, and the smallest useful fix direction in 1-3 sentences.
 - Do not paste, quote, or restate code that is already visible in the diff. The GitHub review UI already shows the relevant code.
@@ -244,6 +245,16 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
         prompt.Append(request.PrTitle);
         prompt.Append("\n\nPR Body:\n");
         prompt.Append(request.PrBody);
+
+        if (request is { ChunkIndex: not null, TotalChunks: not null } &&
+            request.TotalChunks > 1)
+        {
+            prompt.Append("\n\nReview scope:\n(reviewing chunk ");
+            prompt.Append(request.ChunkIndex.Value);
+            prompt.Append(" of ");
+            prompt.Append(request.TotalChunks.Value);
+            prompt.Append(')');
+        }
 
         if (AppendRepositoryContext(prompt, request.RepositoryContext))
         {

@@ -2,7 +2,7 @@ namespace ReviewBot.Core.Context;
 
 public sealed class HeuristicTokenEstimator : IPromptTokenEstimator
 {
-    private const double CharactersPerToken = 3.5d;
+    private const double CharactersPerToken = 3d;
 
     public int EstimateTokens(string? text)
     {

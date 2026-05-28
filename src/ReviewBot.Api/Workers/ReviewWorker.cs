@@ -271,7 +271,9 @@ public sealed class ReviewWorker : BackgroundService
             .ConfigureAwait(false);
         var files = ApplyIgnoreGlobs(rawFiles, config.Ignore);
         files = ApplyMaxFiles(files, config.Review.MaxFiles, job);
-        var patchBudgetResult = ApplyPatchBudget(files, config.Review.MaxPatchLines, job);
+        var patchBudgetResult = config.Review.ChunkedReview
+            ? new PatchBudgetResult(files, [])
+            : ApplyPatchBudget(files, config.Review.MaxPatchLines, job);
         files = patchBudgetResult.Files;
 
         if (files.Count == 0)
@@ -305,65 +307,92 @@ public sealed class ReviewWorker : BackgroundService
             .ConfigureAwait(false);
         var fullFileContents = fullFileContext.Contents;
         promptBudget = fullFileContext.Budget;
-        promptBudget = ConsumeDiffBudget(files, config, promptBudget, job);
-        LogPromptBudget(promptBudget, config, job);
-
-        var request = new ReviewRequest(
-            metadata.Title,
-            metadata.Body,
-            metadata.BaseSha,
-            metadata.HeadSha,
-            files,
-            config,
-            grounding,
-            fullFileContents);
-
         var llm = llmFactory.Create(config.Model);
-        var sw = Stopwatch.StartNew();
-        var result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
-        sw.Stop();
-        logger.LogInformation(
-            "LLM review completed in {LlmDurationMs}ms for {DeliveryId}",
-            sw.Elapsed.TotalMilliseconds,
-            job.DeliveryId);
-        metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
+        var reviewChunks = PlanReviewChunks(files, config, promptBudget, job);
+        ReviewResult result;
+        IReadOnlyList<InlineComment> candidateComments;
 
-        var initialResult = result;
-        var initialCandidateComments = FilterCandidateComments(initialResult, config);
-        var speculativeSelfCritique = StartSelfCritiqueIfNeeded(llm, files, initialCandidateComments, config, ct);
-
-        try
+        if (reviewChunks.Count > 1)
         {
-            result = await ApplyAgenticContextAsync(
+            LogPromptBudget(promptBudget, config, job);
+            result = await ReviewChunksAsync(
                     llm,
-                    request,
-                    result,
+                    reviewChunks,
+                    metadata,
                     config,
+                    grounding,
+                    fullFileContents,
                     job,
-                    metadata.HeadSha,
                     installationToken.Token,
                     ct)
                 .ConfigureAwait(false);
-        }
-        catch
-        {
-            CancelSelfCritique(speculativeSelfCritique);
-            throw;
-        }
-        result = AppendFilesSkippedNote(result, patchBudgetResult.SkippedPaths);
-        IReadOnlyList<InlineComment> candidateComments;
-        if (ReferenceEquals(result, initialResult))
-        {
-            candidateComments = speculativeSelfCritique is null
-                ? initialCandidateComments
-                : await AwaitSelfCritiqueAsync(speculativeSelfCritique).ConfigureAwait(false);
-        }
-        else
-        {
-            CancelSelfCritique(speculativeSelfCritique);
             candidateComments = FilterCandidateComments(result, config);
             candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
                 .ConfigureAwait(false);
+            result = result with { Summary = BuildChunkedSummary(candidateComments, reviewChunks) };
+            result = AppendFilesSkippedNote(result, GetSkippedChunkPaths(files, reviewChunks, patchBudgetResult.SkippedPaths));
+        }
+        else
+        {
+            promptBudget = ConsumeDiffBudget(files, config, promptBudget, job);
+            LogPromptBudget(promptBudget, config, job);
+
+            var request = new ReviewRequest(
+                metadata.Title,
+                metadata.Body,
+                metadata.BaseSha,
+                metadata.HeadSha,
+                files,
+                config,
+                grounding,
+                fullFileContents);
+
+            var sw = Stopwatch.StartNew();
+            result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+            sw.Stop();
+            logger.LogInformation(
+                "LLM review completed in {LlmDurationMs}ms for {DeliveryId}",
+                sw.Elapsed.TotalMilliseconds,
+                job.DeliveryId);
+            metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
+
+            var initialResult = result;
+            var initialCandidateComments = FilterCandidateComments(initialResult, config);
+            var speculativeSelfCritique = StartSelfCritiqueIfNeeded(llm, files, initialCandidateComments, config, ct);
+
+            try
+            {
+                result = await ApplyAgenticContextAsync(
+                        llm,
+                        request,
+                        result,
+                        config,
+                        job,
+                        metadata.HeadSha,
+                        installationToken.Token,
+                        ct)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                CancelSelfCritique(speculativeSelfCritique);
+                throw;
+            }
+
+            result = AppendFilesSkippedNote(result, patchBudgetResult.SkippedPaths);
+            if (ReferenceEquals(result, initialResult))
+            {
+                candidateComments = speculativeSelfCritique is null
+                    ? initialCandidateComments
+                    : await AwaitSelfCritiqueAsync(speculativeSelfCritique).ConfigureAwait(false);
+            }
+            else
+            {
+                CancelSelfCritique(speculativeSelfCritique);
+                candidateComments = FilterCandidateComments(result, config);
+                candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
+                    .ConfigureAwait(false);
+            }
         }
 
         result = ApplyOutputConfig(result, candidateComments, config);
@@ -392,6 +421,213 @@ public sealed class ReviewWorker : BackgroundService
     private sealed record FullFileContextResult(
         IReadOnlyDictionary<string, string>? Contents,
         PromptBudget Budget);
+
+    private IReadOnlyList<ReviewChunk> PlanReviewChunks(
+        IReadOnlyList<FileChange> files,
+        ReviewConfig config,
+        PromptBudget promptBudget,
+        ReviewJob job)
+    {
+        var planner = new ReviewChunkPlanner(tokenEstimator);
+        var estimatedDiffTokens = planner.EstimateDiffTokens(files, config.Review.MaxPatchLines);
+        if (!config.Review.ChunkedReview || estimatedDiffTokens <= promptBudget.RemainingContentTokens)
+        {
+            return [new ReviewChunk(1, 1, files, estimatedDiffTokens)];
+        }
+
+        logger.LogWarning(
+            "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} has estimated diff cost of {DiffTokens} token(s), exceeding the remaining prompt budget of {RemainingTokens} token(s) for model {ModelName}; splitting into chunks",
+            job.DeliveryId,
+            job.Owner,
+            job.Repo,
+            job.PrNumber,
+            estimatedDiffTokens,
+            promptBudget.RemainingContentTokens,
+            config.Model.Name);
+
+        var chunks = planner.PlanChunks(
+            files,
+            promptBudget.RemainingContentTokens,
+            config.Review.ChunkHeadroom,
+            config.Review.MaxChunks,
+            config.Review.MaxPatchLines);
+        var reviewedFileCount = chunks.Sum(chunk => chunk.Files.Count);
+        if (reviewedFileCount < files.Count)
+        {
+            logger.LogWarning(
+                "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} needed more than max_chunks {MaxChunks}; reviewing {ReviewedFileCount}/{FileCount} file(s)",
+                job.DeliveryId,
+                job.Owner,
+                job.Repo,
+                job.PrNumber,
+                config.Review.MaxChunks,
+                reviewedFileCount,
+                files.Count);
+        }
+
+        logger.LogInformation(
+            "Chunked review planned {ChunkCount} chunk(s) for {Owner}/{Repo}#{PrNumber}",
+            chunks.Count,
+            job.Owner,
+            job.Repo,
+            job.PrNumber);
+        return chunks;
+    }
+
+    private async Task<ReviewResult> ReviewChunksAsync(
+        IReviewLlm llm,
+        IReadOnlyList<ReviewChunk> chunks,
+        PullRequestMetadata metadata,
+        ReviewConfig config,
+        GroundingContext grounding,
+        IReadOnlyDictionary<string, string>? fullFileContents,
+        ReviewJob job,
+        string installationToken,
+        CancellationToken ct)
+    {
+        IReadOnlyList<ReviewResult> results;
+        if (llm.SupportsParallelRequests)
+        {
+            results = await Task.WhenAll(chunks.Select(chunk => ReviewChunkAsync(
+                    llm,
+                    chunk,
+                    metadata,
+                    config,
+                    grounding,
+                    fullFileContents,
+                    job,
+                    installationToken,
+                    ct)))
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            var sequentialResults = new List<ReviewResult>(chunks.Count);
+            foreach (var chunk in chunks)
+            {
+                sequentialResults.Add(await ReviewChunkAsync(
+                        llm,
+                        chunk,
+                        metadata,
+                        config,
+                        grounding,
+                        fullFileContents,
+                        job,
+                        installationToken,
+                        ct)
+                    .ConfigureAwait(false));
+            }
+
+            results = sequentialResults;
+        }
+
+        return ReviewResultMerger.Merge(results);
+    }
+
+    private async Task<ReviewResult> ReviewChunkAsync(
+        IReviewLlm llm,
+        ReviewChunk chunk,
+        PullRequestMetadata metadata,
+        ReviewConfig config,
+        GroundingContext grounding,
+        IReadOnlyDictionary<string, string>? fullFileContents,
+        ReviewJob job,
+        string installationToken,
+        CancellationToken ct)
+    {
+        var request = new ReviewRequest(
+            metadata.Title,
+            metadata.Body,
+            metadata.BaseSha,
+            metadata.HeadSha,
+            chunk.Files,
+            config,
+            grounding,
+            FilterFullFileContents(fullFileContents, chunk.Files),
+            ChunkIndex: chunk.Index,
+            TotalChunks: chunk.TotalChunks);
+
+        var sw = Stopwatch.StartNew();
+        var result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+        sw.Stop();
+        logger.LogInformation(
+            "LLM review chunk {ChunkIndex}/{TotalChunks} completed in {LlmDurationMs}ms for {DeliveryId}",
+            chunk.Index,
+            chunk.TotalChunks,
+            sw.Elapsed.TotalMilliseconds,
+            job.DeliveryId);
+        metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
+
+        return await ApplyAgenticContextAsync(
+                llm,
+                request,
+                result,
+                config,
+                job,
+                metadata.HeadSha,
+                installationToken,
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    private static IReadOnlyDictionary<string, string>? FilterFullFileContents(
+        IReadOnlyDictionary<string, string>? fullFileContents,
+        IReadOnlyList<FileChange> files)
+    {
+        if (fullFileContents is null || fullFileContents.Count == 0)
+        {
+            return null;
+        }
+
+        var paths = files.Select(file => file.Path).ToHashSet(StringComparer.Ordinal);
+        var filtered = fullFileContents
+            .Where(entry => paths.Contains(entry.Key))
+            .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal);
+        return filtered.Count == 0 ? null : filtered;
+    }
+
+    private static IReadOnlyList<string> GetSkippedChunkPaths(
+        IReadOnlyList<FileChange> files,
+        IReadOnlyList<ReviewChunk> chunks,
+        IReadOnlyList<string> skippedPaths)
+    {
+        var reviewedPaths = chunks
+            .SelectMany(chunk => chunk.Files)
+            .Select(file => file.Path)
+            .ToHashSet(StringComparer.Ordinal);
+        return skippedPaths
+            .Concat(files
+                .Where(file => !reviewedPaths.Contains(file.Path))
+                .Select(file => file.Path))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static string BuildChunkedSummary(
+        IReadOnlyList<InlineComment> comments,
+        IReadOnlyList<ReviewChunk> chunks)
+    {
+        var reviewedFileCount = chunks.Sum(chunk => chunk.Files.Count);
+        var chunkCount = chunks.Count;
+        if (comments.Count == 0)
+        {
+            return $"Reviewed {reviewedFileCount} file(s) across {chunkCount} chunk(s). No actionable issues were found.";
+        }
+
+        var highestSeverity = comments.Max(comment => comment.Severity).ToString().ToLowerInvariant();
+        var issueText = comments.Count == 1 ? "1 actionable issue" : $"{comments.Count} actionable issues";
+        var affectedPaths = comments
+            .Select(comment => comment.Path)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .Take(5)
+            .Select(path => $"`{path}`")
+            .ToArray();
+        var pathText = affectedPaths.Length == 0 ? string.Empty : $" Most affected files: {string.Join(", ", affectedPaths)}.";
+
+        return $"Reviewed {reviewedFileCount} file(s) across {chunkCount} chunk(s). Found {issueText}; highest severity: {highestSeverity}.{pathText}";
+    }
 
     private SelfCritiqueRun? StartSelfCritiqueIfNeeded(
         IReviewLlm llm,
@@ -929,7 +1165,7 @@ public sealed class ReviewWorker : BackgroundService
             return result;
         }
 
-        var note = "files_skipped: The following files were omitted from automated review because the pull request exceeded the configured patch budget: "
+        var note = "files_skipped: The following files were omitted from automated review because the pull request exceeded the configured review budget: "
             + string.Join(", ", skippedPaths.Select(path => $"`{path}`"))
             + ".";
         var summary = string.IsNullOrWhiteSpace(result.Summary)
@@ -1124,6 +1360,7 @@ public sealed class ReviewWorker : BackgroundService
             .Where(c => c.Confidence >= config.Review.MinConfidence)
             .Where(c => !IsPraiseOnlyComment(c.Body))
             .Where(c => !IsMetaReviewComment(c.Body))
+            .Where(c => !IsNonActionableProcessComment(c.Body))
             .Where(c => !IsSpeculativeMissingContextComment(c.Body))
             .ToArray();
     }
@@ -1190,11 +1427,27 @@ public sealed class ReviewWorker : BackgroundService
         }
 
         var normalized = NormalizeForTextHeuristics(body);
+        if (ContainsAny(normalized, ExplicitMissingContextPhrases))
+        {
+            return true;
+        }
+
         var asksToVerifyMissingContract = ContainsAny(normalized, MissingContractDirectivePhrases);
         var usesSpeculativeLanguage = ContainsAny(normalized, SpeculativeLanguagePhrases);
         var referencesUnseenContract = ContainsAny(normalized, UnseenContractPhrases);
 
         return asksToVerifyMissingContract && usesSpeculativeLanguage && referencesUnseenContract;
+    }
+
+    private static bool IsNonActionableProcessComment(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeForTextHeuristics(body);
+        return ContainsAny(normalized, NonActionableProcessPhrases);
     }
 
     private static string NormalizeForTextHeuristics(string value)
@@ -1269,6 +1522,18 @@ public sealed class ReviewWorker : BackgroundService
         " should expect "
     ];
 
+    private static readonly string[] NonActionableProcessPhrases =
+    [
+        " add a comment explaining ",
+        " consider adding a comment ",
+        " consider whether ",
+        " this is correct ",
+        " this is correct behavior ",
+        " this is the correct behavior ",
+        " this is intentional ",
+        " this is the intended behavior "
+    ];
+
     private static readonly string[] MissingContractDirectivePhrases =
     [
         " check whether ",
@@ -1276,6 +1541,15 @@ public sealed class ReviewWorker : BackgroundService
         " ensure ",
         " make sure ",
         " verify "
+    ];
+
+    private static readonly string[] ExplicitMissingContextPhrases =
+    [
+        " implementation isn t visible ",
+        " implementation is not visible ",
+        " isn t visible in this diff ",
+        " is not visible in this diff ",
+        " not visible in this diff "
     ];
 
     private static readonly string[] SpeculativeLanguagePhrases =

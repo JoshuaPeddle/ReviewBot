@@ -98,7 +98,10 @@ public sealed record ReviewOutputConfig(
     bool RequestChangesOnError = false,
     bool ApproveIfClean = false,
     int FullFileMaxBytes = 0,
-    int ResponseReserveTokens = 4_096);
+    int ResponseReserveTokens = 4_096,
+    bool ChunkedReview = true,
+    int MaxChunks = 10,
+    double ChunkHeadroom = 0.85);
 
 public sealed record TriggerConfig(
     bool OnReviewRequest,

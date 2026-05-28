@@ -16,6 +16,8 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
 
     public string ProviderName => "openai";
 
+    public bool SupportsParallelRequests => false;
+
     private readonly OpenAiLlmOptions options;
     private readonly ILogger<OpenAiReviewLlm> logger;
     private readonly Func<TimeSpan, CancellationToken, Task> delayAsync;

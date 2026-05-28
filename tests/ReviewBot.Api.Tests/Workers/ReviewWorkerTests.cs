@@ -364,7 +364,7 @@ public class ReviewWorkerTests
         await using var fixture = new WorkerFixture();
         var config = ReviewConfig.Default with
         {
-            Review = ReviewConfig.Default.Review with { MaxPatchLines = 2 }
+            Review = ReviewConfig.Default.Review with { MaxPatchLines = 2, ChunkedReview = false }
         };
         var threeFiles = new[]
         {
@@ -414,7 +414,7 @@ public class ReviewWorkerTests
         await using var fixture = new WorkerFixture();
         var config = ReviewConfig.Default with
         {
-            Review = ReviewConfig.Default.Review with { MaxPatchLines = 2 }
+            Review = ReviewConfig.Default.Review with { MaxPatchLines = 2, ChunkedReview = false }
         };
         var twoFiles = new[]
         {
@@ -660,6 +660,158 @@ public class ReviewWorkerTests
         fetchedRequests!.Select(request => request.Path).Should().Equal("src/Mixed.cs", "src/Existing.cs");
         capturedRequest!.FullFileContents.Should().ContainKeys("src/Mixed.cs", "src/Existing.cs");
         capturedRequest.FullFileContents.Should().NotContainKey("src/MostlyNew.cs");
+    }
+
+    [Fact]
+    public async Task ChunkedReviewSplitsOversizedDiffAndPostsMergedComments()
+    {
+        var estimator = new KeywordTokenEstimator(
+            new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                ["chunk-token"] = 10
+            });
+        await using var fixture = new WorkerFixture(
+            modelContextRegistry: new FixedModelContextRegistry(20),
+            tokenEstimator: estimator);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                ResponseReserveTokens = 0,
+                ChunkHeadroom = 0.5,
+                MaxChunks = 10,
+                SelfCritique = true
+            }
+        };
+        var files = Enumerable.Range(1, 5)
+            .Select(i => CreateFile($"src/File{i}.cs", "@@ -1 +1 @@\n+chunk-token", new HashSet<int> { 1 }))
+            .ToArray();
+        var capturedRequests = new List<ReviewRequest>();
+        var selfCritiqueCalls = 0;
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var request = call.Arg<ReviewRequest>();
+                capturedRequests.Add(request);
+                var file = request.Files.Single();
+                return new ReviewResult(
+                    $"Reviewed {file.Path}.",
+                    [new InlineComment(file.Path, 1, "RIGHT", $"Issue in {file.Path}.", Severity.Warning, Confidence.Medium)]);
+            });
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
+            .Returns(call =>
+            {
+                call.ArgAt<string>(2).Should().Be("self_critique");
+                Interlocked.Increment(ref selfCritiqueCalls);
+                return """{"retained_indices":[0,1,2,3,4],"rationale":"merged chunk comments are valid"}""";
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        capturedRequests.Should().HaveCount(5);
+        capturedRequests.Select(request => request.Files.Single().Path)
+            .Should().Equal("src/File1.cs", "src/File2.cs", "src/File3.cs", "src/File4.cs", "src/File5.cs");
+        capturedRequests.Select(request => request.ChunkIndex).Should().Equal(1, 2, 3, 4, 5);
+        capturedRequests.Select(request => request.TotalChunks).Should().OnlyContain(total => total == 5);
+        postedResult!.Comments.Should().HaveCount(5);
+        postedResult.Comments.Select(comment => comment.Path)
+            .Should().Equal("src/File1.cs", "src/File2.cs", "src/File3.cs", "src/File4.cs", "src/File5.cs");
+        postedResult.Summary.Should().StartWith("Reviewed 5 file(s) across 5 chunk(s). Found 5 actionable issues; highest severity: warning.");
+        postedResult.Summary.Should().NotContain("Reviewed src/File1.cs.");
+        postedResult.Summary.Should().NotContain("Reviewed src/File2.cs.");
+        selfCritiqueCalls.Should().Be(1);
+    }
+
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(true, 2)]
+    public async Task ChunkedReviewDispatchesAccordingToLlmParallelSupport(
+        bool supportsParallelRequests,
+        int expectedMinimumConcurrency)
+    {
+        var estimator = new KeywordTokenEstimator(
+            new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                ["chunk-token"] = 10
+            });
+        await using var fixture = new WorkerFixture(
+            modelContextRegistry: new FixedModelContextRegistry(20),
+            tokenEstimator: estimator);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                ResponseReserveTokens = 0,
+                ChunkHeadroom = 0.5
+            }
+        };
+        var files = new[]
+        {
+            CreateFile("src/A.cs", "@@ -1 +1 @@\n+chunk-token", new HashSet<int> { 1 }),
+            CreateFile("src/B.cs", "@@ -1 +1 @@\n+chunk-token", new HashSet<int> { 1 }),
+            CreateFile("src/C.cs", "@@ -1 +1 @@\n+chunk-token", new HashSet<int> { 1 })
+        };
+        var currentConcurrency = 0;
+        var maxConcurrency = 0;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.Llm.SupportsParallelRequests.Returns(supportsParallelRequests);
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(async call =>
+            {
+                var active = Interlocked.Increment(ref currentConcurrency);
+                maxConcurrency = Math.Max(maxConcurrency, active);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(50), call.ArgAt<CancellationToken>(1));
+                    var file = call.Arg<ReviewRequest>().Files.Single();
+                    return new ReviewResult(
+                        $"Reviewed {file.Path}.",
+                        [new InlineComment(file.Path, 1, "RIGHT", $"Issue in {file.Path}.", Severity.Warning)]);
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref currentConcurrency);
+                }
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        maxConcurrency.Should().BeGreaterThanOrEqualTo(expectedMinimumConcurrency);
+        if (!supportsParallelRequests)
+        {
+            maxConcurrency.Should().Be(1);
+        }
     }
 
     [Fact]
@@ -1251,7 +1403,7 @@ public class ReviewWorkerTests
         // so the greedy selection loop picks neither.
         var config = ReviewConfig.Default with
         {
-            Review = ReviewConfig.Default.Review with { MaxPatchLines = 1 }
+            Review = ReviewConfig.Default.Review with { MaxPatchLines = 1, ChunkedReview = false }
         };
         var filesFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -1425,6 +1577,114 @@ public class ReviewWorkerTests
                     new InlineComment(
                         "src/App.cs",
                         2,
+                        "RIGHT",
+                        "This should handle null input before dereferencing the value.",
+                        Severity.Warning,
+                        Confidence.High)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
+    }
+
+    [Fact]
+    public async Task ExplicitMissingDiffContextCommentsAreDroppedBeforePosting()
+    {
+        await using var fixture = new WorkerFixture();
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review complete.",
+                [
+                    new InlineComment(
+                        "src/App.cs",
+                        1,
+                        "RIGHT",
+                        "WithRecalculatedConfidence() is called but its implementation isn't visible in this diff. Verify it correctly recalculates confidence scores.",
+                        Severity.Warning,
+                        Confidence.High),
+                    new InlineComment(
+                        "src/App.cs",
+                        2,
+                        "RIGHT",
+                        "This should handle null input before dereferencing the value.",
+                        Severity.Warning,
+                        Confidence.High)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult!.Comments.Should().ContainSingle()
+            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
+    }
+
+    [Fact]
+    public async Task NonActionableProcessCommentsAreDroppedBeforePosting()
+    {
+        await using var fixture = new WorkerFixture();
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review complete.",
+                [
+                    new InlineComment(
+                        "src/App.cs",
+                        1,
+                        "RIGHT",
+                        "This is intentional for the chunking path, but consider adding a comment explaining that ApplyPatchBudget is intentionally skipped when chunking is enabled.",
+                        Severity.Info,
+                        Confidence.High),
+                    new InlineComment(
+                        "src/App.cs",
+                        2,
+                        "RIGHT",
+                        "This is the correct behavior to avoid repeating PR overview once per chunk.",
+                        Severity.Info,
+                        Confidence.High),
+                    new InlineComment(
+                        "src/App.cs",
+                        3,
+                        "RIGHT",
+                        "The chunk_headroom config field allows tuning this, but consider whether the headroom could lead to suboptimal packing.",
+                        Severity.Info,
+                        Confidence.High),
+                    new InlineComment(
+                        "src/App.cs",
+                        4,
                         "RIGHT",
                         "This should handle null input before dereferencing the value.",
                         Severity.Warning,

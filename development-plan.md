@@ -70,7 +70,7 @@ Pattern matching is longest-prefix-wins. The registry is injected as a singleton
 **Token estimation.** A new `IPromptTokenEstimator` with two implementations:
 
 - `AnthropicTokenEstimator` — calls the Anthropic `count_tokens` API synchronously before sending (only when the prompt is large; below a threshold, use the heuristic). The count_tokens call adds latency but is far cheaper than a failed review.
-- `HeuristicTokenEstimator` — `Math.Ceiling(charCount / 3.5)` for source code (code is denser than prose), used for OpenAI-compatible providers and as a fast pre-check.
+- `HeuristicTokenEstimator` — `Math.Ceiling(charCount / 3.0)` for source code (code is denser than prose), used for OpenAI-compatible providers and as a fast pre-check.
 
 The estimator is applied per prompt section so the worker knows how much each section costs before committing to it.
 
@@ -103,7 +103,8 @@ review:
 Shipped the context-window and heuristic-estimation primitives that unblock budget-aware prompt assembly:
 
 - Added `IModelContextRegistry` / `ModelContextRegistry` with baked-in limits for Claude, GPT-4/5, Qwen `*b`, Llama 8B/70B, Granite, and an 8,192-token fallback. `ModelContext:Limits` appsettings overrides are wired through the API composition root; invalid blank or non-positive limits are ignored with a warning.
-- Added `IPromptTokenEstimator` / `HeuristicTokenEstimator` using `ceil(charCount / 3.5)`.
+- Corrected Qwen model matching to cover slash/dash local model names such as `qwen/qwen3.5-9b`, `qwen3.5-9b-q4_K_M`, and `qwen3.5-4b@q4_k_xl`; otherwise those names fell back to 8,192 tokens and triggered unnecessary tiny chunks.
+- Added `IPromptTokenEstimator` / `HeuristicTokenEstimator` using `ceil(charCount / 3.0)`.
 - Added immutable `PromptBudget` accounting for model limit, system prompt, grounding, response reserve, consumed sections, and remaining content budget.
 - Added Core tests for known-model lookup, config override, fallback, heuristic estimates, fixed-section subtraction, zero clamping, and budget exhaustion.
 - Added an API composition test proving the budgeting services resolve from DI.
@@ -119,7 +120,7 @@ Shipped the first live worker integration for prompt budgeting:
 - Added worker tests for grounding-before-full-file budget ordering and budget-limited full-file fetches.
 - Corrected a Phase 21 latency assumption: full-file context cannot always race grounding anymore, because budget-aware selection needs the grounding token cost first.
 
-Remaining in Step 1: Anthropic `count_tokens` and retrieval budget integration. Oversized diffs are a known limitation of this slice: the worker estimates and warns, but still includes the diff as one unit. The required fix is Step 2's chunk planner/dispatcher, where `estimated_diff_tokens > content_budget` becomes the branch into multi-pass review instead of a warning-only path.
+Remaining in Step 1: Anthropic `count_tokens` and retrieval budget integration. Oversized diffs are no longer warning-only when `review.chunked_review` is enabled; the worker now branches into the Step 2 chunk planner/dispatcher. The legacy patch-budget truncation path remains available only when chunking is disabled.
 
 ---
 
@@ -167,6 +168,23 @@ review:
 #### Stop tests
 
 Chunking strategy tests: single file, N files fitting in one chunk, N files requiring exactly two chunks, a single file exceeding budget (clamped to one chunk). Merge tests: no duplicates, duplicate resolution prefers higher severity, review state max. Parallel vs sequential dispatch controlled by `SupportsParallelRequests`. Worker integration test: a 5-file PR with a 1-file content budget produces 5 chunks, one comment per chunk, final result has 5 comments merged and one self-critique call.
+
+#### Completed chunk planner and dispatcher slice (May 27, 2026)
+
+Shipped the first end-to-end multi-pass review path:
+
+- Added `ReviewChunkPlanner` with directory/path ordering, greedy budget packing, per-file minimum chunks for oversized files, and a `max_chunks` cap.
+- Added repo YAML support and docs for `review.chunked_review`, `review.max_chunks`, and `review.chunk_headroom`.
+- Added chunk metadata to `ReviewRequest`; `PromptBuilder` now tells the model when it is reviewing chunk N of M.
+- Added `IReviewLlm.SupportsParallelRequests`; Anthropic runs chunks in parallel, OpenAI-compatible providers stay sequential by default for local/single-GPU deployments.
+- Wired `ReviewWorker` so `estimated_diff_tokens > remaining_content_budget` enters chunked review instead of sending one oversized prompt. The old total patch-budget file-dropping behavior now applies only when `chunked_review: false`.
+- Added merged-result handling and one post-merge self-critique pass. Comments are deduplicated by `(path, line, side)` because `InlineComment` does not currently carry a separate `kind` field; ties keep higher severity, then higher confidence.
+- Replaced raw per-chunk summary concatenation with one synthesized post-filter chunked-review summary so large PR reviews do not repeat the PR overview once per chunk.
+- Added skipped-file summary notes when `max_chunks` prevents all files from being reviewed.
+- Added Core tests for chunk planning, prompt chunk annotations, and result merging; GitHub config tests for new YAML fields; and worker tests for 5-file chunking plus sequential/parallel dispatch.
+- Tightened speculative missing-context filtering for comments that explicitly say an implementation is not visible in the diff.
+
+Remaining in Step 2: token usage is still recorded per LLM call by provider metrics rather than surfaced as a single merged review total, and the eval corpus still needs the large-PR and cross-chunk-reference fixtures described above.
 
 ---
 
@@ -310,11 +328,11 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 
 ## Risks
 
-**Context estimation accuracy.** Heuristic token counting (chars/3.5) can be off by 20–30% for mixed-language diffs with heavy Unicode or whitespace. The Anthropic count_tokens API is accurate but adds a round-trip. If chunk boundaries are calculated from an underestimate, the assembled prompt still overflows — just less often. Status: partially mitigated after the May 27 worker budget slice; the worker enforces the budget for full-file context and warns when the diff exceeds remaining budget, but oversized diffs still need Step 2 multi-pass before overflow is prevented end-to-end. Mitigation: apply a conservative headroom factor (0.85 per chunk, response_reserve 4096) and log when actual token usage from the response differs more than 15% from the estimate. Tune the heuristic against the eval corpus once token usage reporting is in place.
+**Context estimation accuracy.** Heuristic token counting (chars/3.0) can still be off for mixed-language diffs with heavy Unicode or whitespace, but is intentionally conservative for source code. The Anthropic count_tokens API is accurate but adds a round-trip. If chunk boundaries are calculated from an underestimate, an individual chunk can still overflow. Status: further mitigated after the May 27 chunk planner/dispatcher slice; oversized diffs now branch into chunked review with a 0.85 headroom factor instead of being sent as one prompt. Remaining exposure is estimator error inside a chunk and any full-file/retrieval context added before chunk sizing. Mitigation: keep `response_reserve_tokens` at 4096 by default, tune `chunk_headroom` from eval data, and add Anthropic `count_tokens` for large prompts.
 
 **Budget-aware full-file latency tradeoff.** Full-file context used to fetch in parallel with grounding. It now waits for grounding because the full prompt budget depends on grounding token cost. Status: opened May 27. The correctness tradeoff is intentional for small-context models, but it may give back part of the Phase 21 latency win on repos with both grounding and full-file context enabled. Mitigation: keep full-file context opt-in (`full_file_max_bytes: 0` by default), measure stage timings in Phase 23 traces, and revisit speculative fetch-with-post-filtering if latency becomes visible in real deployments.
 
-**Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. The eval corpus should have 3–5 cross-chunk fixtures to measure how bad this gap actually is. Expect multi-pass alone (without retrieval) to miss these; retrieval's job is to close the gap.
+**Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. Status: opened by the May 27 chunked-review slice. The eval corpus should have 3–5 cross-chunk fixtures to measure how bad this gap actually is. Expect multi-pass alone (without retrieval) to miss these; retrieval's job is to close the gap.
 
 **Retrieval parser quality.** The lexical C# parser misclassifies edge-case syntax and produces false positives on symbol extraction. Symbol lookup hits with wrong matches dilute the retrieval context budget. Measure via eval: if retrieval is on but scores lower than no retrieval, the parser noise is the cause. Switching to tree-sitter or Roslyn is the fix; do it after the measurement confirms the gap.
 
