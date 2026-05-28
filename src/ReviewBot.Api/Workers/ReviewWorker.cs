@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Options;
 using Octokit;
+using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
@@ -38,6 +39,8 @@ public sealed class ReviewWorker : BackgroundService
     private readonly IRetrievalProvider retrievalProvider;
     private readonly IRepoIndexFactory repoIndexFactory;
     private readonly IWorkspaceFactory workspaceFactory;
+    private readonly IReviewTraceWriter traceWriter;
+    private readonly TimeProvider clock;
     private readonly WorkerOptions workerOptions;
     private readonly ILogger<ReviewWorker> logger;
 
@@ -56,6 +59,8 @@ public sealed class ReviewWorker : BackgroundService
         IRetrievalProvider retrievalProvider,
         IRepoIndexFactory repoIndexFactory,
         IWorkspaceFactory workspaceFactory,
+        IReviewTraceWriter traceWriter,
+        TimeProvider clock,
         IOptions<WorkerOptions> options,
         ILogger<ReviewWorker> logger)
     {
@@ -73,6 +78,8 @@ public sealed class ReviewWorker : BackgroundService
         this.retrievalProvider = retrievalProvider ?? throw new ArgumentNullException(nameof(retrievalProvider));
         this.repoIndexFactory = repoIndexFactory ?? throw new ArgumentNullException(nameof(repoIndexFactory));
         this.workspaceFactory = workspaceFactory ?? throw new ArgumentNullException(nameof(workspaceFactory));
+        this.traceWriter = traceWriter ?? throw new ArgumentNullException(nameof(traceWriter));
+        this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.workerOptions = options?.Value ?? throw new ArgumentNullException(nameof(options));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -149,6 +156,7 @@ public sealed class ReviewWorker : BackgroundService
 
     private async Task<JobProcessStatus> ProcessAsync(ReviewJob job, CancellationToken ct)
     {
+        var reviewStartTime = clock.GetUtcNow();
         logger.LogInformation(
             "Processing review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} because of {Reason}",
             job.DeliveryId,
@@ -452,12 +460,93 @@ public sealed class ReviewWorker : BackgroundService
             .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct, reviewEvent)
             .ConfigureAwait(false);
 
+        await traceWriter
+            .WriteAsync(BuildTrace(job, metadata, config, reviewStartTime, incrementalType, files, reviewChunks.Count, repositoryContext?.Count ?? 0, promptBudget, candidateComments, result), ct)
+            .ConfigureAwait(false);
+
         await prReviewStateStore
             .SetLastShaAsync(job.InstallationId, repoFullName, job.PrNumber, metadata.HeadSha, ct)
             .ConfigureAwait(false);
         metrics.RecordIncrementalReview(incrementalType);
 
         return JobProcessStatus.Success;
+    }
+
+    private static ReviewTrace BuildTrace(
+        ReviewJob job,
+        PullRequestMetadata metadata,
+        ReviewConfig config,
+        DateTimeOffset startTime,
+        string reviewType,
+        IReadOnlyList<FileChange> filesReviewed,
+        int chunkCount,
+        int retrievalSnippetsCount,
+        PromptBudget promptBudget,
+        IReadOnlyList<InlineComment> candidateComments,
+        ReviewResult result)
+    {
+        return new ReviewTrace
+        {
+            DeliveryId = job.DeliveryId,
+            TimestampUtc = startTime,
+            Owner = job.Owner,
+            Repo = job.Repo,
+            PrNumber = job.PrNumber,
+            HeadSha = metadata.HeadSha,
+            BaseSha = metadata.BaseSha,
+            PrTitle = metadata.Title,
+            TriggerReason = job.Reason ?? string.Empty,
+            ReviewType = reviewType,
+            ModelProvider = config.Model.Provider,
+            ModelName = config.Model.Name,
+            FilesReviewed = filesReviewed.Select(f => f.Path).ToArray(),
+            ChunkCount = chunkCount,
+            RetrievalSnippetsCount = retrievalSnippetsCount,
+            PromptBudget = new TraceBudgetSnapshot
+            {
+                ModelContextLimitTokens = promptBudget.ModelContextLimitTokens,
+                SystemPromptTokens = promptBudget.SystemPromptTokens,
+                GroundingTokens = promptBudget.GroundingTokens,
+                ResponseReserveTokens = promptBudget.ResponseReserveTokens,
+                ContentBudgetTokens = promptBudget.ContentBudgetTokens,
+                ConsumedContentTokens = promptBudget.ConsumedContentTokens,
+                RemainingContentTokens = promptBudget.RemainingContentTokens,
+                ConsumedSections = promptBudget.ConsumedSections
+                    .Select(s => new TraceBudgetSectionSnapshot { Name = s.Name, Tokens = s.Tokens })
+                    .ToArray()
+            },
+            ResultSummary = result.Summary,
+            CandidateComments = candidateComments
+                .Select(c => new TraceComment
+                {
+                    Path = c.Path,
+                    Line = c.Line,
+                    Side = c.Side,
+                    Body = c.Body,
+                    Severity = c.Severity.ToString().ToLowerInvariant(),
+                    Confidence = c.Confidence.ToString().ToLowerInvariant()
+                })
+                .ToArray(),
+            FinalComments = result.Comments
+                .Select(c => new TraceComment
+                {
+                    Path = c.Path,
+                    Line = c.Line,
+                    Side = c.Side,
+                    Body = c.Body,
+                    Severity = c.Severity.ToString().ToLowerInvariant(),
+                    Confidence = c.Confidence.ToString().ToLowerInvariant()
+                })
+                .ToArray(),
+            TokenUsage = result.TokenUsage is { } usage
+                ? new TraceLlmTokenUsage
+                {
+                    PromptTokens = usage.PromptTokens,
+                    CompletionTokens = usage.CompletionTokens,
+                    CachedPromptTokens = usage.CachedPromptTokens
+                }
+                : null
+        };
     }
 
     private enum JobProcessStatus { Success, Skipped }

@@ -299,6 +299,30 @@ Remaining in Step 3: run the expanded fixtures against live no-retrieval and ret
 
 ## Phase 23: Observability and review traces
 
+#### Completed review trace persistence slice (May 27, 2026)
+
+Shipped the foundation observability layer — a JSON trace file is now written for every completed review:
+
+- Added `TracingOptions` (`Tracing:Enabled`, `IncludePrompts`, `MaxDiskMb`, `RetentionDays`, `TracesDir`). Disabled by default in production; enabled in `appsettings.Development.json`.
+- Added `ReviewTrace` POCO capturing: delivery ID, timestamp, job metadata (owner/repo/PR/SHA/reason), review type (first/delta/etc.), model provider+name, files reviewed, chunk count, retrieval snippet count, full prompt budget snapshot (limit, system prompt, grounding, reserve, consumed sections), candidate comments (pre-filter), final posted comments, and token usage.
+- Added `IReviewTraceWriter` / `JsonReviewTraceWriter`: writes `traces/{owner}/{repo}/{prNumber}-{deliveryId}.json` atomically via a temp-file rename; write failures log a warning and never fail the review job.
+- Added `NullReviewTraceWriter` (used in tests and as the safe default for tests).
+- Added `TraceCleanupService` (background, daily): deletes files older than `RetentionDays`, then deletes oldest remaining files until total size is under `MaxDiskMb`.
+- Injected `IReviewTraceWriter` and `TimeProvider` into `ReviewWorker`; trace is written after posting and before persisting the incremental-review SHA.
+- Registered tracing services via `AddReviewTracing()` in `Program.cs`.
+- Added API composition tests for `IReviewTraceWriter` and `TraceCleanupService` DI resolution.
+- Added `JsonReviewTraceWriter` tests: enabled writes expected JSON with snake_case fields, disabled writes nothing, atomic write leaves no .tmp file, token usage and budget sections serialize correctly.
+- Added `TraceCleanupService` tests: expired files deleted, size-cap triggers oldest-first deletion, missing dir is a no-op, recent files within limit are preserved.
+- Added worker integration test verifying `IReviewTraceWriter.WriteAsync` is called with expected trace fields after the review is posted.
+
+Corrected assumptions discovered during implementation:
+- `ReviewWorker` did not have `TimeProvider` injected before this slice; it now receives it alongside `IReviewTraceWriter` for consistent timestamp capture.
+- All existing `WorkerFixture` tests default to `NullReviewTraceWriter.Instance` and `TimeProvider.System`; no existing test behavior changed.
+
+Remaining in Phase 23 trace slice: per-chunk prompts and raw LLM responses are not yet captured in the trace (the worker does not thread prompt payloads through `ReviewChunkAsync` as return values). Those will be added in a follow-on slice that also adds agentic context capture and per-stage timings.
+
+
+
 The existing metrics (queue depth, processing rate, LLM duration) diagnose system health. They do not explain *why a specific review was wrong*, which is the question every user bug report starts with.
 
 ### Review trace persistence

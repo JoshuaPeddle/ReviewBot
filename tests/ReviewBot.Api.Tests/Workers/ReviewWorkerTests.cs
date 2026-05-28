@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Octokit;
+using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
 using ReviewBot.Api.Workers;
 using ReviewBot.Core.Domain;
@@ -2981,6 +2982,60 @@ public class ReviewWorkerTests
             .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
     }
 
+    [Fact]
+    public async Task TraceWriterIsCalledWithReviewDataAfterPosting()
+    {
+        ReviewTrace? capturedTrace = null;
+        var traceWriter = Substitute.For<IReviewTraceWriter>();
+        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedTrace = call.Arg<ReviewTrace>();
+                return Task.CompletedTask;
+            });
+
+        await using var fixture = new WorkerFixture(traceWriter: traceWriter);
+        var postOrder = new List<string>();
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/A.cs"), CreateFile("src/B.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Found an issue.",
+                [new InlineComment("src/A.cs", 3, "RIGHT", "Null dereference risk.", Severity.Error)]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postOrder.Add("post");
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        // Give trace write (which runs after post) time to execute
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+        await traceWriter.Received(1).WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>());
+
+        capturedTrace.Should().NotBeNull();
+        capturedTrace!.DeliveryId.Should().Be("delivery-123");
+        capturedTrace.Owner.Should().Be("octo-org");
+        capturedTrace.Repo.Should().Be("reviewbot");
+        capturedTrace.PrNumber.Should().Be(42);
+        capturedTrace.ModelProvider.Should().Be(ReviewConfig.Default.Model.Provider);
+        capturedTrace.ModelName.Should().Be(ReviewConfig.Default.Model.Name);
+        capturedTrace.FilesReviewed.Should().Equal("src/A.cs", "src/B.cs");
+        capturedTrace.ChunkCount.Should().Be(1);
+        capturedTrace.ReviewType.Should().Be("first_review");
+        capturedTrace.FinalComments.Should().ContainSingle()
+            .Which.Path.Should().Be("src/A.cs");
+    }
+
     private static ReviewJob CreateJob(string deliveryId = "delivery-123", string reason = "review_requested")
     {
         return new ReviewJob(
@@ -3100,7 +3155,8 @@ public class ReviewWorkerTests
             ILogger<ReviewWorker>? logger = null,
             IModelContextRegistry? modelContextRegistry = null,
             IPromptTokenEstimator? tokenEstimator = null,
-            IReviewPromptTokenEstimator? reviewTokenEstimator = null)
+            IReviewPromptTokenEstimator? reviewTokenEstimator = null,
+            IReviewTraceWriter? traceWriter = null)
         {
             Queue = new ChannelReviewJobQueue();
             TokenProvider = Substitute.For<IInstallationTokenProvider>();
@@ -3160,6 +3216,8 @@ public class ReviewWorkerTests
                 RetrievalProvider,
                 RepoIndexFactory,
                 WorkspaceFactory,
+                traceWriter ?? NullReviewTraceWriter.Instance,
+                TimeProvider.System,
                 Microsoft.Extensions.Options.Options.Create(new WorkerOptions { Concurrency = concurrency }),
                 logger ?? NullLogger<ReviewWorker>.Instance);
         }

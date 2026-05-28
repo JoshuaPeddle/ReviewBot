@@ -5,6 +5,7 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using ReviewBot.Api;
 using ReviewBot.Api.Options;
+using ReviewBot.Api.Tracing;
 using ReviewBot.Api.Workers;
 using ReviewBot.Api.Webhooks;
 using ReviewBot.Core.Context;
@@ -94,6 +95,7 @@ builder.Services.AddGrounding()
     .AddBuildRunner<PythonBuildRunner>()
     .AddTestRunner<DotNetTestRunner>()
     .AddTestRunner<PythonTestRunner>();
+builder.Services.AddReviewTracing();
 builder.Services.AddSingleton<ReviewBotMetrics>();
 builder.Services.AddOpenTelemetry()
     .WithMetrics(m => m

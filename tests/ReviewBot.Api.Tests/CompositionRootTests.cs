@@ -11,6 +11,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
 using NSubstitute;
 using ReviewBot.Core.Domain;
@@ -99,6 +100,18 @@ public class CompositionRootTests
             .Should().BeOfType<SqliteRetrievalProvider>();
         factory.Services.GetServices<IHostedService>()
             .Should().Contain(service => service.GetType() == typeof(RepoIndexCleanupService));
+    }
+
+    [Fact]
+    public async Task TracingServicesAreRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<IReviewTraceWriter>()
+            .Should().BeOfType<JsonReviewTraceWriter>();
+        factory.Services.GetServices<IHostedService>()
+            .Should().Contain(service => service.GetType() == typeof(TraceCleanupService));
     }
 
     [Fact]
