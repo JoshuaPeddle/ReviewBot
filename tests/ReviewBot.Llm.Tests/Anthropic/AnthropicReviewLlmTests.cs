@@ -85,6 +85,36 @@ public sealed class AnthropicReviewLlmTests
     }
 
     [Fact]
+    public async Task ReviewAsyncAttachesTokenUsageToResult()
+    {
+        var usage = new LlmTokenUsage(PromptTokens: 150, CompletionTokens: 75, CachedPromptTokens: 20);
+        var client = new FakeAnthropicClient(
+            new AnthropicMessageResult(
+                """{"summary": "Done.", "comments": []}""",
+                usage));
+        var llm = CreateLlm(client);
+
+        var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        result.TokenUsage.Should().BeEquivalentTo(usage);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncAccumulatesUsageAcrossPrimaryAndRepairCalls()
+    {
+        var firstUsage = new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 50);
+        var repairUsage = new LlmTokenUsage(PromptTokens: 120, CompletionTokens: 60);
+        var client = new FakeAnthropicClient(
+            new AnthropicMessageResult("not json", firstUsage),
+            new AnthropicMessageResult("""{"summary": "Recovered.", "comments": []}""", repairUsage));
+        var llm = CreateLlm(client);
+
+        var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        result.TokenUsage.Should().BeEquivalentTo(new LlmTokenUsage(220, 110));
+    }
+
+    [Fact]
     public async Task ReviewAsyncPropagatesCancellationTokenToClient()
     {
         using var cts = new CancellationTokenSource();
@@ -381,7 +411,7 @@ public sealed class AnthropicReviewLlmTests
 
         public List<CancellationToken> CancellationTokens { get; } = [];
 
-        public Task<string> CreateMessageAsync(AnthropicMessageRequest request, CancellationToken ct)
+        public Task<AnthropicMessageResult> CreateMessageAsync(AnthropicMessageRequest request, CancellationToken ct)
         {
             Requests.Add(request);
             CancellationTokens.Add(ct);
@@ -394,8 +424,9 @@ public sealed class AnthropicReviewLlmTests
             var outcome = outcomes.Dequeue();
             return outcome switch
             {
-                string response => Task.FromResult(response),
-                Exception exception => Task.FromException<string>(exception),
+                string response => Task.FromResult(new AnthropicMessageResult(response, null)),
+                AnthropicMessageResult result => Task.FromResult(result),
+                Exception exception => Task.FromException<AnthropicMessageResult>(exception),
                 _ => throw new InvalidOperationException($"Unsupported fake outcome type {outcome.GetType().FullName}."),
             };
         }

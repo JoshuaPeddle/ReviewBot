@@ -435,6 +435,19 @@ public sealed class ReviewWorker : BackgroundService
         var reviewEvent = DetermineReviewEvent(result.Comments, config);
         metrics.RecordCommentsPosted(result.Comments.Count);
 
+        if (result.TokenUsage is { } tokenUsage)
+        {
+            logger.LogInformation(
+                "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} used {PromptTokens} prompt tokens, {CompletionTokens} completion tokens ({CachedTokens} cached)",
+                job.DeliveryId,
+                job.Owner,
+                job.Repo,
+                job.PrNumber,
+                tokenUsage.PromptTokens,
+                tokenUsage.CompletionTokens,
+                tokenUsage.CachedPromptTokens);
+        }
+
         await reviewPoster
             .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct, reviewEvent)
             .ConfigureAwait(false);

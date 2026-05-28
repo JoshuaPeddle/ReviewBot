@@ -199,7 +199,18 @@ Shipped the first end-to-end multi-pass review path:
 - Added Core tests for chunk planning, prompt chunk annotations, and result merging; GitHub config tests for new YAML fields; and worker tests for 5-file chunking plus sequential/parallel dispatch.
 - Tightened speculative missing-context filtering for comments that explicitly say an implementation is not visible in the diff.
 
-Remaining in Step 2: token usage is still recorded per LLM call by provider metrics rather than surfaced as a single merged review total, and the eval corpus still needs the large-PR and cross-chunk-reference fixtures described above.
+#### Completed merged token usage slice (May 27, 2026)
+
+Shipped per-review token usage totals:
+
+- Added `LlmTokenUsage.Add(LlmTokenUsage?)` for null-safe accumulation.
+- Added `LlmTokenUsage? TokenUsage { get; init; }` to `ReviewResult`; both Anthropic and OpenAI adapters now attach usage to every returned `ReviewResult`.
+- Anthropic adapter extracts `response.Usage.InputTokens / OutputTokens / CacheReadInputTokens` from the SDK `MessageResponse` and records metrics symmetrically with the OpenAI adapter; `CompleteRawAsync` now also passes the phase label through.
+- `ReviewResultMerger.Merge` sums `TokenUsage` across all chunk results, producing a single total for the merged review.
+- `ReviewWorker` logs prompt tokens, completion tokens, and cached tokens at Info level after the final result is assembled.
+- Added Core tests for `Add`, null accumulation, and merger summing; added Anthropic and OpenAI tests verifying usage propagation through primary and repair calls.
+
+Remaining in Step 2: the eval corpus still needs the large-PR and cross-chunk-reference fixtures described above.
 
 ---
 
