@@ -73,7 +73,7 @@ retrieval:
     embeddings: false
 
     # Disk location for the per-SHA repository index cache.
-    index_cache_dir: /var/cache/reviewbot/index
+    index_cache_dir: ./cache/reviewbot/index
 
 # Glob patterns for files to exclude from the review.
 # Uses Microsoft.Extensions.FileSystemGlobbing syntax (forward slashes, ** for any depth).
