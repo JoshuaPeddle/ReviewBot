@@ -57,6 +57,24 @@ review:
     # Default: false
     on_push: false
 
+retrieval:
+    # Deterministic repository-context retrieval. The config and prompt lane are
+    # present for Phase 22, but the worker does not fetch retrieval snippets yet.
+    # Default: true
+    enabled: true
+
+    # Maximum retrieved context bytes to include in a review.
+    max_bytes: 51200
+
+    # Symbol lookup mode: callers, definitions, or both.
+    symbol_lookup_depth: callers
+
+    # Embedding retrieval lane.
+    embeddings: false
+
+    # Disk location for the per-SHA repository index cache.
+    index_cache_dir: /var/cache/reviewbot/index
+
 # Glob patterns for files to exclude from the review.
 # Uses Microsoft.Extensions.FileSystemGlobbing syntax (forward slashes, ** for any depth).
 # Default: [] (no files excluded)
