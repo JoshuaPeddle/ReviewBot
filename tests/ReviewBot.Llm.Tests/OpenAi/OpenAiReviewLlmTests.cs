@@ -79,7 +79,7 @@ public sealed class OpenAiReviewLlmTests
 
         var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
 
-        result.Should().BeEquivalentTo(new ReviewResult(string.Empty, []));
+        result.Should().BeEquivalentTo(new ReviewResult(string.Empty, []) { RawLlmResponse = "not json" });
         client.Requests.Should().HaveCount(2);
     }
 
@@ -155,6 +155,34 @@ public sealed class OpenAiReviewLlmTests
             ("prompt", "self_critique", 11),
             ("completion", "self_critique", 7)
         ]);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncAttachesTokenUsageToResult()
+    {
+        var usage = new LlmTokenUsage(PromptTokens: 150, CompletionTokens: 75, CachedPromptTokens: 20);
+        var client = new FakeOpenAiChatClient(
+            new OpenAiChatResult("""{"summary": "Done.", "comments": []}""", usage));
+        var llm = CreateLlm(client);
+
+        var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        result.TokenUsage.Should().BeEquivalentTo(usage);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncAccumulatesUsageAcrossPrimaryAndRepairCalls()
+    {
+        var firstUsage = new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 50);
+        var repairUsage = new LlmTokenUsage(PromptTokens: 120, CompletionTokens: 60);
+        var client = new FakeOpenAiChatClient(
+            new OpenAiChatResult("not json", firstUsage),
+            new OpenAiChatResult("""{"summary": "Recovered.", "comments": []}""", repairUsage));
+        var llm = CreateLlm(client);
+
+        var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        result.TokenUsage.Should().BeEquivalentTo(new LlmTokenUsage(220, 110));
     }
 
     [Fact]

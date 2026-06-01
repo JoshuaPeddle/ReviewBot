@@ -1,0 +1,23 @@
+diff --git a/src/ReviewBot.Core/Storage/PrReviewState.cs b/src/ReviewBot.Core/Storage/PrReviewState.cs
+index 1db1111..1db2222 100644
+--- a/src/ReviewBot.Core/Storage/PrReviewState.cs
++++ b/src/ReviewBot.Core/Storage/PrReviewState.cs
+@@ -3,7 +3,7 @@ namespace ReviewBot.Core.Storage;
+ public sealed record PrReviewState(
+     string Owner,
+     string Repo,
+     int PullRequestNumber,
+-    string? LastReviewedHeadSha);
++    string LastReviewedHeadSha = "");
+diff --git a/src/ReviewBot.Api/Workers/ReviewWorker.cs b/src/ReviewBot.Api/Workers/ReviewWorker.cs
+index 80c1111..80c2222 100644
+--- a/src/ReviewBot.Api/Workers/ReviewWorker.cs
++++ b/src/ReviewBot.Api/Workers/ReviewWorker.cs
+@@ -28,7 +28,7 @@ public sealed class ReviewWorker
+     private ReviewScope SelectScope(PrReviewState state)
+     {
+-        if (string.IsNullOrWhiteSpace(state.LastReviewedHeadSha))
++        if (state.LastReviewedHeadSha is null)
+         {
+             return ReviewScope.FullReview;
+         }

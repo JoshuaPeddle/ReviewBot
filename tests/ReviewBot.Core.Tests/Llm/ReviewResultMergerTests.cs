@@ -45,6 +45,65 @@ public class ReviewResultMergerTests
             .Which.Body.Should().Be("High confidence.");
     }
 
+    [Fact]
+    public void MergeSumsTokenUsageAcrossChunks()
+    {
+        var merged = ReviewResultMerger.Merge(
+        [
+            new ReviewResult("", []) { TokenUsage = new LlmTokenUsage(100, 50, 10) },
+            new ReviewResult("", []) { TokenUsage = new LlmTokenUsage(200, 80, 20) },
+            new ReviewResult("", []) { TokenUsage = new LlmTokenUsage(300, 60, 0) }
+        ]);
+
+        merged.TokenUsage.Should().BeEquivalentTo(new LlmTokenUsage(600, 190, 30));
+    }
+
+    [Fact]
+    public void MergeHandlesNullTokenUsageInSubset()
+    {
+        var merged = ReviewResultMerger.Merge(
+        [
+            new ReviewResult("", []) { TokenUsage = new LlmTokenUsage(100, 50) },
+            new ReviewResult("", []) { TokenUsage = null },
+            new ReviewResult("", []) { TokenUsage = new LlmTokenUsage(200, 80) }
+        ]);
+
+        merged.TokenUsage.Should().BeEquivalentTo(new LlmTokenUsage(300, 130, 0));
+    }
+
+    [Fact]
+    public void MergeReturnsNullTokenUsageWhenAllChunksHaveNone()
+    {
+        var merged = ReviewResultMerger.Merge(
+        [
+            new ReviewResult("", []) { TokenUsage = null },
+            new ReviewResult("", []) { TokenUsage = null }
+        ]);
+
+        merged.TokenUsage.Should().BeNull();
+    }
+
+    [Fact]
+    public void LlmTokenUsageAddAccumulatesCorrectly()
+    {
+        var a = new LlmTokenUsage(100, 50, 10);
+        var b = new LlmTokenUsage(200, 80, 20);
+
+        var sum = a.Add(b);
+
+        sum.Should().BeEquivalentTo(new LlmTokenUsage(300, 130, 30));
+    }
+
+    [Fact]
+    public void LlmTokenUsageAddReturnsBaseWhenOtherIsNull()
+    {
+        var usage = new LlmTokenUsage(100, 50, 10);
+
+        var result = usage.Add(null);
+
+        result.Should().BeSameAs(usage);
+    }
+
     private static InlineComment Comment(
         string path,
         int line,

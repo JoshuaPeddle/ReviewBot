@@ -10,6 +10,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="Fixtures\**\repo-state\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\ReviewBot.Core\ReviewBot.Core.csproj" />
   </ItemGroup>
 

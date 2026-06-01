@@ -1,0 +1,12 @@
+{
+  "summary": "The worker now treats empty stored SHAs as delta-review anchors.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Api/Workers/ReviewWorker.cs",
+      "line": 30,
+      "severity": "warning",
+      "confidence": "high",
+      "body": "The state model now defaults LastReviewedHeadSha to an empty string, but this branch only checks for null. Empty SHAs will skip the full review path and try a delta review from an invalid anchor."
+    }
+  ]
+}

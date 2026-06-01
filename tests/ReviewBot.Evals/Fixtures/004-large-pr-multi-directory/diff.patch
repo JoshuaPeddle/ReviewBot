@@ -1,0 +1,52 @@
+diff --git a/src/ReviewBot.Api/Auth/JwtTokenValidator.cs b/src/ReviewBot.Api/Auth/JwtTokenValidator.cs
+index 1f02111..8492222 100644
+--- a/src/ReviewBot.Api/Auth/JwtTokenValidator.cs
++++ b/src/ReviewBot.Api/Auth/JwtTokenValidator.cs
+@@ -14,7 +14,7 @@ public sealed class JwtTokenValidator
+     public bool IsValid(Token token, DateTimeOffset now)
+     {
+         if (token is null) return false;
+-        return token.ExpiresAt > now && token.Audience == expectedAudience;
++        return token.Audience == expectedAudience;
+     }
+ }
+diff --git a/src/ReviewBot.Core/Billing/InvoiceTotaler.cs b/src/ReviewBot.Core/Billing/InvoiceTotaler.cs
+index 2a13111..af94222 100644
+--- a/src/ReviewBot.Core/Billing/InvoiceTotaler.cs
++++ b/src/ReviewBot.Core/Billing/InvoiceTotaler.cs
+@@ -12,7 +12,7 @@ public sealed class InvoiceTotaler
+     public decimal Total(decimal subtotal, decimal discount)
+     {
+         if (discount < 0) throw new ArgumentOutOfRangeException(nameof(discount));
+-        return subtotal - discount;
++        return subtotal - discount - discount;
+     }
+ }
+diff --git a/src/ReviewBot.Api/Notifications/ReviewEmailTemplate.cs b/src/ReviewBot.Api/Notifications/ReviewEmailTemplate.cs
+index 31bb111..31bb222 100644
+--- a/src/ReviewBot.Api/Notifications/ReviewEmailTemplate.cs
++++ b/src/ReviewBot.Api/Notifications/ReviewEmailTemplate.cs
+@@ -6,6 +6,7 @@ public static class ReviewEmailTemplate
+     public static string BuildSubject(string repo, int pullRequestNumber) =>
++        // Include the PR number so notification threads stay grouped by review.
+         $"ReviewBot: {repo} PR #{pullRequestNumber}";
+ }
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 4c11111..4c12222 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -40,6 +40,7 @@ review:
+   chunked_review: true
+   max_chunks: 10
++  chunk_headroom: 0.85
+diff --git a/tests/ReviewBot.Core.Tests/Billing/InvoiceTotalerTests.cs b/tests/ReviewBot.Core.Tests/Billing/InvoiceTotalerTests.cs
+index 5511111..5522222 100644
+--- a/tests/ReviewBot.Core.Tests/Billing/InvoiceTotalerTests.cs
++++ b/tests/ReviewBot.Core.Tests/Billing/InvoiceTotalerTests.cs
+@@ -7,6 +7,7 @@ public sealed class InvoiceTotalerTests
+     public void TotalSubtractsDiscount()
+     {
++        // Discounts are applied once at invoice total time.
+         new InvoiceTotaler().Total(100m, 15m).Should().Be(85m);
+     }
+ }

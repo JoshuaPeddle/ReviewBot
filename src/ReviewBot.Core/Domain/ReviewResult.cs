@@ -17,6 +17,10 @@ public sealed record ReviewResult
     public IReadOnlyList<InlineComment> Comments { get; init; }
 
     public IReadOnlyList<ContextRequest> ContextRequests { get; init; }
+
+    public Llm.LlmTokenUsage? TokenUsage { get; init; }
+
+    public string? RawLlmResponse { get; init; }
 }
 
 public sealed record InlineComment(

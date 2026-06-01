@@ -13,4 +13,8 @@ public sealed record AnthropicLlmOptions
     public decimal Temperature { get; set; } = 0.2m;
 
     public bool PromptCachingEnabled { get; set; } = true;
+
+    public bool TokenCountingEnabled { get; set; } = true;
+
+    public int TokenCountingHeuristicThresholdTokens { get; set; } = 8_000;
 }

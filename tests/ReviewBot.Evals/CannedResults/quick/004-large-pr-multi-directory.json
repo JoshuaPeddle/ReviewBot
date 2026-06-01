@@ -1,0 +1,19 @@
+{
+  "summary": "Two correctness issues are spread across the large PR.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Api/Auth/JwtTokenValidator.cs",
+      "line": 17,
+      "severity": "error",
+      "confidence": "high",
+      "body": "Dropping the ExpiresAt check allows expired tokens to remain valid as long as the audience matches. Keep the token lifetime validation in the predicate."
+    },
+    {
+      "path": "src/ReviewBot.Core/Billing/InvoiceTotaler.cs",
+      "line": 15,
+      "severity": "warning",
+      "confidence": "high",
+      "body": "The discount is now subtracted twice, so invoice totals are too low whenever a discount is present. Apply the discount once."
+    }
+  ]
+}

@@ -52,11 +52,11 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         ArgumentNullException.ThrowIfNull(request);
 
         var prompt = PromptBuilder.Build(request);
-        var firstResponse = await SendAsync(prompt, [prompt.UserPrompt], enablePromptCaching: true, ct);
+        var (firstResponse, firstUsage) = await SendAsync(prompt, [prompt.UserPrompt], enablePromptCaching: true, "review", ct);
         var firstParse = LlmResultParser.Parse(firstResponse, logger);
         if (firstParse is { Success: true, Value: not null })
         {
-            return firstParse.Value;
+            return firstParse.Value with { TokenUsage = firstUsage, RawLlmResponse = firstResponse };
         }
 
         logger.LogWarning(
@@ -66,12 +66,13 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         ct.ThrowIfCancellationRequested();
 
         var repairPrompt = BuildRepairPrompt(firstResponse, request.Config.Review.AgenticContext);
-        var repairResponse = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], enablePromptCaching: false, ct);
+        var (repairResponse, repairUsage) = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], enablePromptCaching: false, "review", ct);
+        var totalUsage = firstUsage?.Add(repairUsage) ?? repairUsage;
         var repairParse = LlmResultParser.Parse(repairResponse, logger);
         if (repairParse is { Success: true, Value: not null })
         {
             ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: true);
-            return repairParse.Value;
+            return repairParse.Value with { TokenUsage = totalUsage, RawLlmResponse = firstResponse };
         }
 
         logger.LogWarning(
@@ -79,15 +80,16 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
             repairParse.Error,
             Truncate(repairResponse, MaxLoggedRawResponseLength));
         ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: false);
-        return new ReviewResult(string.Empty, []);
+        return new ReviewResult(string.Empty, []) { TokenUsage = totalUsage, RawLlmResponse = firstResponse };
     }
 
-    public Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review")
+    public async Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review")
     {
         ArgumentNullException.ThrowIfNull(prompt);
         ArgumentException.ThrowIfNullOrWhiteSpace(phase);
 
-        return SendAsync(prompt, [prompt.UserPrompt], enablePromptCaching: true, ct);
+        var (content, _) = await SendAsync(prompt, [prompt.UserPrompt], enablePromptCaching: true, phase, ct);
+        return content;
     }
 
     public IReviewLlm WithModelName(string modelName)
@@ -101,10 +103,11 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
             delayAsync);
     }
 
-    private async Task<string> SendAsync(
+    private async Task<(string Content, LlmTokenUsage? Usage)> SendAsync(
         PromptPayload prompt,
         IReadOnlyList<string> userMessages,
         bool enablePromptCaching,
+        string phase,
         CancellationToken ct)
     {
         var request = new AnthropicMessageRequest(
@@ -119,7 +122,20 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         {
             try
             {
-                return await GetClient().CreateMessageAsync(request, ct).ConfigureAwait(false);
+                var result = await GetClient().CreateMessageAsync(request, ct).ConfigureAwait(false);
+                if (result.Usage is not null)
+                {
+                    ReviewBotLlmMetrics.RecordTokenUsage(ProviderName, phase, result.Usage);
+                    if (result.Usage.CachedPromptTokens > 0)
+                    {
+                        logger.LogDebug(
+                            "Anthropic response reported {CachedTokens} cached prompt tokens for phase {Phase}",
+                            result.Usage.CachedPromptTokens,
+                            phase);
+                    }
+                }
+
+                return (result.Content, result.Usage);
             }
             catch (HttpRequestException ex) when (retryAttempt < TransientRetryDelays.Length)
             {

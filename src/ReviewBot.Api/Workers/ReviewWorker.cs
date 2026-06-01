@@ -3,16 +3,22 @@ using System.Text;
 using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Options;
 using Octokit;
+using ReviewBot.Api.Cost;
+using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Otel;
 using ReviewBot.Core.Prompting;
 using ReviewBot.Core.Storage;
 using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding;
+using ReviewBot.Grounding.Workspace;
+using ReviewBot.Retrieval;
+using ReviewBot.Retrieval.Indexing;
 
 namespace ReviewBot.Api.Workers;
 
@@ -31,7 +37,13 @@ public sealed class ReviewWorker : BackgroundService
     private readonly IPrReviewStateStore prReviewStateStore;
     private readonly ReviewBotMetrics metrics;
     private readonly IModelContextRegistry modelContextRegistry;
-    private readonly IPromptTokenEstimator tokenEstimator;
+    private readonly IReviewPromptTokenEstimator tokenEstimator;
+    private readonly IRetrievalProvider retrievalProvider;
+    private readonly IRepoIndexFactory repoIndexFactory;
+    private readonly IWorkspaceFactory workspaceFactory;
+    private readonly IReviewCostCalculator costCalculator;
+    private readonly IReviewTraceWriter traceWriter;
+    private readonly TimeProvider clock;
     private readonly WorkerOptions workerOptions;
     private readonly ILogger<ReviewWorker> logger;
 
@@ -46,7 +58,13 @@ public sealed class ReviewWorker : BackgroundService
         IPrReviewStateStore prReviewStateStore,
         ReviewBotMetrics metrics,
         IModelContextRegistry modelContextRegistry,
-        IPromptTokenEstimator tokenEstimator,
+        IReviewPromptTokenEstimator tokenEstimator,
+        IRetrievalProvider retrievalProvider,
+        IRepoIndexFactory repoIndexFactory,
+        IWorkspaceFactory workspaceFactory,
+        IReviewCostCalculator costCalculator,
+        IReviewTraceWriter traceWriter,
+        TimeProvider clock,
         IOptions<WorkerOptions> options,
         ILogger<ReviewWorker> logger)
     {
@@ -61,6 +79,12 @@ public sealed class ReviewWorker : BackgroundService
         this.metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
         this.modelContextRegistry = modelContextRegistry ?? throw new ArgumentNullException(nameof(modelContextRegistry));
         this.tokenEstimator = tokenEstimator ?? throw new ArgumentNullException(nameof(tokenEstimator));
+        this.retrievalProvider = retrievalProvider ?? throw new ArgumentNullException(nameof(retrievalProvider));
+        this.repoIndexFactory = repoIndexFactory ?? throw new ArgumentNullException(nameof(repoIndexFactory));
+        this.workspaceFactory = workspaceFactory ?? throw new ArgumentNullException(nameof(workspaceFactory));
+        this.costCalculator = costCalculator ?? throw new ArgumentNullException(nameof(costCalculator));
+        this.traceWriter = traceWriter ?? throw new ArgumentNullException(nameof(traceWriter));
+        this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.workerOptions = options?.Value ?? throw new ArgumentNullException(nameof(options));
         this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -137,6 +161,11 @@ public sealed class ReviewWorker : BackgroundService
 
     private async Task<JobProcessStatus> ProcessAsync(ReviewJob job, CancellationToken ct)
     {
+        var reviewStartTime = clock.GetUtcNow();
+        using var reviewActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.review");
+        reviewActivity?.SetTag("review.owner", job.Owner);
+        reviewActivity?.SetTag("review.repo", job.Repo);
+        reviewActivity?.SetTag("review.pr_number", job.PrNumber);
         logger.LogInformation(
             "Processing review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} because of {Reason}",
             job.DeliveryId,
@@ -179,6 +208,7 @@ public sealed class ReviewWorker : BackgroundService
             throw;
         }
 
+        reviewActivity?.SetTag("review.model", config.Model.Name);
         if (!config.Enabled)
         {
             LogIfBackgroundTaskFails(metadataTask, "PR metadata fetch");
@@ -210,9 +240,11 @@ public sealed class ReviewWorker : BackgroundService
         var lastShaTask = prReviewStateStore
             .GetLastShaAsync(job.InstallationId, repoFullName, job.PrNumber, ct);
         var metadata = prefetchedMetadata ?? await metadataTask!.ConfigureAwait(false);
+        reviewActivity?.SetTag("review.sha", metadata.HeadSha);
         var lastSha = await lastShaTask.ConfigureAwait(false);
 
         IReadOnlySet<string>? allowlist = null;
+        IReadOnlySet<string>? changedPathsSinceLastReview = null;
         var incrementalType = "first_review";
 
         if (lastSha is not null && !string.Equals(lastSha, metadata.HeadSha, StringComparison.Ordinal))
@@ -251,7 +283,8 @@ public sealed class ReviewWorker : BackgroundService
                 }
                 else
                 {
-                    allowlist = new HashSet<string>(compareResult.Paths, StringComparer.Ordinal);
+                    changedPathsSinceLastReview = new HashSet<string>(compareResult.Paths, StringComparer.Ordinal);
+                    allowlist = changedPathsSinceLastReview;
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -294,8 +327,41 @@ public sealed class ReviewWorker : BackgroundService
             HeadSha: metadata.HeadSha,
             InstallationToken: installationToken.Token,
             Config: config.Grounding);
-        var grounding = await GetGroundingContextAsync(groundingRequest, job, ct).ConfigureAwait(false);
+        var groundingSw = Stopwatch.StartNew();
+        GroundingContext grounding;
+        using (var _ = ReviewBotActivitySource.Instance.StartActivity("reviewbot.grounding"))
+        {
+            grounding = await GetGroundingContextAsync(groundingRequest, job, ct).ConfigureAwait(false);
+        }
+
+        var groundingElapsed = groundingSw.Elapsed;
         var promptBudget = CreatePromptBudget(config, grounding, metadata, job);
+        var retrievalSw = Stopwatch.StartNew();
+        RetrievalContextResult retrievalContext;
+        using (var retrievalActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.retrieval"))
+        {
+            retrievalContext = await GetRetrievalContextAsync(
+                    files,
+                    config,
+                    promptBudget,
+                    grounding,
+                    metadata,
+                    job,
+                    installationToken.Token,
+                    lastSha,
+                    changedPathsSinceLastReview,
+                    ct)
+                .ConfigureAwait(false);
+            retrievalActivity?.SetTag("retrieval.snippets_returned", retrievalContext.Snippets.Count);
+            retrievalActivity?.SetTag("retrieval.symbols_queried", retrievalContext.SymbolsQueried);
+            retrievalActivity?.SetTag("retrieval.bytes_used",
+                retrievalContext.Snippets.Sum(s => Encoding.UTF8.GetByteCount(s.Content)));
+        }
+
+        var retrievalElapsed = retrievalSw.Elapsed;
+        var repositoryContext = retrievalContext.Snippets;
+        promptBudget = retrievalContext.Budget;
+        var fullFileContextSw = Stopwatch.StartNew();
         var fullFileContext = await FetchFullFileContentsAsync(
                 files,
                 config,
@@ -305,35 +371,49 @@ public sealed class ReviewWorker : BackgroundService
                 installationToken.Token,
                 ct)
             .ConfigureAwait(false);
+        var fullFileContextElapsed = fullFileContextSw.Elapsed;
         var fullFileContents = fullFileContext.Contents;
         promptBudget = fullFileContext.Budget;
         var llm = llmFactory.Create(config.Model);
         var reviewChunks = PlanReviewChunks(files, config, promptBudget, job);
         ReviewResult result;
         IReadOnlyList<InlineComment> candidateComments;
+        IReadOnlyList<InlineComment> rawCandidateComments;
+        IReadOnlyList<DroppedComment> droppedComments;
+        IReadOnlyList<ChunkReviewOutcome>? chunkOutcomes = null;
 
         if (reviewChunks.Count > 1)
         {
+            var reviewedFiles = GetReviewedChunkFiles(reviewChunks);
             LogPromptBudget(promptBudget, config, job);
-            result = await ReviewChunksAsync(
+            chunkOutcomes = await ReviewChunksAsync(
                     llm,
                     reviewChunks,
                     metadata,
                     config,
                     grounding,
+                    repositoryContext,
                     fullFileContents,
                     job,
                     installationToken.Token,
                     ct)
                 .ConfigureAwait(false);
-            candidateComments = FilterCandidateComments(result, config);
-            candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
+            result = ReviewResultMerger.Merge(chunkOutcomes.Select(o => o.Result).ToArray());
+            rawCandidateComments = result.Comments;
+            var filteredComments = FilterCandidateComments(result, config);
+            var critiquedComments = await ApplySelfCritiqueWithDropsAsync(llm, reviewedFiles, filteredComments.Comments, config, ct)
                 .ConfigureAwait(false);
+            candidateComments = critiquedComments.Comments;
+            droppedComments = CombineDroppedComments(filteredComments.DroppedComments, critiquedComments.DroppedComments);
             result = result with { Summary = BuildChunkedSummary(candidateComments, reviewChunks) };
             result = AppendFilesSkippedNote(result, GetSkippedChunkPaths(files, reviewChunks, patchBudgetResult.SkippedPaths));
         }
         else
         {
+            using var chunkActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.chunk_review");
+            chunkActivity?.SetTag("review.chunk_index", 1);
+            chunkActivity?.SetTag("review.total_chunks", 1);
+
             promptBudget = ConsumeDiffBudget(files, config, promptBudget, job);
             LogPromptBudget(promptBudget, config, job);
 
@@ -345,11 +425,24 @@ public sealed class ReviewWorker : BackgroundService
                 files,
                 config,
                 grounding,
-                fullFileContents);
+                fullFileContents,
+                repositoryContext);
 
+            var prompt = PromptBuilder.Build(request);
+            ReviewResult singleChunkResult;
             var sw = Stopwatch.StartNew();
-            result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+            using (var llmActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.llm.review"))
+            {
+                singleChunkResult = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+                if (singleChunkResult.TokenUsage is { } u)
+                {
+                    llmActivity?.SetTag("llm.prompt_tokens", u.PromptTokens);
+                    llmActivity?.SetTag("llm.completion_tokens", u.CompletionTokens);
+                }
+            }
+
             sw.Stop();
+            result = singleChunkResult;
             logger.LogInformation(
                 "LLM review completed in {LlmDurationMs}ms for {DeliveryId}",
                 sw.Elapsed.TotalMilliseconds,
@@ -357,12 +450,13 @@ public sealed class ReviewWorker : BackgroundService
             metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
 
             var initialResult = result;
-            var initialCandidateComments = FilterCandidateComments(initialResult, config);
-            var speculativeSelfCritique = StartSelfCritiqueIfNeeded(llm, files, initialCandidateComments, config, ct);
+            var initialFilteredComments = FilterCandidateComments(initialResult, config);
+            var speculativeSelfCritique = StartSelfCritiqueIfNeeded(llm, files, initialFilteredComments.Comments, config, ct);
+            AgenticContextReviewOutcome agenticOutcome;
 
             try
             {
-                result = await ApplyAgenticContextAsync(
+                agenticOutcome = await ApplyAgenticContextAsync(
                         llm,
                         request,
                         result,
@@ -372,6 +466,7 @@ public sealed class ReviewWorker : BackgroundService
                         installationToken.Token,
                         ct)
                     .ConfigureAwait(false);
+                result = agenticOutcome.Result;
             }
             catch
             {
@@ -382,17 +477,35 @@ public sealed class ReviewWorker : BackgroundService
             result = AppendFilesSkippedNote(result, patchBudgetResult.SkippedPaths);
             if (ReferenceEquals(result, initialResult))
             {
-                candidateComments = speculativeSelfCritique is null
-                    ? initialCandidateComments
+                var critiqueResult = speculativeSelfCritique is null
+                    ? new CommentFilterResult(initialFilteredComments.Comments, [])
                     : await AwaitSelfCritiqueAsync(speculativeSelfCritique).ConfigureAwait(false);
+                rawCandidateComments = initialResult.Comments;
+                candidateComments = critiqueResult.Comments;
+                droppedComments = CombineDroppedComments(initialFilteredComments.DroppedComments, critiqueResult.DroppedComments);
             }
             else
             {
                 CancelSelfCritique(speculativeSelfCritique);
-                candidateComments = FilterCandidateComments(result, config);
-                candidateComments = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
+                rawCandidateComments = result.Comments;
+                var filteredComments = FilterCandidateComments(result, config);
+                var critiquedComments = await ApplySelfCritiqueWithDropsAsync(llm, files, filteredComments.Comments, config, ct)
                     .ConfigureAwait(false);
+                candidateComments = critiquedComments.Comments;
+                droppedComments = CombineDroppedComments(filteredComments.DroppedComments, critiquedComments.DroppedComments);
             }
+
+            // Build a single-chunk outcome for tracing; carry the raw response from the initial call
+            // since result may have been replaced by agentic context with a new summary.
+            chunkOutcomes =
+            [
+                new ChunkReviewOutcome(
+                    result with { RawLlmResponse = initialResult.RawLlmResponse },
+                    prompt,
+                    sw.Elapsed,
+                    files,
+                    agenticOutcome.Trace)
+            ];
         }
 
         result = ApplyOutputConfig(result, candidateComments, config);
@@ -404,8 +517,50 @@ public sealed class ReviewWorker : BackgroundService
         var reviewEvent = DetermineReviewEvent(result.Comments, config);
         metrics.RecordCommentsPosted(result.Comments.Count);
 
-        await reviewPoster
-            .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct, reviewEvent)
+        decimal? estimatedCostUsd = null;
+        if (result.TokenUsage is { } tokenUsage)
+        {
+            logger.LogInformation(
+                "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} used {PromptTokens} prompt tokens, {CompletionTokens} completion tokens ({CachedTokens} cached)",
+                job.DeliveryId,
+                job.Owner,
+                job.Repo,
+                job.PrNumber,
+                tokenUsage.PromptTokens,
+                tokenUsage.CompletionTokens,
+                tokenUsage.CachedPromptTokens);
+
+            estimatedCostUsd = costCalculator.ComputeCostUsd(config.Model.Name, tokenUsage);
+            if (estimatedCostUsd is { } cost)
+            {
+                metrics.RecordCost((double)cost, config.Model.Provider, config.Model.Name);
+                logger.LogInformation(
+                    "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} estimated cost ${EstimatedCostUsd:F6} USD",
+                    job.DeliveryId,
+                    job.Owner,
+                    job.Repo,
+                    job.PrNumber,
+                    cost);
+            }
+        }
+
+        using (var _ = ReviewBotActivitySource.Instance.StartActivity("reviewbot.post_review"))
+        {
+            await reviewPoster
+                .PostAsync(job.Owner, job.Repo, job.PrNumber, metadata.HeadSha, result, files, installationToken.Token, ct, reviewEvent)
+                .ConfigureAwait(false);
+        }
+
+        var timings = new TraceTimings
+        {
+            GroundingMs = groundingElapsed.TotalMilliseconds,
+            RetrievalMs = retrievalElapsed.TotalMilliseconds,
+            FullFileContextMs = fullFileContextElapsed.TotalMilliseconds,
+            TotalMs = (clock.GetUtcNow() - reviewStartTime).TotalMilliseconds
+        };
+
+        await traceWriter
+            .WriteAsync(BuildTrace(job, metadata, config, reviewStartTime, incrementalType, files, reviewChunks.Count, repositoryContext?.Count ?? 0, promptBudget, rawCandidateComments, droppedComments, result, chunkOutcomes, timings, estimatedCostUsd, traceWriter.IncludePrompts), ct)
             .ConfigureAwait(false);
 
         await prReviewStateStore
@@ -414,6 +569,179 @@ public sealed class ReviewWorker : BackgroundService
         metrics.RecordIncrementalReview(incrementalType);
 
         return JobProcessStatus.Success;
+    }
+
+    private sealed record ChunkReviewOutcome(
+        ReviewResult Result,
+        PromptPayload Prompt,
+        TimeSpan Elapsed,
+        IReadOnlyList<FileChange>? ChunkFiles = null,
+        AgenticContextTraceData? AgenticContext = null);
+
+    private sealed record AgenticContextReviewOutcome(
+        ReviewResult Result,
+        AgenticContextTraceData? Trace);
+
+    private sealed record AgenticContextTraceData(
+        IReadOnlyList<ContextRequest> Requested,
+        IReadOnlyList<ContextRequest> Accepted,
+        IReadOnlyList<string> FetchedPaths,
+        IReadOnlyDictionary<string, int> DropCounts,
+        bool SecondPassRan);
+
+    private sealed record DroppedComment(InlineComment Comment, string Reason);
+
+    private sealed record CommentFilterResult(
+        IReadOnlyList<InlineComment> Comments,
+        IReadOnlyList<DroppedComment> DroppedComments);
+
+    private static ReviewTrace BuildTrace(
+        ReviewJob job,
+        PullRequestMetadata metadata,
+        ReviewConfig config,
+        DateTimeOffset startTime,
+        string reviewType,
+        IReadOnlyList<FileChange> filesReviewed,
+        int chunkCount,
+        int retrievalSnippetsCount,
+        PromptBudget promptBudget,
+        IReadOnlyList<InlineComment> rawCandidateComments,
+        IReadOnlyList<DroppedComment> droppedComments,
+        ReviewResult result,
+        IReadOnlyList<ChunkReviewOutcome>? chunkOutcomes,
+        TraceTimings timings,
+        decimal? estimatedCostUsd,
+        bool includePrompts)
+    {
+        return new ReviewTrace
+        {
+            DeliveryId = job.DeliveryId,
+            TimestampUtc = startTime,
+            Owner = job.Owner,
+            Repo = job.Repo,
+            PrNumber = job.PrNumber,
+            HeadSha = metadata.HeadSha,
+            BaseSha = metadata.BaseSha,
+            PrTitle = metadata.Title,
+            TriggerReason = job.Reason ?? string.Empty,
+            ReviewType = reviewType,
+            ModelProvider = config.Model.Provider,
+            ModelName = config.Model.Name,
+            FilesReviewed = filesReviewed.Select(f => f.Path).ToArray(),
+            ChunkCount = chunkCount,
+            RetrievalSnippetsCount = retrievalSnippetsCount,
+            PromptBudget = new TraceBudgetSnapshot
+            {
+                ModelContextLimitTokens = promptBudget.ModelContextLimitTokens,
+                SystemPromptTokens = promptBudget.SystemPromptTokens,
+                GroundingTokens = promptBudget.GroundingTokens,
+                ResponseReserveTokens = promptBudget.ResponseReserveTokens,
+                ContentBudgetTokens = promptBudget.ContentBudgetTokens,
+                ConsumedContentTokens = promptBudget.ConsumedContentTokens,
+                RemainingContentTokens = promptBudget.RemainingContentTokens,
+                ConsumedSections = promptBudget.ConsumedSections
+                    .Select(s => new TraceBudgetSectionSnapshot { Name = s.Name, Tokens = s.Tokens })
+                    .ToArray()
+            },
+            ResultSummary = result.Summary,
+            CandidateComments = rawCandidateComments
+                .Select(ToTraceComment)
+                .ToArray(),
+            DroppedComments = droppedComments
+                .Select(c => ToTraceDroppedComment(c.Comment, c.Reason))
+                .ToArray(),
+            FinalComments = result.Comments
+                .Select(ToTraceComment)
+                .ToArray(),
+            TokenUsage = result.TokenUsage is { } usage
+                ? new TraceLlmTokenUsage
+                {
+                    PromptTokens = usage.PromptTokens,
+                    CompletionTokens = usage.CompletionTokens,
+                    CachedPromptTokens = usage.CachedPromptTokens
+                }
+                : null,
+            EstimatedCostUsd = estimatedCostUsd,
+            ChunkTraces = chunkOutcomes?.Select((o, i) => BuildTraceChunk(o, i, chunkOutcomes.Count, includePrompts)).ToArray(),
+            Timings = timings
+        };
+    }
+
+    private static TraceComment ToTraceComment(InlineComment comment) =>
+        new()
+        {
+            Path = comment.Path,
+            Line = comment.Line,
+            Side = comment.Side,
+            Body = comment.Body,
+            Severity = comment.Severity.ToString().ToLowerInvariant(),
+            Confidence = comment.Confidence.ToString().ToLowerInvariant()
+        };
+
+    private static TraceDroppedComment ToTraceDroppedComment(InlineComment comment, string reason) =>
+        new()
+        {
+            Path = comment.Path,
+            Line = comment.Line,
+            Side = comment.Side,
+            Body = comment.Body,
+            Severity = comment.Severity.ToString().ToLowerInvariant(),
+            Confidence = comment.Confidence.ToString().ToLowerInvariant(),
+            Reason = reason
+        };
+
+    private static TraceChunk BuildTraceChunk(ChunkReviewOutcome outcome, int index, int totalChunks, bool includePrompts)
+    {
+        var systemBytes = System.Text.Encoding.UTF8.GetByteCount(outcome.Prompt.SystemPrompt);
+        var userBytes = System.Text.Encoding.UTF8.GetByteCount(outcome.Prompt.UserPrompt);
+        var rawBytes = outcome.Result.RawLlmResponse is { } raw ? System.Text.Encoding.UTF8.GetByteCount(raw) : 0;
+        var files = outcome.ChunkFiles is { Count: > 0 }
+            ? outcome.ChunkFiles.Select(f => f.Path).OrderBy(p => p, StringComparer.Ordinal).ToArray()
+            : outcome.Result.Comments.Select(c => c.Path).Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal).ToArray();
+        return new TraceChunk
+        {
+            ChunkIndex = index + 1,
+            TotalChunks = totalChunks,
+            Files = files,
+            ElapsedMs = outcome.Elapsed.TotalMilliseconds,
+            PromptSystemBytes = systemBytes,
+            PromptUserBytes = userBytes,
+            PromptSystem = includePrompts ? outcome.Prompt.SystemPrompt : null,
+            PromptUser = includePrompts ? outcome.Prompt.UserPrompt : null,
+            RawLlmResponseBytes = rawBytes,
+            RawLlmResponse = includePrompts ? outcome.Result.RawLlmResponse : null,
+            AgenticContext = outcome.AgenticContext is { } agenticContext
+                ? new TraceAgenticContext
+                {
+                    Requested = agenticContext.Requested
+                        .Select(request => new TraceContextRequest
+                        {
+                            Path = request.Path,
+                            Reason = request.Reason
+                        })
+                        .ToArray(),
+                    Accepted = agenticContext.Accepted
+                        .Select(request => new TraceContextRequest
+                        {
+                            Path = request.Path,
+                            Reason = request.Reason
+                        })
+                        .ToArray(),
+                    FetchedPaths = agenticContext.FetchedPaths
+                        .OrderBy(path => path, StringComparer.Ordinal)
+                        .ToArray(),
+                    DropCounts = agenticContext.DropCounts
+                        .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                        .Select(pair => new TraceDropCount
+                        {
+                            Reason = pair.Key,
+                            Count = pair.Value
+                        })
+                        .ToArray(),
+                    SecondPassRan = agenticContext.SecondPassRan
+                }
+                : null
+        };
     }
 
     private enum JobProcessStatus { Success, Skipped }
@@ -428,7 +756,7 @@ public sealed class ReviewWorker : BackgroundService
         PromptBudget promptBudget,
         ReviewJob job)
     {
-        var planner = new ReviewChunkPlanner(tokenEstimator);
+        var planner = new ReviewChunkPlanner(text => EstimateTokens(config, text));
         var estimatedDiffTokens = planner.EstimateDiffTokens(files, config.Review.MaxPatchLines);
         if (!config.Review.ChunkedReview || estimatedDiffTokens <= promptBudget.RemainingContentTokens)
         {
@@ -474,67 +802,70 @@ public sealed class ReviewWorker : BackgroundService
         return chunks;
     }
 
-    private async Task<ReviewResult> ReviewChunksAsync(
+    private async Task<IReadOnlyList<ChunkReviewOutcome>> ReviewChunksAsync(
         IReviewLlm llm,
         IReadOnlyList<ReviewChunk> chunks,
         PullRequestMetadata metadata,
         ReviewConfig config,
         GroundingContext grounding,
+        IReadOnlyList<RepositoryContextSnippet>? repositoryContext,
         IReadOnlyDictionary<string, string>? fullFileContents,
         ReviewJob job,
         string installationToken,
         CancellationToken ct)
     {
-        IReadOnlyList<ReviewResult> results;
         if (llm.SupportsParallelRequests)
         {
-            results = await Task.WhenAll(chunks.Select(chunk => ReviewChunkAsync(
+            return await Task.WhenAll(chunks.Select(chunk => ReviewChunkAsync(
                     llm,
                     chunk,
                     metadata,
                     config,
                     grounding,
+                    repositoryContext,
                     fullFileContents,
                     job,
                     installationToken,
                     ct)))
                 .ConfigureAwait(false);
         }
-        else
-        {
-            var sequentialResults = new List<ReviewResult>(chunks.Count);
-            foreach (var chunk in chunks)
-            {
-                sequentialResults.Add(await ReviewChunkAsync(
-                        llm,
-                        chunk,
-                        metadata,
-                        config,
-                        grounding,
-                        fullFileContents,
-                        job,
-                        installationToken,
-                        ct)
-                    .ConfigureAwait(false));
-            }
 
-            results = sequentialResults;
+        var sequentialResults = new List<ChunkReviewOutcome>(chunks.Count);
+        foreach (var chunk in chunks)
+        {
+            sequentialResults.Add(await ReviewChunkAsync(
+                    llm,
+                    chunk,
+                    metadata,
+                    config,
+                    grounding,
+                    repositoryContext,
+                    fullFileContents,
+                    job,
+                    installationToken,
+                    ct)
+                .ConfigureAwait(false));
         }
 
-        return ReviewResultMerger.Merge(results);
+        return sequentialResults;
     }
 
-    private async Task<ReviewResult> ReviewChunkAsync(
+    private async Task<ChunkReviewOutcome> ReviewChunkAsync(
         IReviewLlm llm,
         ReviewChunk chunk,
         PullRequestMetadata metadata,
         ReviewConfig config,
         GroundingContext grounding,
+        IReadOnlyList<RepositoryContextSnippet>? repositoryContext,
         IReadOnlyDictionary<string, string>? fullFileContents,
         ReviewJob job,
         string installationToken,
         CancellationToken ct)
     {
+        using var chunkActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.chunk_review");
+        chunkActivity?.SetTag("review.chunk_index", chunk.Index);
+        chunkActivity?.SetTag("review.total_chunks", chunk.TotalChunks);
+
         var request = new ReviewRequest(
             metadata.Title,
             metadata.Body,
@@ -544,11 +875,23 @@ public sealed class ReviewWorker : BackgroundService
             config,
             grounding,
             FilterFullFileContents(fullFileContents, chunk.Files),
+            repositoryContext,
             ChunkIndex: chunk.Index,
             TotalChunks: chunk.TotalChunks);
 
+        var prompt = PromptBuilder.Build(request);
+        ReviewResult result;
         var sw = Stopwatch.StartNew();
-        var result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+        using (var llmActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.llm.review"))
+        {
+            result = await llm.ReviewAsync(request, ct).ConfigureAwait(false);
+            if (result.TokenUsage is { } u)
+            {
+                llmActivity?.SetTag("llm.prompt_tokens", u.PromptTokens);
+                llmActivity?.SetTag("llm.completion_tokens", u.CompletionTokens);
+            }
+        }
+
         sw.Stop();
         logger.LogInformation(
             "LLM review chunk {ChunkIndex}/{TotalChunks} completed in {LlmDurationMs}ms for {DeliveryId}",
@@ -558,7 +901,7 @@ public sealed class ReviewWorker : BackgroundService
             job.DeliveryId);
         metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
 
-        return await ApplyAgenticContextAsync(
+        var agenticOutcome = await ApplyAgenticContextAsync(
                 llm,
                 request,
                 result,
@@ -568,6 +911,13 @@ public sealed class ReviewWorker : BackgroundService
                 installationToken,
                 ct)
             .ConfigureAwait(false);
+
+        return new ChunkReviewOutcome(
+            agenticOutcome.Result with { RawLlmResponse = result.RawLlmResponse },
+            prompt,
+            sw.Elapsed,
+            chunk.Files,
+            agenticOutcome.Trace);
     }
 
     private static IReadOnlyDictionary<string, string>? FilterFullFileContents(
@@ -603,6 +953,11 @@ public sealed class ReviewWorker : BackgroundService
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToArray();
     }
+
+    private static IReadOnlyList<FileChange> GetReviewedChunkFiles(IReadOnlyList<ReviewChunk> chunks) =>
+        chunks
+            .SelectMany(chunk => chunk.Files)
+            .ToArray();
 
     private static string BuildChunkedSummary(
         IReadOnlyList<InlineComment> comments,
@@ -642,11 +997,11 @@ public sealed class ReviewWorker : BackgroundService
         }
 
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var task = ApplySelfCritiqueAsync(llm, files, candidateComments, config, cts.Token);
+        var task = ApplySelfCritiqueWithDropsAsync(llm, files, candidateComments, config, cts.Token);
         return new SelfCritiqueRun(task, cts);
     }
 
-    private static async Task<IReadOnlyList<InlineComment>> AwaitSelfCritiqueAsync(SelfCritiqueRun run)
+    private static async Task<CommentFilterResult> AwaitSelfCritiqueAsync(SelfCritiqueRun run)
     {
         try
         {
@@ -656,6 +1011,23 @@ public sealed class ReviewWorker : BackgroundService
         {
             run.Cancellation.Dispose();
         }
+    }
+
+    private static IReadOnlyList<DroppedComment> CombineDroppedComments(
+        IReadOnlyList<DroppedComment> first,
+        IReadOnlyList<DroppedComment> second)
+    {
+        if (first.Count == 0)
+        {
+            return second;
+        }
+
+        if (second.Count == 0)
+        {
+            return first;
+        }
+
+        return first.Concat(second).ToArray();
     }
 
     private void CancelSelfCritique(SelfCritiqueRun? run)
@@ -746,6 +1118,151 @@ public sealed class ReviewWorker : BackgroundService
         return grounding;
     }
 
+    private async Task<RetrievalContextResult> GetRetrievalContextAsync(
+        IReadOnlyList<FileChange> files,
+        ReviewConfig config,
+        PromptBudget promptBudget,
+        GroundingContext grounding,
+        PullRequestMetadata metadata,
+        ReviewJob job,
+        string installationToken,
+        string? lastIndexedSha,
+        IReadOnlySet<string>? changedPathsSinceLastReview,
+        CancellationToken ct)
+    {
+        if (!config.Retrieval.Enabled)
+        {
+            return new RetrievalContextResult([], promptBudget);
+        }
+
+        var indexReady = await EnsureRepositoryIndexedAsync(
+                config,
+                metadata,
+                job,
+                installationToken,
+                lastIndexedSha,
+                changedPathsSinceLastReview,
+                ct)
+            .ConfigureAwait(false);
+        if (!indexReady)
+        {
+            return new RetrievalContextResult([], promptBudget);
+        }
+
+        var request = new ReviewRequest(
+            metadata.Title,
+            metadata.Body,
+            metadata.BaseSha,
+            metadata.HeadSha,
+            files,
+            config,
+            grounding);
+
+        try
+        {
+            var retrieval = await retrievalProvider
+                .GetContextAsync(job.Owner, job.Repo, request, promptBudget, ct)
+                .ConfigureAwait(false);
+            if (retrieval.Snippets.Count > 0)
+            {
+                logger.LogInformation(
+                    "Retrieval context: included {SnippetCount} snippet(s) for {Owner}/{Repo}#{PrNumber}",
+                    retrieval.Snippets.Count,
+                    job.Owner,
+                    job.Repo,
+                    job.PrNumber);
+            }
+
+            return retrieval;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Retrieval context lookup failed; continuing without repository snippets");
+            return new RetrievalContextResult([], promptBudget);
+        }
+    }
+
+    private async Task<bool> EnsureRepositoryIndexedAsync(
+        ReviewConfig config,
+        PullRequestMetadata metadata,
+        ReviewJob job,
+        string installationToken,
+        string? lastIndexedSha,
+        IReadOnlySet<string>? changedPathsSinceLastReview,
+        CancellationToken ct)
+    {
+        var repoIndex = repoIndexFactory.Create(config.Retrieval.IndexCacheDir);
+        var key = new RepoIndexKey(job.Owner, job.Repo, metadata.HeadSha);
+        if (await repoIndex.IsIndexedAsync(key, ct).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        var cloneUrl = string.IsNullOrWhiteSpace(metadata.HeadCloneUrl)
+            ? $"https://github.com/{job.Owner}/{job.Repo}.git"
+            : metadata.HeadCloneUrl;
+
+        using var indexActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.retrieval.index_sha");
+        indexActivity?.SetTag("review.owner", job.Owner);
+        indexActivity?.SetTag("review.repo", job.Repo);
+        indexActivity?.SetTag("review.sha", metadata.HeadSha);
+
+        try
+        {
+            logger.LogInformation(
+                "Retrieval index: indexing {Owner}/{Repo}@{HeadSha} before reviewing PR #{PrNumber}",
+                job.Owner,
+                job.Repo,
+                metadata.HeadSha,
+                job.PrNumber);
+
+            await using var workspace = await workspaceFactory
+                .CreateAsync(new WorkspaceRequest(cloneUrl, metadata.HeadSha, installationToken), ct)
+                .ConfigureAwait(false);
+            var request = new RepoIndexRequest(job.Owner, job.Repo, metadata.HeadSha, workspace.LocalPath, config.Ignore);
+            if (lastIndexedSha is not null &&
+                changedPathsSinceLastReview is { Count: > 0 } &&
+                CanUseIncrementalRetrievalIndex(changedPathsSinceLastReview) &&
+                await repoIndex.IsIndexedAsync(new RepoIndexKey(job.Owner, job.Repo, lastIndexedSha), ct).ConfigureAwait(false))
+            {
+                indexActivity?.SetTag("retrieval.index_mode", "incremental");
+                indexActivity?.SetTag("retrieval.changed_paths", changedPathsSinceLastReview.Count);
+                logger.LogInformation(
+                    "Retrieval index: incrementally indexing {Owner}/{Repo}@{HeadSha} from {BaseSha} with {ChangedPathCount} changed path(s)",
+                    job.Owner,
+                    job.Repo,
+                    metadata.HeadSha,
+                    lastIndexedSha,
+                    changedPathsSinceLastReview.Count);
+                await repoIndex
+                    .IndexChangesAsync(
+                        request,
+                        new RepoIndexKey(job.Owner, job.Repo, lastIndexedSha),
+                        changedPathsSinceLastReview,
+                        ct)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                indexActivity?.SetTag("retrieval.index_mode", "full");
+                await repoIndex
+                    .IndexAsync(request, ct)
+                    .ConfigureAwait(false);
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Retrieval index update failed; continuing without repository snippets");
+            return false;
+        }
+    }
+
+    private static bool CanUseIncrementalRetrievalIndex(IReadOnlySet<string> changedPaths) =>
+        !changedPaths.Contains(".github/review-bot.yml") &&
+        !changedPaths.Contains(".github/review-bot.yaml");
+
     private PromptBudget CreatePromptBudget(
         ReviewConfig config,
         GroundingContext grounding,
@@ -766,10 +1283,10 @@ public sealed class ReviewWorker : BackgroundService
 
         var baseSystemPrompt = PromptBuilder.Build(estimationRequestWithoutGrounding).SystemPrompt;
         var groundedSystemPrompt = PromptBuilder.Build(estimationRequestWithGrounding).SystemPrompt;
-        var systemPromptTokens = tokenEstimator.EstimateTokens(baseSystemPrompt);
+        var systemPromptTokens = EstimateTokens(config, baseSystemPrompt);
         var groundingTokens = Math.Max(
             0,
-            tokenEstimator.EstimateTokens(groundedSystemPrompt) - systemPromptTokens);
+            EstimateTokens(config, groundedSystemPrompt) - systemPromptTokens);
 
         var budget = PromptBudget.Create(
             modelContextRegistry.GetContextWindowTokens(config.Model.Name),
@@ -777,8 +1294,8 @@ public sealed class ReviewWorker : BackgroundService
             groundingTokens,
             config.Review.ResponseReserveTokens);
 
-        var metadataTokens = tokenEstimator.EstimateTokens(metadata.Title) +
-            tokenEstimator.EstimateTokens(metadata.Body);
+        var metadataTokens = EstimateTokens(config, metadata.Title) +
+            EstimateTokens(config, metadata.Body);
         var updated = budget.ConsumeAvailable("pull_request_metadata", metadataTokens, out var consumedTokens);
         if (consumedTokens < metadataTokens)
         {
@@ -802,7 +1319,7 @@ public sealed class ReviewWorker : BackgroundService
         PromptBudget budget,
         ReviewJob job)
     {
-        var diffTokens = EstimateDiffTokens(files, config.Review.MaxPatchLines);
+        var diffTokens = EstimateDiffTokens(files, config, config.Review.MaxPatchLines);
         var updated = budget.ConsumeAvailable("diff", diffTokens, out var consumedTokens);
         if (consumedTokens < diffTokens)
         {
@@ -820,17 +1337,20 @@ public sealed class ReviewWorker : BackgroundService
         return updated;
     }
 
-    private int EstimateDiffTokens(IReadOnlyList<FileChange> files, int maxPatchLines)
+    private int EstimateDiffTokens(IReadOnlyList<FileChange> files, ReviewConfig config, int maxPatchLines)
     {
         var tokens = 0;
         foreach (var file in files)
         {
-            tokens += tokenEstimator.EstimateTokens(
+            tokens += EstimateTokens(config,
                 $"{file.Path} {file.Status} +{file.AdditionsCount} -{file.DeletionsCount}\n{TakePatchLines(file.Patch, maxPatchLines)}");
         }
 
         return tokens;
     }
+
+    private int EstimateTokens(ReviewConfig config, string? text) =>
+        tokenEstimator.EstimateTokens(config.Model, text);
 
     private void LogPromptBudget(PromptBudget budget, ReviewConfig config, ReviewJob job)
     {
@@ -875,7 +1395,7 @@ public sealed class ReviewWorker : BackgroundService
         var loggedBudgetLimitedSelection = false;
         foreach (var file in candidates)
         {
-            var estimatedTokens = tokenEstimator.EstimateTokens(file.Patch);
+            var estimatedTokens = EstimateTokens(config, file.Patch);
             if (!selectionBudget.TryConsume("full_file_request_estimate", estimatedTokens, out var updatedBudget))
             {
                 if (!loggedBudgetLimitedSelection)
@@ -947,7 +1467,7 @@ public sealed class ReviewWorker : BackgroundService
         var updated = budget;
         foreach (var fetchedFile in fetchedFiles)
         {
-            var estimatedTokens = tokenEstimator.EstimateTokens(fetchedFile.Content);
+            var estimatedTokens = EstimateTokens(config, fetchedFile.Content);
             if (!updated.TryConsume("full_file", estimatedTokens, out var afterFullFile))
             {
                 logger.LogDebug(
@@ -1172,7 +1692,7 @@ public sealed class ReviewWorker : BackgroundService
             ? note
             : $"{result.Summary.TrimEnd()}\n\n{note}";
 
-        return new ReviewResult(summary, result.Comments, result.ContextRequests);
+        return result with { Summary = summary };
     }
 
     private static ReviewResult AppendRereviewHint(ReviewResult result)
@@ -1181,10 +1701,10 @@ public sealed class ReviewWorker : BackgroundService
         var summary = string.IsNullOrWhiteSpace(result.Summary)
             ? hint
             : $"{result.Summary.TrimEnd()}\n\n---\n{hint}";
-        return new ReviewResult(summary, result.Comments, result.ContextRequests);
+        return result with { Summary = summary };
     }
 
-    private async Task<ReviewResult> ApplyAgenticContextAsync(
+    private async Task<AgenticContextReviewOutcome> ApplyAgenticContextAsync(
         IReviewLlm llm,
         ReviewRequest request,
         ReviewResult initialResult,
@@ -1196,15 +1716,21 @@ public sealed class ReviewWorker : BackgroundService
     {
         if (!config.Review.AgenticContext || initialResult.ContextRequests.Count == 0)
         {
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, null);
         }
 
         var validation = FilterContextRequests(initialResult.ContextRequests, config);
         LogContextRequestDrops(validation.DropCounts, initialResult.ContextRequests.Count, validation.Requests.Count, job);
+        var trace = new AgenticContextTraceData(
+            initialResult.ContextRequests.ToArray(),
+            validation.Requests.ToArray(),
+            Array.Empty<string>(),
+            new Dictionary<string, int>(validation.DropCounts, StringComparer.Ordinal),
+            SecondPassRan: false);
 
         if (validation.Requests.Count == 0)
         {
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, trace);
         }
 
         logger.LogInformation(
@@ -1232,8 +1758,16 @@ public sealed class ReviewWorker : BackgroundService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Agentic context file fetch failed; using initial comments");
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, trace);
         }
+
+        trace = trace with
+        {
+            FetchedPaths = fetchedFiles
+                .Select(file => file.Path)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray()
+        };
 
         if (fetchedFiles.Count == 0)
         {
@@ -1243,7 +1777,7 @@ public sealed class ReviewWorker : BackgroundService
                 job.Owner,
                 job.Repo,
                 job.PrNumber);
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, trace);
         }
 
         logger.LogInformation(
@@ -1267,6 +1801,7 @@ public sealed class ReviewWorker : BackgroundService
                 "agentic_context");
 
             var enrichedParsed = LlmResultParser.Parse(enrichedRaw, logger);
+            trace = trace with { SecondPassRan = true };
             if (enrichedParsed.Success)
             {
                 logger.LogInformation(
@@ -1275,18 +1810,20 @@ public sealed class ReviewWorker : BackgroundService
                     job.Repo,
                     job.PrNumber,
                     enrichedParsed.Value!.Comments.Count);
-                return enrichedParsed.Value!;
+                return new AgenticContextReviewOutcome(
+                    enrichedParsed.Value! with { TokenUsage = initialResult.TokenUsage },
+                    trace);
             }
 
             logger.LogWarning(
                 "Agentic context second-pass response was invalid: {Error}; using initial comments",
                 enrichedParsed.Error);
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, trace);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Agentic context second pass failed; using initial comments");
-            return initialResult;
+            return new AgenticContextReviewOutcome(initialResult, trace with { SecondPassRan = true });
         }
     }
 
@@ -1313,7 +1850,12 @@ public sealed class ReviewWorker : BackgroundService
         try
         {
             var critiqueSw = Stopwatch.StartNew();
-            var rawCritique = await llm.CompleteRawAsync(critiquePayload, ct, "self_critique").ConfigureAwait(false);
+            string rawCritique;
+            using (var _ = ReviewBotActivitySource.Instance.StartActivity("reviewbot.llm.self_critique"))
+            {
+                rawCritique = await llm.CompleteRawAsync(critiquePayload, ct, "self_critique").ConfigureAwait(false);
+            }
+
             critiqueSw.Stop();
             metrics.RecordLlmDuration(
                 critiqueSw.Elapsed.TotalMilliseconds,
@@ -1345,24 +1887,109 @@ public sealed class ReviewWorker : BackgroundService
         }
     }
 
+    private async Task<CommentFilterResult> ApplySelfCritiqueWithDropsAsync(
+        IReviewLlm llm,
+        IReadOnlyList<FileChange> files,
+        IReadOnlyList<InlineComment> candidateComments,
+        ReviewConfig config,
+        CancellationToken ct)
+    {
+        var retained = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
+            .ConfigureAwait(false);
+        return new CommentFilterResult(
+            retained,
+            FindDroppedComments(candidateComments, retained, "self_critique"));
+    }
+
     private static bool ShouldRunSelfCritique(IReadOnlyList<InlineComment> candidateComments, ReviewConfig config) =>
         config.Review.SelfCritique &&
         candidateComments.Any(c => c.Confidence != Confidence.High);
 
-    private static IReadOnlyList<InlineComment> FilterCandidateComments(ReviewResult result, ReviewConfig config)
+    private static CommentFilterResult FilterCandidateComments(ReviewResult result, ReviewConfig config)
     {
         if (!config.Review.InlineComments)
         {
-            return Array.Empty<InlineComment>();
+            return new CommentFilterResult(
+                [],
+                result.Comments
+                    .Select(comment => new DroppedComment(comment, "inline_comments_disabled"))
+                    .ToArray());
         }
 
-        return result.Comments
-            .Where(c => c.Confidence >= config.Review.MinConfidence)
-            .Where(c => !IsPraiseOnlyComment(c.Body))
-            .Where(c => !IsMetaReviewComment(c.Body))
-            .Where(c => !IsNonActionableProcessComment(c.Body))
-            .Where(c => !IsSpeculativeMissingContextComment(c.Body))
-            .ToArray();
+        var kept = new List<InlineComment>(result.Comments.Count);
+        var dropped = new List<DroppedComment>();
+
+        foreach (var comment in result.Comments)
+        {
+            var reason = GetCommentDropReason(comment, config);
+            if (reason is null)
+            {
+                kept.Add(comment);
+                continue;
+            }
+
+            dropped.Add(new DroppedComment(comment, reason));
+        }
+
+        return new CommentFilterResult(kept.ToArray(), dropped.ToArray());
+    }
+
+    private static string? GetCommentDropReason(InlineComment comment, ReviewConfig config)
+    {
+        if (comment.Confidence < config.Review.MinConfidence)
+        {
+            return "below_min_confidence";
+        }
+
+        if (IsPraiseOnlyComment(comment.Body))
+        {
+            return "praise_only";
+        }
+
+        if (IsMetaReviewComment(comment.Body))
+        {
+            return "meta_review";
+        }
+
+        if (IsNonActionableProcessComment(comment.Body))
+        {
+            return "non_actionable_process";
+        }
+
+        if (IsSpeculativeMissingContextComment(comment.Body))
+        {
+            return "speculative_missing_context";
+        }
+
+        return null;
+    }
+
+    private static IReadOnlyList<DroppedComment> FindDroppedComments(
+        IReadOnlyList<InlineComment> original,
+        IReadOnlyList<InlineComment> retained,
+        string reason)
+    {
+        if (original.Count == retained.Count)
+        {
+            return [];
+        }
+
+        var unmatchedRetained = retained.ToList();
+        var dropped = new List<DroppedComment>();
+
+        foreach (var comment in original)
+        {
+            var retainedIndex = unmatchedRetained.FindIndex(c => c == comment);
+            if (retainedIndex >= 0)
+            {
+                unmatchedRetained.RemoveAt(retainedIndex);
+                continue;
+            }
+
+            dropped.Add(new DroppedComment(comment, reason));
+        }
+
+        return dropped.ToArray();
     }
 
     private static ReviewResult ApplyOutputConfig(
@@ -1378,7 +2005,7 @@ public sealed class ReviewWorker : BackgroundService
 
         return summary == result.Summary && ReferenceEquals(comments, result.Comments)
             ? result
-            : new ReviewResult(summary, comments, result.ContextRequests);
+            : result with { Summary = summary, Comments = comments };
     }
 
     private static bool IsPraiseOnlyComment(string body)
@@ -1759,6 +2386,6 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyDictionary<string, int> DropCounts);
 
     private sealed record SelfCritiqueRun(
-        Task<IReadOnlyList<InlineComment>> Task,
+        Task<CommentFilterResult> Task,
         CancellationTokenSource Cancellation);
 }

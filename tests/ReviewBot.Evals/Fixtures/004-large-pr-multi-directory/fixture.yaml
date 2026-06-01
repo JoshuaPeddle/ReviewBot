@@ -1,0 +1,6 @@
+name: Large PR spans multiple review chunks
+category: large_pr_chunking
+difficulty: high
+description: |
+  A broad PR touches unrelated directories. The reviewer should still find
+  correctness issues spread across files that would land in different chunks.

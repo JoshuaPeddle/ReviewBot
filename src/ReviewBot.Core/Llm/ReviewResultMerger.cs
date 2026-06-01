@@ -33,7 +33,11 @@ public static class ReviewResultMerger
             .OrderBy(request => request.Path, StringComparer.Ordinal)
             .ToArray();
 
-        return new ReviewResult(string.Empty, comments, contextRequests);
+        var tokenUsage = results
+            .Select(r => r.TokenUsage)
+            .Aggregate((LlmTokenUsage?)null, (acc, u) => acc is null ? u : u is null ? acc : acc.Add(u));
+
+        return new ReviewResult(string.Empty, comments, contextRequests) { TokenUsage = tokenUsage };
     }
 
     private sealed record CommentKey(string Path, int Line, string Side);

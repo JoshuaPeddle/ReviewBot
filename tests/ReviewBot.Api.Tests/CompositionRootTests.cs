@@ -1,8 +1,11 @@
+using System.Diagnostics;
 using System.Net;
+using DiagActivity = System.Diagnostics.Activity;
 using System.Security.Cryptography;
 using System.Text;
 using FluentAssertions;
 using Microsoft.AspNetCore.Hosting;
+using OpenTelemetry.Trace;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Data.Sqlite;
@@ -10,6 +13,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
+using ReviewBot.Api.Cost;
+using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
 using NSubstitute;
 using ReviewBot.Core.Domain;
@@ -20,6 +26,9 @@ using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding.Build;
 using ReviewBot.Persistence;
+using ReviewBot.Retrieval;
+using ReviewBot.Retrieval.Indexing;
+using ReviewBot.Retrieval.Symbols;
 
 namespace ReviewBot.Api.Tests;
 
@@ -73,6 +82,82 @@ public class CompositionRootTests
             .Should().Be(128_000);
         scope.ServiceProvider.GetRequiredService<IPromptTokenEstimator>()
             .Should().BeOfType<HeuristicTokenEstimator>();
+        scope.ServiceProvider.GetRequiredService<IReviewPromptTokenEstimator>()
+            .Should().BeOfType<ReviewPromptTokenEstimator>();
+        scope.ServiceProvider.GetServices<IProviderPromptTokenEstimator>()
+            .Should().ContainSingle(estimator => estimator.ProviderName == "anthropic");
+    }
+
+    [Fact]
+    public async Task RetrievalServicesAreRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<IDiffSymbolExtractor>()
+            .Should().BeOfType<CSharpDiffSymbolExtractor>();
+        scope.ServiceProvider.GetRequiredService<IRepoIndexFactory>()
+            .Should().BeOfType<SqliteRepoIndexFactory>();
+        scope.ServiceProvider.GetServices<IRepoSymbolParser>()
+            .Should().ContainSingle(parser => parser.GetType() == typeof(CSharpRepoSymbolParser));
+        scope.ServiceProvider.GetRequiredService<IRetrievalProvider>()
+            .Should().BeOfType<SqliteRetrievalProvider>();
+        factory.Services.GetServices<IHostedService>()
+            .Should().Contain(service => service.GetType() == typeof(RepoIndexCleanupService));
+    }
+
+    [Fact]
+    public async Task TracingServicesAreRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<IReviewTraceWriter>()
+            .Should().BeOfType<JsonReviewTraceWriter>();
+        factory.Services.GetServices<IHostedService>()
+            .Should().Contain(service => service.GetType() == typeof(TraceCleanupService));
+    }
+
+    [Fact]
+    public async Task OtelTracerProviderIsRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<TracerProvider>()
+            .Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task OtelReviewBotSourceEmitsActivitiesWhenListenerIsAttached()
+    {
+        var started = new List<string>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == "ReviewBot",
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStarted = a => { lock (started) started.Add(a.OperationName); }
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+        scope.ServiceProvider.GetRequiredService<TracerProvider>().Should().NotBeNull();
+
+        using var src = new ActivitySource("ReviewBot", "1.0.0");
+        using DiagActivity? act = src.StartActivity("reviewbot.test_probe");
+
+        lock (started) started.Should().Contain("reviewbot.test_probe");
+    }
+
+    [Fact]
+    public async Task CostCalculatorIsRegisteredInDiContainer()
+    {
+        await using var factory = new ReviewBotApplicationFactory();
+        using var scope = factory.Services.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<IReviewCostCalculator>()
+            .Should().BeOfType<ReviewCostCalculator>();
     }
 
     [Fact]

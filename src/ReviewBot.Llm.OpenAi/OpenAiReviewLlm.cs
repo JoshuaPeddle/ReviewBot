@@ -51,11 +51,11 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
         var prompt = PromptBuilder.Build(request);
         var responseFormat = OpenAiResponseFormats.Normalize(options.ResponseFormat);
         var includeContextRequests = request.Config.Review.AgenticContext;
-        var firstResponse = await SendAsync(prompt, [prompt.UserPrompt], responseFormat, includeContextRequests, "review", ct);
+        var (firstResponse, firstUsage) = await SendAsync(prompt, [prompt.UserPrompt], responseFormat, includeContextRequests, "review", ct);
         var firstParse = LlmResultParser.Parse(firstResponse, logger);
         if (firstParse is { Success: true, Value: not null })
         {
-            return firstParse.Value;
+            return firstParse.Value with { TokenUsage = firstUsage, RawLlmResponse = firstResponse };
         }
 
         logger.LogWarning(
@@ -65,12 +65,13 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
         ct.ThrowIfCancellationRequested();
 
         var repairPrompt = BuildRepairPrompt(firstResponse, includeContextRequests);
-        var repairResponse = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], responseFormat, includeContextRequests, "review", ct);
+        var (repairResponse, repairUsage) = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], responseFormat, includeContextRequests, "review", ct);
+        var totalUsage = firstUsage?.Add(repairUsage) ?? repairUsage;
         var repairParse = LlmResultParser.Parse(repairResponse, logger);
         if (repairParse is { Success: true, Value: not null })
         {
             ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: true);
-            return repairParse.Value;
+            return repairParse.Value with { TokenUsage = totalUsage, RawLlmResponse = firstResponse };
         }
 
         logger.LogWarning(
@@ -78,15 +79,16 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
             repairParse.Error,
             Truncate(repairResponse, MaxLoggedRawResponseLength));
         ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: false);
-        return new ReviewResult(string.Empty, []);
+        return new ReviewResult(string.Empty, []) { TokenUsage = totalUsage, RawLlmResponse = firstResponse };
     }
 
-    public Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review")
+    public async Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review")
     {
         ArgumentNullException.ThrowIfNull(prompt);
         ArgumentException.ThrowIfNullOrWhiteSpace(phase);
 
-        return SendAsync(prompt, [prompt.UserPrompt], OpenAiResponseFormats.Text, includeContextRequestsInJsonSchema: false, phase, ct);
+        var (content, _) = await SendAsync(prompt, [prompt.UserPrompt], OpenAiResponseFormats.Text, includeContextRequestsInJsonSchema: false, phase, ct);
+        return content;
     }
 
     public IReviewLlm WithModelName(string modelName)
@@ -100,7 +102,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
             delayAsync);
     }
 
-    private async Task<string> SendAsync(
+    private async Task<(string Content, LlmTokenUsage? Usage)> SendAsync(
         PromptPayload prompt,
         IReadOnlyList<string> userMessages,
         string responseFormat,
@@ -134,7 +136,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
                     }
                 }
 
-                return response.Content;
+                return (response.Content, response.Usage);
             }
             catch (HttpRequestException ex) when (retryAttempt < TransientRetryDelays.Length)
             {

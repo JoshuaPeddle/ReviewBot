@@ -114,13 +114,28 @@ Shipped the context-window and heuristic-estimation primitives that unblock budg
 Shipped the first live worker integration for prompt budgeting:
 
 - Added repo YAML support for `review.response_reserve_tokens` with a 4,096-token default, non-negative validation, documentation, and config-fetcher tests.
-- Injected `IModelContextRegistry` and `IPromptTokenEstimator` into `ReviewWorker`; the worker now computes a per-review `PromptBudget` from model limit, base system prompt, grounding delta, response reserve, and PR metadata.
+- Injected `IModelContextRegistry` and a provider-aware token estimator into `ReviewWorker`; the worker now computes a per-review `PromptBudget` from model limit, base system prompt, grounding delta, response reserve, and PR metadata.
 - Made full-file context budget-aware: candidate fetches are selected only while estimated patch tokens fit the remaining content budget, fetched contents are re-estimated before prompt inclusion, and oversized fetched files are dropped instead of silently inflating the prompt.
 - Added debug logging for prompt budget inputs, consumed sections, and remaining budget; added a warning when estimated diff tokens exceed the remaining content budget.
 - Added worker tests for grounding-before-full-file budget ordering and budget-limited full-file fetches.
 - Corrected a Phase 21 latency assumption: full-file context cannot always race grounding anymore, because budget-aware selection needs the grounding token cost first.
 
-Remaining in Step 1: Anthropic `count_tokens` and retrieval budget integration. Oversized diffs are no longer warning-only when `review.chunked_review` is enabled; the worker now branches into the Step 2 chunk planner/dispatcher. The legacy patch-budget truncation path remains available only when chunking is disabled.
+#### Completed Anthropic token-counting slice (May 28, 2026)
+
+Shipped provider-aware token estimation for Anthropic-backed reviews:
+
+- Added `IReviewPromptTokenEstimator` plus provider-specific estimator registration so the worker can use Anthropic counting only when the selected model provider is `anthropic`; OpenAI-compatible and local providers continue to use the heuristic estimator.
+- Added `AnthropicTokenEstimator`, backed by the SDK `CountMessageTokensAsync` endpoint. It first runs the existing chars/3 heuristic and only calls `count_tokens` when the estimate reaches `Anthropic:TokenCountingHeuristicThresholdTokens` (default 8,000); `Anthropic:TokenCountingEnabled` can disable the API call path.
+- Count-token failures fall back to the heuristic estimate with a warning instead of failing the review.
+- Threaded provider-aware estimates through prompt-budget creation, diff accounting, chunk planning, and full-file budget checks.
+- Added Core tests for provider estimator selection, Anthropic tests for request mapping/threshold/fallback behavior, API DI coverage, and a worker integration test proving provider-aware estimates can trigger chunking.
+
+Corrected assumptions discovered during implementation:
+
+- Anthropic `count_tokens` cannot be registered as the global `IPromptTokenEstimator` because the app registers Anthropic and OpenAI-compatible adapters at the same time. The worker needs provider-aware estimation based on the effective repo model config.
+- The current estimator interface is synchronous, so Anthropic counting blocks on the SDK async call at the budgeting boundary. This keeps the slice scoped but should be revisited if token counting latency shows up in Phase 23 traces.
+
+Remaining in Step 1: no known code slice remains. Retrieval budget integration is covered by the Step 3 worker slice below. Oversized diffs are no longer warning-only when `review.chunked_review` is enabled; the worker now branches into the Step 2 chunk planner/dispatcher. The legacy patch-budget truncation path remains available only when chunking is disabled.
 
 ---
 
@@ -184,7 +199,18 @@ Shipped the first end-to-end multi-pass review path:
 - Added Core tests for chunk planning, prompt chunk annotations, and result merging; GitHub config tests for new YAML fields; and worker tests for 5-file chunking plus sequential/parallel dispatch.
 - Tightened speculative missing-context filtering for comments that explicitly say an implementation is not visible in the diff.
 
-Remaining in Step 2: token usage is still recorded per LLM call by provider metrics rather than surfaced as a single merged review total, and the eval corpus still needs the large-PR and cross-chunk-reference fixtures described above.
+#### Completed merged token usage slice (May 27, 2026)
+
+Shipped per-review token usage totals:
+
+- Added `LlmTokenUsage.Add(LlmTokenUsage?)` for null-safe accumulation.
+- Added `LlmTokenUsage? TokenUsage { get; init; }` to `ReviewResult`; both Anthropic and OpenAI adapters now attach usage to every returned `ReviewResult`.
+- Anthropic adapter extracts `response.Usage.InputTokens / OutputTokens / CacheReadInputTokens` from the SDK `MessageResponse` and records metrics symmetrically with the OpenAI adapter; `CompleteRawAsync` now also passes the phase label through.
+- `ReviewResultMerger.Merge` sums `TokenUsage` across all chunk results, producing a single total for the merged review.
+- `ReviewWorker` logs prompt tokens, completion tokens, and cached tokens at Info level after the final result is assembled.
+- Added Core tests for `Add`, null accumulation, and merger summing; added Anthropic and OpenAI tests verifying usage propagation through primary and repair calls.
+
+Remaining in Step 2: the eval corpus still needs the large-PR and cross-chunk-reference fixtures described above.
 
 ---
 
@@ -208,9 +234,129 @@ The retrieval foundation (diff symbol extractor, SQLite repo index, C# parser, c
 
 **Stop tests:** `IRetrievalProvider` unit tests with a mock index. Worker integration test: with `retrieval.enabled: true`, symbols extracted from a synthetic diff are looked up, snippets injected into the request, snippets appear in the rendered prompt. Budget cap: if snippets would exceed the retrieval budget fraction, they are trimmed to fit. SHA-not-indexed triggers `IndexAsync` before review continues.
 
+#### Completed retrieval provider and worker integration slice (May 27, 2026)
+
+Shipped the first live retrieval path:
+
+- Added `IRetrievalProvider` / `SqliteRetrievalProvider`; it extracts symbols from changed C# diffs, looks up definitions and top-3 callers in the SQLite index, deduplicates hits, ranks definitions before callers, and emits `RepositoryContextSnippet` entries under a retrieval cap of `min(retrieval.max_bytes / 3, content_budget * 0.3, remaining_budget)`.
+- Added `IRepoIndex.IsIndexedAsync` plus `IRepoIndexFactory` so the worker and provider both honor the effective repo config's `retrieval.index_cache_dir` rather than using a single process-wide cache path.
+- Extended PR metadata with the head clone URL so the worker can materialize the PR head SHA when indexing is needed.
+- Wired `ReviewWorker` so `retrieval.enabled: true` checks whether the head SHA is indexed, clones/indexes it before lookup if not, injects returned snippets into `ReviewRequest.RepositoryContext`, and charges retrieval against the prompt budget before full-file context and diff budgeting.
+- Registered retrieval services in the API composition root and added DI coverage.
+- Added provider tests for symbol lookup/ranking and retrieval-budget trimming, plus a worker test proving a missing head-SHA index triggers `IndexAsync` before review, and that retrieved snippets appear in the rendered prompt.
+
+Corrected assumptions discovered during implementation:
+
+- Retrieval cannot safely run in parallel with grounding in this design because the retrieval cap depends on the grounded prompt budget. The worker now runs grounding first, retrieval second, then full-file context.
+- The first worker integration indexed a full checked-out head SHA. Changed-path incremental reparse was left as a follow-on and is now covered by the May 28 incremental indexing slice below.
+
+#### Completed retrieval index eviction slice (May 28, 2026)
+
+Shipped the nightly cleanup path for retrieval index rows:
+
+- Added `RepoIndexCleanupService`, registered through `AddRetrieval()`, which runs daily and calls `IRepoIndex.DeleteUnusedBeforeAsync(clock.GetUtcNow() - 30 days)` for each cache directory opened by the current process.
+- Tightened `SqliteRepoIndexFactory` so it tracks normalized cache directories, reuses DI-provided symbol parsers, and uses the shared `TimeProvider`.
+- Registered `CSharpRepoSymbolParser` in DI so future parser additions can flow through the index factory instead of being hard-coded inside every index instance.
+- Added tests for factory cache-directory tracking, cleanup cutoff calculation, multi-cache deletion totals, per-cache failure isolation, and API composition wiring.
+
+Corrected assumptions discovered during implementation:
+
+- A process-local hosted service cannot discover arbitrary per-repo `retrieval.index_cache_dir` values that were used before the current process started. The cleanup now sweeps cache directories observed through `IRepoIndexFactory` during this process lifetime; a persisted cache-directory registry remains a follow-on if custom cache locations become common.
+
+#### Completed changed-path incremental indexing slice (May 28, 2026)
+
+Shipped changed-path retrieval indexing for delta reviews:
+
+- Added explicit SHA metadata to the SQLite repo index so a SHA with zero parseable symbols is still marked indexed; cleanup now evicts stale index metadata as well as symbol rows.
+- Added `IRepoIndex.IndexChangesAsync`, which copies unchanged symbols forward from an indexed base SHA, removes changed/deleted paths, and reparses only the compare-changed paths from the head checkout.
+- Wired `ReviewWorker` to reuse the complete GitHub compare path set from delta reviews for retrieval indexing. If the previous SHA is indexed, the worker calls `IndexChangesAsync`; if the compare result is missing, truncated, failed, or the prior SHA was never indexed, it falls back to the full head-SHA index.
+- Forced a full retrieval index rebuild when `.github/review-bot.yml` or `.github/review-bot.yaml` changes, because ignore rules may have changed and unchanged files may need to be newly included or excluded.
+- Included GitHub compare `previous_file_name` paths for renames so stale symbols from the old path are invalidated during incremental indexing.
+- Added index tests for symbol-less SHA markers and changed-path reparse/copy behavior; GitHub tests for rename path handling; and worker tests for incremental indexing plus config-change full-index fallback.
+
+Corrected assumptions discovered during implementation:
+
+- `IsIndexedAsync` cannot infer index completion from symbol rows. Repos or SHAs with only unsupported/no-symbol files would otherwise be indexed repeatedly forever.
+- GitHub compare `filename` alone is insufficient for retrieval invalidation on renames; the previous filename must be treated as changed too.
+- Incremental indexing is only safe across stable ReviewBot config. When the repo config file changes, the worker intentionally rebuilds the head index.
+
+#### Completed initial retrieval eval fixture slice (May 28, 2026)
+
+Shipped the first eval corpus expansion aimed at the multi-pass/retrieval quality gap:
+
+- Added `004-large-pr-multi-directory`, a broad five-file fixture with must-flag findings in different directories so chunked review must preserve recall across chunk boundaries.
+- Added `005-cross-chunk-state-default`, a cross-file state/default drift fixture where the worker bug is only clear when the reviewer connects the changed PR-state model with the changed worker null check.
+- Added canned quick-run results for both fixtures and expanded the quick corpus tests from 3 to 5 fixtures, including explicit coverage for `large_pr_chunking` and `cross_chunk_reference` categories.
+- Fixed the eval harness project so `.cs` files under fixture `repo-state/` are treated as fixture data rather than compiled into `ReviewBot.Evals`.
+
+Corrected assumptions discovered during implementation:
+
+- Eval `repo-state` files are not automatically data-only just because they live under fixture directories. The SDK project glob was compiling nested `.cs` fixture files; the eval project now excludes `Fixtures/**/repo-state/**/*.cs` from compilation.
+
+Remaining in Step 3: run the expanded fixtures against live no-retrieval and retrieval-enabled review modes to measure whether retrieval improves large/cross-chunk quality. The initial corpus now has one cross-chunk benchmark; add 2-4 more cross-chunk fixtures after the first live eval run shows which failure modes are most common.
+
 ---
 
 ## Phase 23: Observability and review traces
+
+#### Completed review trace persistence slice (May 27, 2026)
+
+Shipped the foundation observability layer — a JSON trace file is now written for every completed review:
+
+- Added `TracingOptions` (`Tracing:Enabled`, `IncludePrompts`, `MaxDiskMb`, `RetentionDays`, `TracesDir`). Disabled by default in production; enabled in `appsettings.Development.json`.
+- Added `ReviewTrace` POCO capturing: delivery ID, timestamp, job metadata (owner/repo/PR/SHA/reason), review type (first/delta/etc.), model provider+name, files reviewed, chunk count, retrieval snippet count, full prompt budget snapshot (limit, system prompt, grounding, reserve, consumed sections), candidate comments (pre-filter), final posted comments, and token usage.
+- Added `IReviewTraceWriter` / `JsonReviewTraceWriter`: writes `traces/{owner}/{repo}/{prNumber}-{deliveryId}.json` atomically via a temp-file rename; write failures log a warning and never fail the review job.
+- Added `NullReviewTraceWriter` (used in tests and as the safe default for tests).
+- Added `TraceCleanupService` (background, daily): deletes files older than `RetentionDays`, then deletes oldest remaining files until total size is under `MaxDiskMb`.
+- Injected `IReviewTraceWriter` and `TimeProvider` into `ReviewWorker`; trace is written after posting and before persisting the incremental-review SHA.
+- Registered tracing services via `AddReviewTracing()` in `Program.cs`.
+- Added API composition tests for `IReviewTraceWriter` and `TraceCleanupService` DI resolution.
+- Added `JsonReviewTraceWriter` tests: enabled writes expected JSON with snake_case fields, disabled writes nothing, atomic write leaves no .tmp file, token usage and budget sections serialize correctly.
+- Added `TraceCleanupService` tests: expired files deleted, size-cap triggers oldest-first deletion, missing dir is a no-op, recent files within limit are preserved.
+- Added worker integration test verifying `IReviewTraceWriter.WriteAsync` is called with expected trace fields after the review is posted.
+
+Corrected assumptions discovered during implementation:
+- `ReviewWorker` did not have `TimeProvider` injected before this slice; it now receives it alongside `IReviewTraceWriter` for consistent timestamp capture.
+- All existing `WorkerFixture` tests default to `NullReviewTraceWriter.Instance` and `TimeProvider.System`; no existing test behavior changed.
+
+#### Completed per-chunk prompt and timing slice (May 27, 2026)
+
+Shipped per-chunk prompt content, raw LLM responses, and per-stage timings in review traces:
+
+- Added `string? RawLlmResponse` to `ReviewResult`; both Anthropic and OpenAI adapters now attach the first raw LLM response to every returned result, including repair and empty-result fallback paths.
+- Added `bool IncludePrompts` to `IReviewTraceWriter`; `JsonReviewTraceWriter` exposes `TracingOptions.IncludePrompts`, `NullReviewTraceWriter` returns `false`.
+- Added `TraceChunk` POCO (per-chunk: index, total, file list, prompt system/user bytes and text, raw response bytes and text, elapsed ms) and `TraceTimings` POCO (grounding, retrieval, full-file-context, total ms) to `ReviewTrace.cs`.
+- Changed `ReviewChunkAsync` to return a new `ChunkReviewOutcome` record that packages `ReviewResult`, built `PromptPayload`, and elapsed `TimeSpan`. The worker builds the prompt via `PromptBuilder.Build(request)` before calling `ReviewAsync`, capturing the same payload the adapter will send.
+- Single-chunk reviews produce one `ChunkReviewOutcome` inline in `ProcessAsync` so the trace always has a `ChunkTraces` array regardless of chunking.
+- `BuildTrace` now receives `chunkOutcomes`, `TraceTimings`, and `includePrompts`; `BuildTraceChunk` maps each outcome to a `TraceChunk` respecting the `IncludePrompts` flag.
+- Added per-stage stopwatches in `ProcessAsync` for grounding, retrieval, and full-file-context; `TraceTimings.TotalMs` is the wall time from job-start to trace-write.
+- Fixed pre-existing build errors in the staged tracing test files: `TraceCleanupService.RunCleanup` was `internal` with no `InternalsVisibleTo` for the test assembly; added `Properties/AssemblyInfo.cs` to the Api project. `Options.Create(...)` was ambiguous due to the `ReviewBot.Api.Options` namespace; fixed via `MsOptions` alias.
+- Updated failing `ReviewAsyncReturnsEmptyResultWhenRepairIsMalformed` tests in both Anthropic and OpenAI adapter suites to include the expected `RawLlmResponse = "not json"`.
+- Added `JsonReviewTraceWriterTests` coverage for `ChunkTraces` serialization with and without `IncludePrompts`, and for `TraceTimings` serialization.
+- Added worker integration test verifying `ChunkTraces` and `Timings` are populated in the trace after a single-chunk review.
+
+Corrected assumptions discovered during implementation:
+- The worker previously re-started a new `Stopwatch` for grounding inside `GetGroundingContextAsync`; those internal timings already flow to metrics. The new outer stopwatches in `ProcessAsync` measure stage wall time for the trace independently, which is acceptable.
+
+Remaining in Phase 23 trace slice: the original per-chunk agentic context gap is closed by the May 28 per-chunk agentic trace slice below. Lower-level trace detail can still be expanded as real traces show what operators need, but no known fully specified trace-persistence gap remains in this item after the filtered-comment trace slice.
+
+#### Completed cost surface slice (May 27, 2026)
+
+Shipped estimated dollar-cost tracking per review:
+
+- Added `CostRateOptions` (`CostRates:Rates` section in appsettings) mapping model name → `{ InputPer1M, OutputPer1M }`. Empty by default; models without a configured rate produce no cost output. Local/Ollama models stay at zero by setting both rates to 0.
+- Added `IReviewCostCalculator` / `ReviewCostCalculator`: computes `(promptTokens / 1M) * inputRate + (completionTokens / 1M) * outputRate`, returns `null` when no rate is configured for the model. Registered as singleton in DI.
+- Added `reviewbot.cost.usd_total` counter to `ReviewBotMetrics` with labels `provider` and `model`; recorded immediately after the merged token usage log.
+- Added `decimal? EstimatedCostUsd` to `ReviewTrace`; propagated through `BuildTrace` alongside `TokenUsage`.
+- Injected `IReviewCostCalculator` into `ReviewWorker`; cost is computed after the merged-result token-usage log, emits the counter, and logs at Info level.
+- Fixed a pre-existing bug: `ApplyOutputConfig`, `AppendFilesSkippedNote`, and `AppendRereviewHint` all used the `new ReviewResult(summary, comments, contextRequests)` constructor which silently dropped `TokenUsage` and `RawLlmResponse`. All three now use `result with { Summary = ... }` or `result with { Summary = ..., Comments = ... }` to preserve the full record state.
+- Added `ReviewCostCalculatorTests` (6 cases: known rate, zero rate, no rate/null, cached-tokens-excluded, exact counts, null-usage throws).
+- Added `CostCalculatorIsRegisteredInDiContainer` to `CompositionRootTests`.
+- Added `WriteAsync_IncludesEstimatedCostUsdWhenPresent` and `WriteAsync_OmitsEstimatedCostUsdWhenNull` to `JsonReviewTraceWriterTests`.
+- Added `TraceContainsEstimatedCostWhenCostCalculatorReturnsValue` and `TraceHasNullEstimatedCostWhenCostCalculatorReturnsNull` to `ReviewWorkerTests`.
+
+Corrected assumptions discovered during implementation:
+- `TokenUsage` was silently discarded by three `ReviewResult` construction sites in the worker. The bug was latent — the trace writer test passes because it builds `ReviewTrace` directly, not through the worker pipeline. The new end-to-end worker test exposed it.
 
 The existing metrics (queue depth, processing rate, LLM duration) diagnose system health. They do not explain *why a specific review was wrong*, which is the question every user bug report starts with.
 
@@ -264,7 +410,85 @@ reviewbot.review
 
 Add OTLP exporter (`OpenTelemetry.Extensions.Hosting` plus `OpenTelemetry.Exporter.OpenTelemetryProtocol`). Self-hosters wire to Jaeger, Tempo, or any OTLP-compatible collector. Document in README with a `docker-compose.yml` Jaeger example.
 
-Span attributes: `review.owner`, `review.repo`, `review.pr_number`, `review.sha`, `review.model`, `review.chunk_index`, `review.total_chunks`, `llm.prompt_tokens`, `llm.completion_tokens`, `retrieval.symbols_queried`, `retrieval.snippets_returned`, `retrieval.bytes_used`.
+#### Completed OTel spans slice (May 28, 2026)
+
+Shipped `ActivitySource`-based distributed tracing for major review pipeline stages:
+
+- Added `ReviewBotActivitySource` (source name `ReviewBot`, v1.0.0) in `src/ReviewBot.Api/Otel/`.
+- Added `OpenTelemetry.Exporter.OpenTelemetryProtocol` 1.15.3 and wired `.WithTracing()` in `Program.cs`; the OTLP exporter reads `OTEL_EXPORTER_OTLP_ENDPOINT` — if not set it falls back to `http://localhost:4317`. Prometheus metrics exporter is unchanged.
+- `ReviewWorker` now emits the following spans for every review job:
+  - `reviewbot.review` (parent): tags `review.owner`, `review.repo`, `review.pr_number`, `review.sha`, `review.model`.
+  - `reviewbot.grounding`: wraps the composite grounding provider call.
+  - `reviewbot.retrieval`: wraps retrieval lookup; tags `retrieval.snippets_returned` and `retrieval.bytes_used`.
+  - `reviewbot.chunk_review` (one per chunk, including single-chunk reviews): tags `review.chunk_index`, `review.total_chunks`.
+  - `reviewbot.llm.review` (child of `reviewbot.chunk_review`): tags `llm.prompt_tokens` and `llm.completion_tokens` when token usage is reported.
+  - `reviewbot.llm.self_critique`: emitted from `ApplySelfCritiqueAsync`; parented to `reviewbot.chunk_review` in single-chunk path, to `reviewbot.review` in merged multi-chunk path.
+  - `reviewbot.post_review`: wraps `IReviewPoster.PostAsync`.
+- Also fixed a pre-existing bug: `BuildTraceChunk` was inferring the files-in-chunk from comment paths (silently omitting files with no comments). `ChunkReviewOutcome` now carries `ChunkFiles`; `BuildTraceChunk` uses them with comment-path inference as a fallback.
+- Added `OtelSpansAreEmittedForReview` worker test using `ActivityListener`; verifies all seven span names and review.owner/repo/pr_number/sha/model tags.
+- Added two composition tests: `OtelTracerProviderIsRegisteredInDiContainer` and `OtelReviewBotSourceEmitsActivitiesWhenListenerIsAttached`.
+
+Corrected assumptions discovered during implementation:
+- `Octokit.Activity` conflicts with `System.Diagnostics.Activity` in the test project; the test file uses a `DiagActivity` alias.
+- `AddOtlpExporter()` on `TracerProviderBuilder` requires `using OpenTelemetry.Trace;` — distinct from the metrics extension in `OpenTelemetry.Metrics`.
+- Sub-spans inside grounding providers (tier1_language, tier2_build) are not yet emitted because those providers still need to reference a shared tracing source. Retrieval provider/index spans were closed by the May 28 retrieval OTel detail slice below.
+
+#### Completed per-chunk agentic trace slice (May 28, 2026)
+
+Shipped the remaining trace-detail gap for agentic context:
+
+- Added `TraceAgenticContext` under each `TraceChunk`, capturing requested context files, accepted context files after validation, fetched file paths, drop-reason counts, and whether the second-pass review ran.
+- Wired `ReviewWorker` so both single-chunk and multi-chunk review outcomes carry agentic context trace data without changing review posting behavior.
+- Added trace serialization coverage for the new snake_case fields and a worker integration test proving requested/accepted/fetched/drop data appears in the emitted review trace.
+- Fixed a bug discovered while reading the agentic-context path: successful agentic second-pass results replaced the initial `ReviewResult` and dropped the primary LLM call's `TokenUsage`, hiding token/cost data for those reviews. The worker now preserves the initial token usage when the enriched parsed result replaces the review.
+
+Corrected assumptions discovered during implementation:
+
+- `ReviewResult.ContextRequests` only preserves what the model asked for; it does not include validation outcomes or fetch results. Trace data needs to be captured at the agentic-context boundary before the final result is filtered or merged.
+- Agentic second-pass completions currently use `CompleteRawAsync`, which does not return token usage. Until raw-completion usage is exposed, the trace/cost surface can preserve the primary review token usage but cannot count the second-pass completion separately.
+
+#### Completed retrieval OTel detail slice (May 28, 2026)
+
+Shipped the retrieval-specific span detail that the initial OTel slice left open:
+
+- Moved `ReviewBotActivitySource` from the API project into `ReviewBot.Core` so non-API projects can emit spans through the same `ReviewBot` source.
+- Added `reviewbot.retrieval.extract_symbols` and `reviewbot.retrieval.lookup` spans inside `SqliteRetrievalProvider`; lookup spans tag `retrieval.symbols_queried` and `retrieval.matches_returned`.
+- Extended `RetrievalContextResult` with `SymbolsQueried`, and the worker now tags the parent `reviewbot.retrieval` span with `retrieval.symbols_queried` alongside snippet and byte counts.
+- Added `reviewbot.retrieval.index_sha` around retrieval indexing, tagged with owner/repo/SHA and full vs incremental index mode.
+- Added retrieval provider and worker tests for the new spans and tags.
+
+Corrected assumptions discovered during implementation:
+
+- Keeping the shared `ActivitySource` internal to `ReviewBot.Api` was the structural blocker for provider-level spans. Moving the source to Core lets retrieval emit child spans without depending on the API assembly.
+
+#### Completed grounding OTel detail slice (May 28, 2026)
+
+Shipped the grounding-specific span detail that the initial OTel slice left open:
+
+- Added `reviewbot.grounding.tier1_language` spans inside `CompositeGroundingProvider`, covering root-file listing, detector selection, and metadata extraction.
+- Added `reviewbot.grounding.tier2_build` spans around clone/build execution, tagged with language ID, whether a build runner actually ran, and build success.
+- Added `reviewbot.grounding.tier3_tests` spans for GitHub Checks summary collection and local test execution, tagged by test source plus local failure counts when available.
+- Added grounding tests that listen to the shared `ReviewBot` activity source and verify tier1/tier2/tier3 span names and tags.
+
+Corrected assumptions discovered during implementation:
+
+- The previous risk text still grouped retrieval with the grounding observability gap. Retrieval extraction, lookup, queried-symbol counts, snippet counts, bytes used, and index mode were already covered by the retrieval OTel detail slice; the remaining Phase 23 gap was grounding tier detail only.
+
+#### Completed filtered-comment trace slice (May 28, 2026)
+
+Shipped trace visibility for comments removed between model output and GitHub posting:
+
+- Changed review traces so `candidate_comments` records the raw model candidate comments for the selected review pass, before confidence/content filtering and self-critique.
+- Added `dropped_comments` to each trace, preserving the comment fields plus a stable reason (`inline_comments_disabled`, `below_min_confidence`, `praise_only`, `meta_review`, `non_actionable_process`, `speculative_missing_context`, or `self_critique`).
+- Preserved existing posting behavior: only filtered final comments are sent to GitHub, while the trace now explains why raw candidates disappeared.
+- Added JSON serialization coverage and a worker integration test proving raw candidates, final comments, and drop reasons are captured after a review.
+
+Corrected assumptions discovered during implementation:
+
+- The existing `candidate_comments` trace field was not truly pre-filter. It was populated after confidence/content filtering and often after self-critique, which made trace JSON insufficient for debugging "why did the bot not post this model comment?" reports.
+- The broader stop test also exposed prompt-builder drift: Core prompt tests expected the stricter anti-meta-review and anti-speculation rules, but `PromptBuilder` still emitted an older shorter rule set. Restored the prompt contract before final verification.
+
+Span attributes: `review.owner`, `review.repo`, `review.pr_number`, `review.sha`, `review.model`, `review.chunk_index`, `review.total_chunks`, `llm.prompt_tokens`, `llm.completion_tokens`, `retrieval.symbols_queried`, `retrieval.snippets_returned`, `retrieval.bytes_used`, `grounding.language_id`, `grounding.detector`, `grounding.language_detected`, `grounding.build_ran`, `grounding.build_success`, `grounding.test_source`, `grounding.tests_failed`.
 
 ### Cost surface
 
@@ -328,16 +552,28 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 
 ## Risks
 
-**Context estimation accuracy.** Heuristic token counting (chars/3.0) can still be off for mixed-language diffs with heavy Unicode or whitespace, but is intentionally conservative for source code. The Anthropic count_tokens API is accurate but adds a round-trip. If chunk boundaries are calculated from an underestimate, an individual chunk can still overflow. Status: further mitigated after the May 27 chunk planner/dispatcher slice; oversized diffs now branch into chunked review with a 0.85 headroom factor instead of being sent as one prompt. Remaining exposure is estimator error inside a chunk and any full-file/retrieval context added before chunk sizing. Mitigation: keep `response_reserve_tokens` at 4096 by default, tune `chunk_headroom` from eval data, and add Anthropic `count_tokens` for large prompts.
+**Context estimation accuracy.** Heuristic token counting (chars/3.0) can still be off for mixed-language diffs with heavy Unicode or whitespace, but is intentionally conservative for source code. Anthropic-backed reviews now call `count_tokens` for large prompt sections above the configured heuristic threshold and fall back to the heuristic on count failures. Status: further mitigated after the May 28 Anthropic token-counting slice; oversized diffs branch into chunked review with headroom instead of being sent as one prompt. Remaining exposure is estimator error for OpenAI-compatible/local providers, Anthropic sections below the threshold, and any single chunk whose provider count still differs from final provider-side assembly. Mitigation: keep `response_reserve_tokens` at 4096 by default, tune `chunk_headroom` from eval data, and use Phase 23 traces to decide whether OpenAI-compatible providers need tokenizer-specific estimators.
 
 **Budget-aware full-file latency tradeoff.** Full-file context used to fetch in parallel with grounding. It now waits for grounding because the full prompt budget depends on grounding token cost. Status: opened May 27. The correctness tradeoff is intentional for small-context models, but it may give back part of the Phase 21 latency win on repos with both grounding and full-file context enabled. Mitigation: keep full-file context opt-in (`full_file_max_bytes: 0` by default), measure stage timings in Phase 23 traces, and revisit speculative fetch-with-post-filtering if latency becomes visible in real deployments.
 
-**Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. Status: opened by the May 27 chunked-review slice. The eval corpus should have 3–5 cross-chunk fixtures to measure how bad this gap actually is. Expect multi-pass alone (without retrieval) to miss these; retrieval's job is to close the gap.
+**Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. Status: partially measured as of May 28; the quick eval corpus now includes one cross-chunk reference fixture and one large multi-directory fixture. This remains open until live no-retrieval vs retrieval-enabled eval runs show the delta, and until the corpus has 3–5 cross-chunk fixtures covering the common failure shapes. Expect multi-pass alone (without retrieval) to miss these; retrieval's job is to close the gap.
 
 **Retrieval parser quality.** The lexical C# parser misclassifies edge-case syntax and produces false positives on symbol extraction. Symbol lookup hits with wrong matches dilute the retrieval context budget. Measure via eval: if retrieval is on but scores lower than no retrieval, the parser noise is the cause. Switching to tree-sitter or Roslyn is the fix; do it after the measurement confirms the gap.
 
+**Retrieval observability blind spot.** Status: closed May 28. Retrieval extraction, lookup, queried-symbol count, snippet count, byte count, and index mode are now visible in OTel spans. The separate grounding tier-span gap is also closed by the grounding OTel detail slice.
+
+**Retrieval cold-start latency.** The first retrieval-enabled review of a SHA still clones a temporary checkout and may full-parse the head when there is no indexed base SHA, the GitHub compare result is unavailable/truncated, or ReviewBot repo config changed. Status: narrowed May 28; delta reviews with an indexed base SHA now copy unchanged symbols and reparse only compare-changed paths, and symbol-less SHAs are tracked explicitly. Mitigation: keep retrieval opt-in (`retrieval.enabled: false` by default), measure first-review/index spans in Phase 23, and revisit persistent clone/index workspaces if cold-start latency remains visible.
+
+**Retrieval index eviction discovery.** The May 28 eviction service prevents unbounded symbol-row growth for cache directories opened by the running process, but it does not discover custom `retrieval.index_cache_dir` values that were only used before a restart. Status: opened May 28. Mitigation: the default single-cache deployment is covered once retrieval runs; add a persisted cache-directory registry if real deployments rely on many custom cache directories.
+
 **Chunked review cost.** A 10-chunk review is 10× the LLM cost. For cloud models at scale, this matters. The `max_chunks` config is the safety cap, but users may not know what value to set. The WebUI cost dashboard (Phase 23) is the feedback loop. Until then, log total token usage and estimated cost at the review completion level so it shows up in standard logs.
 
-**SQLite index contention.** The repo index uses SQLite. Concurrent reviews of the same repo could race on index writes. SQLite with WAL mode handles concurrent reads fine but serializes writes. For the expected deployment scale (single-maintainer self-hosted), this is acceptable. If concurrent review volume grows, the contention will show up as index write latency in OTel spans.
+**SQLite index contention.** The repo index uses SQLite. Concurrent reviews of the same repo could race on index writes. SQLite with WAL mode handles concurrent reads fine but serializes writes. For the expected deployment scale (single-maintainer self-hosted), this is acceptable. If concurrent review volume grows, the contention will show up as index write latency in OTel spans (now available as of May 28).
+
+**OTel sub-provider span coverage gap.** Status: closed May 28. Grounding tier spans (`tier1_language`, `tier2_build`, `tier3_tests`) and retrieval provider/index spans (`extract_symbols`, `lookup`, `index_sha`) now emit through the shared `ReviewBot` activity source. Remaining observability follow-ons are lower-level runner details if real traces show build/test commands need deeper breakdown.
+
+**Agentic trace blind spot.** The trace previously showed final review outputs but not the files requested by agentic context, validation drops, or fetched paths, making second-pass review behavior difficult to debug. Status: closed May 28; `TraceChunk.AgenticContext` now records requested, accepted, fetched, drop counts, and whether the second pass ran. Remaining limitation: second-pass raw-completion token usage is not available from `CompleteRawAsync`, so only primary review token usage is preserved for enriched results.
+
+**Comment filtering trace blind spot.** The trace previously recorded `candidate_comments` only after comment filters and optional self-critique ran, so filtered model comments were invisible. Status: closed May 28; traces now preserve raw candidate comments and a `dropped_comments` list with stable drop reasons through final posting.
 
 **Anthropic SDK stability.** `Anthropic.SDK` 5.x remains unofficial. Prompt caching and fine-grained cache control are version-sensitive. Pin the version in `Directory.Packages.props` and document. Watch for an official Anthropic .NET SDK; migrate when one ships.

@@ -83,7 +83,8 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
             pullRequest.Body ?? string.Empty,
             RequireSha(pullRequest.Base, "base"),
             RequireSha(pullRequest.Head, "head"),
-            files);
+            files,
+            GetHeadCloneUrl(owner, repo, pullRequest));
     }
 
     public async Task<PullRequestMetadata> FetchMetadataAsync(
@@ -109,7 +110,8 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
             pullRequest.Title ?? string.Empty,
             pullRequest.Body ?? string.Empty,
             RequireSha(pullRequest.Base, "base"),
-            RequireSha(pullRequest.Head, "head"));
+            RequireSha(pullRequest.Head, "head"),
+            GetHeadCloneUrl(owner, repo, pullRequest));
     }
 
     public async Task<IReadOnlyList<FileChange>> FetchFilesAsync(
@@ -171,14 +173,15 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
             .ConfigureAwait(false);
 
         var paths = compareResult.Files
-            .Select(f => f.Filename)
+            .SelectMany(f => new[] { f.Filename, f.PreviousFileName })
             .Where(f => !string.IsNullOrEmpty(f))
             .Cast<string>()
+            .Distinct(StringComparer.Ordinal)
             .ToArray();
 
         // GitHub caps compare results at 300 files; at or above the cap the result is incomplete.
         const int GitHubCompareFilesCap = 300;
-        return new ChangedFilesResult(paths, paths.Length < GitHubCompareFilesCap);
+        return new ChangedFilesResult(paths, compareResult.Files.Count < GitHubCompareFilesCap);
     }
 
     public async Task<IReadOnlyList<(string Path, string Content)>> GetFileContentsAsync(
@@ -460,6 +463,17 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
         string.IsNullOrWhiteSpace(reference?.Sha)
             ? throw new InvalidOperationException($"GitHub pull request response is missing {side} SHA.")
             : reference.Sha;
+
+    private static string GetHeadCloneUrl(string owner, string repo, PullRequest pullRequest)
+    {
+        var cloneUrl = pullRequest.Head.Repository?.CloneUrl;
+        if (!string.IsNullOrWhiteSpace(cloneUrl))
+        {
+            return cloneUrl;
+        }
+
+        return $"https://github.com/{owner}/{repo}.git";
+    }
 
     private static FileChangeStatus MapStatus(string? status) =>
         status?.ToLowerInvariant() switch

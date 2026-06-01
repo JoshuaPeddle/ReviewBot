@@ -1,5 +1,6 @@
 using Anthropic.SDK;
 using Anthropic.SDK.Messaging;
+using ReviewBot.Core.Llm;
 
 namespace ReviewBot.Llm.Anthropic;
 
@@ -22,7 +23,7 @@ internal sealed class AnthropicSdkClient : IAnthropicClient
             requestInterceptor: null);
     }
 
-    public async Task<string> CreateMessageAsync(AnthropicMessageRequest request, CancellationToken ct)
+    public async Task<AnthropicMessageResult> CreateMessageAsync(AnthropicMessageRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -35,12 +36,26 @@ internal sealed class AnthropicSdkClient : IAnthropicClient
             .Where(text => !string.IsNullOrEmpty(text))
             .ToArray();
 
-        if (textParts is { Length: > 0 })
-        {
-            return string.Concat(textParts);
-        }
+        var content = textParts is { Length: > 0 }
+            ? string.Concat(textParts)
+            : response.Message.ToString();
 
-        return response.Message.ToString();
+        var usage = response.Usage is not null
+            ? new LlmTokenUsage(
+                PromptTokens: response.Usage.InputTokens,
+                CompletionTokens: response.Usage.OutputTokens,
+                CachedPromptTokens: response.Usage.CacheReadInputTokens)
+            : null;
+
+        return new AnthropicMessageResult(content, usage);
+    }
+
+    public async Task<int> CountTokensAsync(AnthropicTokenCountRequest request, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var response = await client.Messages.CountMessageTokensAsync(BuildTokenCountParameters(request), ct);
+        return response.InputTokens;
     }
 
     internal static MessageParameters BuildParameters(AnthropicMessageRequest request)
@@ -68,5 +83,21 @@ internal sealed class AnthropicSdkClient : IAnthropicClient
         };
 
         return parameters;
+    }
+
+    internal static MessageCountTokenParameters BuildTokenCountParameters(AnthropicTokenCountRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        return new MessageCountTokenParameters
+        {
+            Model = request.ModelName,
+            System = string.IsNullOrEmpty(request.SystemPrompt)
+                ? []
+                : [new SystemMessage(request.SystemPrompt)],
+            Messages = request.UserMessages
+                .Select(userMessage => new Message(RoleType.User, userMessage))
+                .ToList()
+        };
     }
 }

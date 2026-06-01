@@ -110,6 +110,53 @@ public sealed class SqliteRepoIndexTests : IDisposable
     }
 
     [Fact]
+    public async Task IndexAsyncMarksShaIndexedEvenWhenNoSymbolsAreStored()
+    {
+        var repoRoot = CreateDirectory("empty-index-repo");
+        WriteFile(repoRoot, "README.md", "# docs only\n");
+
+        var index = CreateIndex();
+        var key = new RepoIndexKey("octo", "reviewbot", "docs-only");
+
+        await index.IndexAsync(new RepoIndexRequest(key.Owner, key.Repo, key.Sha, repoRoot));
+
+        (await index.IsIndexedAsync(key)).Should().BeTrue();
+        (await index.FindAsync(key, "Anything", RepoSymbolKind.Type)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task IndexChangesAsyncCopiesUnchangedSymbolsAndReparsesChangedPaths()
+    {
+        var baseRoot = CreateDirectory("base-repo");
+        WriteFile(baseRoot, "src/Stable.cs", "public sealed class StableType { }\n");
+        WriteFile(baseRoot, "src/Changed.cs", "public sealed class OldChangedType { }\n");
+        WriteFile(baseRoot, "src/Deleted.cs", "public sealed class DeletedType { }\n");
+
+        var headRoot = CreateDirectory("head-repo");
+        WriteFile(headRoot, "src/Stable.cs", "public sealed class StableType { }\n");
+        WriteFile(headRoot, "src/Changed.cs", "public sealed class NewChangedType { }\n");
+        WriteFile(headRoot, "src/Added.cs", "public sealed class AddedType { }\n");
+
+        var index = CreateIndex();
+        var baseKey = new RepoIndexKey("octo", "reviewbot", "base");
+        var headKey = new RepoIndexKey("octo", "reviewbot", "head");
+
+        await index.IndexAsync(new RepoIndexRequest(baseKey.Owner, baseKey.Repo, baseKey.Sha, baseRoot));
+        await index.IndexChangesAsync(
+            new RepoIndexRequest(headKey.Owner, headKey.Repo, headKey.Sha, headRoot),
+            baseKey,
+            ["src/Changed.cs", "src/Added.cs", "src/Deleted.cs"]);
+
+        (await index.IsIndexedAsync(headKey)).Should().BeTrue();
+        (await index.FindAsync(headKey, "StableType", RepoSymbolKind.Type)).Should().ContainSingle();
+        (await index.FindAsync(headKey, "OldChangedType", RepoSymbolKind.Type)).Should().BeEmpty();
+        (await index.FindAsync(headKey, "NewChangedType", RepoSymbolKind.Type)).Should().ContainSingle();
+        (await index.FindAsync(headKey, "AddedType", RepoSymbolKind.Type)).Should().ContainSingle();
+        (await index.FindAsync(headKey, "DeletedType", RepoSymbolKind.Type)).Should().BeEmpty();
+        (await index.FindAsync(baseKey, "OldChangedType", RepoSymbolKind.Type)).Should().ContainSingle();
+    }
+
+    [Fact]
     public async Task DeleteUnusedBeforeAsyncEvictsOldRows()
     {
         var repoRoot = CreateDirectory("evict-repo");
@@ -124,6 +171,20 @@ public sealed class SqliteRepoIndexTests : IDisposable
 
         deleted.Should().BeGreaterThan(0);
         (await index.FindAsync(key, "EvictableType", RepoSymbolKind.Type)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void SqliteRepoIndexFactoryTracksNormalizedCacheDirectoriesOnce()
+    {
+        var factory = new SqliteRepoIndexFactory([new CSharpRepoSymbolParser()], TimeProvider.System);
+        var cacheDirectory = Path.Combine(tempRoot, "cache", "..", "cache");
+        var normalized = Path.GetFullPath(cacheDirectory);
+
+        factory.Create(cacheDirectory);
+        factory.Create(normalized);
+
+        factory.GetKnownCacheDirectories().Should().Equal(normalized);
+        Directory.Exists(normalized).Should().BeTrue();
     }
 
     public void Dispose()

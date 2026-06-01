@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ReviewBot.Core.Domain;
+using ReviewBot.Core.Otel;
 using ReviewBot.GitHub.Checks;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding.Build;
@@ -97,28 +98,42 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         {
             var checkResult = await TryGetHeadCheckSummaryAsync(request, ct).ConfigureAwait(false);
             var reader = readerFactory(request);
-            var rootFiles = await reader.ListRootFilesAsync(request.HeadSha, ct).ConfigureAwait(false);
-            var detector = detectors.FirstOrDefault(d => d.CanDetect(rootFiles));
-            if (detector is null)
-                return checkResult is null ? Empty : new GroundingContext(null, null, checkResult);
-
-            // Start the workspace clone concurrently with Tier 1 metadata extraction.
-            // The clone URL is known as soon as the detector matches; we don't need metadata first.
-            Task<IWorkspace?>? cloneTask = null;
-            if (request.Config.Build && workspaceFactory is not null)
-                cloneTask = StartCloneAsync(request, ct);
-
             LanguageMetadata? language = null;
-            try
+            Task<IWorkspace?>? cloneTask = null;
+
+            using (var languageActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.grounding.tier1_language"))
             {
-                language = await detector.ExtractMetadataAsync(reader, request.HeadSha, ct).ConfigureAwait(false);
-            }
-            catch
-            {
-                // Metadata extraction failed — cancel and dispose any in-flight clone to avoid leaks.
-                if (cloneTask is not null)
-                    await CancelAndDisposeCloneAsync(cloneTask).ConfigureAwait(false);
-                throw;
+                var rootFiles = await reader.ListRootFilesAsync(request.HeadSha, ct).ConfigureAwait(false);
+                languageActivity?.SetTag("grounding.root_files", rootFiles.Count);
+
+                var detector = detectors.FirstOrDefault(d => d.CanDetect(rootFiles));
+                if (detector is null)
+                {
+                    languageActivity?.SetTag("grounding.language_detected", false);
+                    return checkResult is null ? Empty : new GroundingContext(null, null, checkResult);
+                }
+
+                languageActivity?.SetTag("grounding.detector", detector.LanguageId);
+
+                // Start the workspace clone concurrently with Tier 1 metadata extraction.
+                // The clone URL is known as soon as the detector matches; we don't need metadata first.
+                if (request.Config.Build && workspaceFactory is not null)
+                    cloneTask = StartCloneAsync(request, ct);
+
+                try
+                {
+                    language = await detector.ExtractMetadataAsync(reader, request.HeadSha, ct).ConfigureAwait(false);
+                    languageActivity?.SetTag("grounding.language_detected", language is not null);
+                    if (language is not null)
+                        languageActivity?.SetTag("grounding.language_id", language.LanguageId);
+                }
+                catch
+                {
+                    // Metadata extraction failed — cancel and dispose any in-flight clone to avoid leaks.
+                    if (cloneTask is not null)
+                        await CancelAndDisposeCloneAsync(cloneTask).ConfigureAwait(false);
+                    throw;
+                }
             }
 
             BuildResult? buildResult = null;
@@ -155,9 +170,12 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         if (!request.Config.Tests || checkRunFetcher is null)
             return null;
 
+        using var activity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.grounding.tier3_tests");
+        activity?.SetTag("grounding.test_source", "github_checks");
+
         try
         {
-            return await checkRunFetcher
+            var result = await checkRunFetcher
                 .GetHeadCheckSummaryAsync(
                     request.Owner,
                     request.Repo,
@@ -165,6 +183,8 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
                     request.InstallationToken,
                     ct)
                 .ConfigureAwait(false);
+            activity?.SetTag("grounding.tests_found", result is not null);
+            return result;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -223,6 +243,9 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         TestResult? checkResult,
         CancellationToken ct)
     {
+        using var buildActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.grounding.tier2_build");
+        buildActivity?.SetTag("grounding.language_id", languageId);
+
         var buildRunner = buildRunners.FirstOrDefault(r => r.LanguageId == languageId);
 
         IWorkspace? workspace = null;
@@ -230,9 +253,15 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         {
             workspace = await cloneTask.ConfigureAwait(false);
             if (workspace is null || buildRunner is null)
+            {
+                buildActivity?.SetTag("grounding.build_ran", false);
                 return (null, checkResult);
+            }
 
             var buildResult = await buildRunner.RunAsync(workspace.LocalPath, request.Config, ct).ConfigureAwait(false);
+            buildActivity?.SetTag("grounding.build_ran", true);
+            buildActivity?.SetTag("grounding.build_success", buildResult.Success);
+
             var testResult = checkResult;
             if (request.Config.LocalTests && buildResult.Success)
             {
@@ -249,6 +278,8 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         }
         catch (Exception ex)
         {
+            buildActivity?.SetTag("grounding.build_ran", true);
+            buildActivity?.SetTag("grounding.build_success", false);
             logger.LogWarning(ex, "Build grounding failed for {Owner}/{Repo}; proceeding without build result",
                 request.Owner, request.Repo);
             return (new BuildResult(false, 0, 0, ex.Message), checkResult);
@@ -271,9 +302,15 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         if (runner is null)
             return null;
 
+        using var activity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.grounding.tier3_tests");
+        activity?.SetTag("grounding.test_source", "local");
+        activity?.SetTag("grounding.language_id", languageId);
+
         try
         {
             var testResult = await runner.RunAsync(workspacePath, config, ct).ConfigureAwait(false);
+            activity?.SetTag("grounding.tests_found", true);
+            activity?.SetTag("grounding.tests_failed", testResult.Failed);
             return AppendCheckOutput(testResult, checkResult);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -282,6 +319,8 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         }
         catch (Exception ex)
         {
+            activity?.SetTag("grounding.tests_found", true);
+            activity?.SetTag("grounding.tests_failed", 0);
             logger.LogWarning(ex, "Test grounding failed; proceeding with failed local test result");
             return AppendCheckOutput(new TestResult(0, 0, 0, ex.Message), checkResult);
         }

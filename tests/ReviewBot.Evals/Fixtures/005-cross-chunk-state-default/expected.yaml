@@ -1,0 +1,8 @@
+must_flag:
+  - path: src/ReviewBot.Api/Workers/ReviewWorker.cs
+    line_range: [30, 30]
+    severity_at_least: warning
+    topic: empty_sha_treated_as_delta
+    must_mention_any: ["empty", "null", "LastReviewedHeadSha", "full review", "delta"]
+max_total_comments: 3
+expected_review_state: REQUEST_CHANGES

@@ -105,6 +105,20 @@ Example:
 
 ---
 
+## Tracing
+
+Writes per-review JSON traces for local debugging and observability. Tracing is disabled by default in production-style configuration. Prompt and raw response text are also opt-in because they may contain source code, repository instructions, or sensitive prompt content.
+
+| Key | Env var | Type | Default | Description |
+|---|---|---|---|---|
+| `Enabled` | `REVIEWBOT__Tracing__Enabled` | `bool` | `false` | Write review trace JSON files when enabled |
+| `IncludePrompts` | `REVIEWBOT__Tracing__IncludePrompts` | `bool` | `false` | Include prompt and raw LLM response text in traces. Enable only in trusted development/debug environments. |
+| `MaxDiskMb` | `REVIEWBOT__Tracing__MaxDiskMb` | `int` | `500` | Maximum trace directory size before cleanup deletes the oldest trace files. Tune for deployment storage cost and retention needs. |
+| `RetentionDays` | `REVIEWBOT__Tracing__RetentionDays` | `int` | `14` | Delete trace files older than this many days |
+| `TracesDir` | `REVIEWBOT__Tracing__TracesDir` | `string` | `traces` | Directory where trace files are written |
+
+---
+
 ## Per-repo YAML reference
 
 Place `.github/review-bot.yml` (or `.github/review-bot.yaml`) in any repository where ReviewBot is installed. Missing fields fall back to the defaults shown below. Malformed YAML is logged as a warning and the default config is used so reviews are not blocked by config mistakes.
@@ -156,8 +170,8 @@ review:
 
   # Fraction of the available content budget used for each diff chunk. The
   # remaining headroom covers prompt assembly overhead.
-  # Default: 0.85
-  chunk_headroom: 0.85
+  # Default: 0.80
+  chunk_headroom: 0.80
 
   # Minimum confidence for inline comments to be posted: low, medium, or high.
   # Default: low (no confidence-based filtering).

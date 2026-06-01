@@ -1,0 +1,13 @@
+must_flag:
+  - path: src/ReviewBot.Api/Auth/JwtTokenValidator.cs
+    line_range: [17, 17]
+    severity_at_least: warning
+    topic: accepts_expired_tokens
+    must_mention_any: ["expired", "expires", "lifetime", "token"]
+  - path: src/ReviewBot.Core/Billing/InvoiceTotaler.cs
+    line_range: [15, 15]
+    severity_at_least: warning
+    topic: subtracts_discount_twice
+    must_mention_any: ["discount", "double", "twice", "total"]
+max_total_comments: 4
+expected_review_state: REQUEST_CHANGES

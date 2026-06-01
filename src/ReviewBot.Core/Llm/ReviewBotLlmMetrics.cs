@@ -45,4 +45,14 @@ public static class ReviewBotLlmMetrics
     }
 }
 
-public sealed record LlmTokenUsage(int PromptTokens, int CompletionTokens, int CachedPromptTokens = 0);
+public sealed record LlmTokenUsage(int PromptTokens, int CompletionTokens, int CachedPromptTokens = 0)
+{
+    public LlmTokenUsage Add(LlmTokenUsage? other)
+    {
+        if (other is null) return this;
+        return new LlmTokenUsage(
+            PromptTokens + other.PromptTokens,
+            CompletionTokens + other.CompletionTokens,
+            CachedPromptTokens + other.CachedPromptTokens);
+    }
+}

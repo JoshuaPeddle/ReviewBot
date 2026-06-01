@@ -17,6 +17,7 @@ public static class DependencyInjection
         services.TryAddSingleton(options);
         services.TryAddSingleton<IModelContextRegistry, ModelContextRegistry>();
         services.TryAddSingleton<IPromptTokenEstimator, HeuristicTokenEstimator>();
+        services.TryAddSingleton<IReviewPromptTokenEstimator, ReviewPromptTokenEstimator>();
 
         return services;
     }

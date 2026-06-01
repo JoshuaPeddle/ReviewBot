@@ -1,15 +1,19 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using ReviewBot.Api;
+using ReviewBot.Api.Cost;
 using ReviewBot.Api.Options;
+using ReviewBot.Api.Tracing;
 using ReviewBot.Api.Workers;
 using ReviewBot.Api.Webhooks;
 using ReviewBot.Core.Context;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Otel;
 using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Checks;
 using ReviewBot.GitHub.Config;
@@ -20,6 +24,7 @@ using ReviewBot.Grounding.Languages.Python;
 using ReviewBot.Llm.Anthropic;
 using ReviewBot.Llm.OpenAi;
 using ReviewBot.Persistence;
+using ReviewBot.Retrieval;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -55,6 +60,7 @@ builder.Services.AddOptions<WorkerOptions>()
 builder.Services.AddReviewLlmFactory();
 builder.Services.AddPromptBudgeting(options =>
     builder.Configuration.GetSection(ModelContextOptions.SectionName).Bind(options));
+builder.Services.AddRetrieval();
 builder.Services.AddAnthropicReviewLlm(options =>
     builder.Configuration.GetSection(AnthropicLlmOptions.SectionName).Bind(options));
 builder.Services.AddOpenAiReviewLlm(options =>
@@ -92,8 +98,15 @@ builder.Services.AddGrounding()
     .AddBuildRunner<PythonBuildRunner>()
     .AddTestRunner<DotNetTestRunner>()
     .AddTestRunner<PythonTestRunner>();
+builder.Services.AddReviewTracing();
+builder.Services.AddOptions<CostRateOptions>()
+    .BindConfiguration(CostRateOptions.SectionName);
+builder.Services.AddSingleton<IReviewCostCalculator, ReviewCostCalculator>();
 builder.Services.AddSingleton<ReviewBotMetrics>();
 builder.Services.AddOpenTelemetry()
+    .WithTracing(t => t
+        .AddSource(ReviewBotActivitySource.SourceName)
+        .AddOtlpExporter())
     .WithMetrics(m => m
         .AddMeter(ReviewBotMetrics.MeterName)
         .AddPrometheusExporter());
