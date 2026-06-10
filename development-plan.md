@@ -220,7 +220,7 @@ The retrieval foundation (diff symbol extractor, SQLite repo index, C# parser, c
 
 **What gets added:**
 
-- `IRetrievalProvider` (new interface): given a `ReviewRequest` + `PromptBudget`, returns a list of `RepositoryContextSnippet` up to the remaining budget. The budget portion reserved for retrieval is `min(retrieval.max_bytes / avg_bytes_per_token, content_budget * 0.3)` — retrieval never consumes more than 30% of content budget.
+- `IRetrievalProvider` (new interface): given a `ReviewRequest` + `PromptBudget`, returns a list of `RepositoryContextSnippet` up to the remaining budget. The budget portion reserved for retrieval is `min(retrieval.max_bytes / avg_bytes_per_token, content_budget * 0.2)` — retrieval never consumes more than 20% of content budget, with an average of 5 bytes per token.
 - `SqliteRetrievalProvider` (first implementation): calls `IDiffSymbolExtractor` on the diff, queries `IRepoIndex` for definitions and top-3 callers per symbol, deduplicates and ranks hits by relevance (definitions first, then callers), converts to snippets within budget.
 - Worker integration: when `retrieval.enabled: true`, run `IRetrievalProvider` in parallel with grounding (after token fetch and config), inject snippets into `ReviewRequest.RepositoryContext`, proceed to prompt assembly.
 - Incremental indexing: on each review, trigger a background `IRepoIndex.IndexAsync` for the PR's head SHA if that SHA is not already indexed. Use the GitHub compare API to fetch only changed-file paths, re-parse only those paths. The first review of a new SHA blocks until indexing completes; subsequent reviews of the same SHA are instant.
@@ -238,7 +238,7 @@ The retrieval foundation (diff symbol extractor, SQLite repo index, C# parser, c
 
 Shipped the first live retrieval path:
 
-- Added `IRetrievalProvider` / `SqliteRetrievalProvider`; it extracts symbols from changed C# diffs, looks up definitions and top-3 callers in the SQLite index, deduplicates hits, ranks definitions before callers, and emits `RepositoryContextSnippet` entries under a retrieval cap of `min(retrieval.max_bytes / 3, content_budget * 0.3, remaining_budget)`.
+- Added `IRetrievalProvider` / `SqliteRetrievalProvider`; it extracts symbols from changed C# diffs, looks up definitions and top-3 callers in the SQLite index, deduplicates hits, ranks definitions before callers, and emits `RepositoryContextSnippet` entries under a retrieval cap of `min(retrieval.max_bytes / 5, content_budget * 0.2, remaining_budget)`.
 - Added `IRepoIndex.IsIndexedAsync` plus `IRepoIndexFactory` so the worker and provider both honor the effective repo config's `retrieval.index_cache_dir` rather than using a single process-wide cache path.
 - Extended PR metadata with the head clone URL so the worker can materialize the PR head SHA when indexing is needed.
 - Wired `ReviewWorker` so `retrieval.enabled: true` checks whether the head SHA is indexed, clones/indexes it before lookup if not, injects returned snippets into `ReviewRequest.RepositoryContext`, and charges retrieval against the prompt budget before full-file context and diff budgeting.
@@ -293,7 +293,33 @@ Corrected assumptions discovered during implementation:
 
 - Eval `repo-state` files are not automatically data-only just because they live under fixture directories. The SDK project glob was compiling nested `.cs` fixture files; the eval project now excludes `Fixtures/**/repo-state/**/*.cs` from compilation.
 
-Remaining in Step 3: run the expanded fixtures against live no-retrieval and retrieval-enabled review modes to measure whether retrieval improves large/cross-chunk quality. The initial corpus now has one cross-chunk benchmark; add 2-4 more cross-chunk fixtures after the first live eval run shows which failure modes are most common.
+#### Completed live local retrieval eval slice (May 28, 2026)
+
+Shipped the Phase 22 measurement pass against a local OpenAI-compatible Qwen model:
+
+- Added a live eval runner to `tests/ReviewBot.Evals` (`run-live`) that sends fixture diffs through the production `PromptBuilder`, `OpenAiReviewLlm`, and `LlmResultParser`, writing raw scored result JSON files for the existing scorer/comparer.
+- The runner accepts a local OpenAI-compatible base URL, model name, API key environment variable, config path, retrieval toggle, context-token limit, and retrieval index cache path. It uses `.github/review-bot.yml` as the reference config while forcing grounding off for fixture-only evals.
+- Added manifest output for every live eval run. The manifest records model/base URL, retrieval mode, token usage, per-fixture comment count, symbols queried, retrieval snippet count, snippet paths, line ranges, token estimates, and content hashes. This makes it auditable whether retrieval was actually injected without storing prompt text in committed files.
+- Added fixture diff parsing so live evals can convert unified patches into `FileChange` objects with commentable line numbers.
+- Added three more cross-chunk reference fixtures:
+  - `006-cross-chunk-retry-default`
+  - `007-cross-chunk-pagination-default`
+  - `008-cross-chunk-signature-default`
+- Expanded the quick canned corpus from 5 to 8 fixtures and kept `make eval-quick` green.
+- Ran all 8 fixtures twice against `qwen/qwen3.5-9b` via the local OpenAI-compatible endpoint, then reran with manifests to verify retrieval injection:
+  - Manifest-backed no retrieval: `runs/eval-phase22-no-retrieval.json` — 3/8 fixtures passed, precision 0.636, recall 0.875, F1 0.737. Manifest: all fixtures had 0 retrieval snippets.
+  - Manifest-backed retrieval enabled: `runs/eval-phase22-retrieval.json` — 3/8 fixtures passed, precision 0.636, recall 0.875, F1 0.737. Manifest: all fixtures had retrieval snippets (2-8 per fixture; 45 snippets total, 54 queried symbols).
+  - Manifest-backed comparison: `runs/eval-phase22-comparison.json` — 1 regression, 2 improved fixtures, 5 unchanged. Retrieval fixed the large multi-directory fixture and improved the cross-chunk state fixture score, but the aggregate F1 was unchanged because the line-range fixture regressed on this local-model run.
+  - The first unmanifested run showed a stronger retrieval lift (F1 0.700 -> 0.800, 0 regressions), while the manifest-backed rerun showed equivalent aggregate F1. Treat the measured retrieval effect as noisy until repeated trials are added.
+
+Corrected assumptions discovered during implementation:
+
+- Several eval expectations used stale line numbers rather than the annotated new-file line numbers the prompt requires. Corrected `001`, `002`, `006`, and `007` expectations plus their canned results.
+- The local OpenAI-compatible server rejected `response_format: json_object`. The live eval runner now uses text responses and relies on the existing strict JSON prompt plus parser/repair path, matching the compatibility needs of local servers.
+- The first measured retrieval lift was not stable across a rerun. The manifest proves retrieval context was present, but local Qwen output variance can swamp the aggregate score on a small 8-fixture corpus.
+- The remaining cross-chunk failures are mostly duplicate cross-file comments for one root cause, which is a scoring/post-filtering calibration issue rather than retrieval failing to surface the needed context.
+
+Remaining in Phase 22: no known code or eval-measurement slice remains. Retrieval quality still has follow-on work, but that belongs to future prompt/scoring calibration, tree-sitter/Roslyn retrieval quality, or later product phases.
 
 ---
 
@@ -556,7 +582,7 @@ Single Basic Auth password for the whole UI. No multi-tenant auth in v1 — this
 
 **Budget-aware full-file latency tradeoff.** Full-file context used to fetch in parallel with grounding. It now waits for grounding because the full prompt budget depends on grounding token cost. Status: opened May 27. The correctness tradeoff is intentional for small-context models, but it may give back part of the Phase 21 latency win on repos with both grounding and full-file context enabled. Mitigation: keep full-file context opt-in (`full_file_max_bytes: 0` by default), measure stage timings in Phase 23 traces, and revisit speculative fetch-with-post-filtering if latency becomes visible in real deployments.
 
-**Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. Status: partially measured as of May 28; the quick eval corpus now includes one cross-chunk reference fixture and one large multi-directory fixture. This remains open until live no-retrieval vs retrieval-enabled eval runs show the delta, and until the corpus has 3–5 cross-chunk fixtures covering the common failure shapes. Expect multi-pass alone (without retrieval) to miss these; retrieval's job is to close the gap.
+**Multi-pass quality on cross-chunk bugs.** A bug that requires context from two files in different chunks will not be caught until retrieval injects the missing context. Status: measured for Phase 22 as of May 28; the quick eval corpus now includes four cross-chunk reference fixtures plus one large multi-directory fixture, and live-run manifests verify retrieval snippets were injected in retrieval mode. The measured quality lift is noisy: one run improved F1 from 0.700 to 0.800 with no regressions, while the manifest-backed rerun had unchanged aggregate F1 with 1 regression, 2 improvements, and 5 unchanged fixtures. Remaining exposure is duplicate comments on both related files for the same root cause plus local-model variance. Mitigation: add repeated-trial eval aggregation, then use future eval/prompt calibration and post-filtering work to collapse duplicate cross-file comments.
 
 **Retrieval parser quality.** The lexical C# parser misclassifies edge-case syntax and produces false positives on symbol extraction. Symbol lookup hits with wrong matches dilute the retrieval context budget. Measure via eval: if retrieval is on but scores lower than no retrieval, the parser noise is the cause. Switching to tree-sitter or Roslyn is the fix; do it after the measurement confirms the gap.
 

@@ -28,9 +28,15 @@ public static class EvalCli
                 Usage:
                   dotnet run --project tests/ReviewBot.Evals -- score --fixture <dir> --result <llm-result.json> [--out <score.json>]
                   dotnet run --project tests/ReviewBot.Evals -- score --fixtures <dir> --results <dir> [--out <run.json>]
+                  dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>]
                   dotnet run --project tests/ReviewBot.Evals -- compare <baseline-run.json> <candidate-run.json> [--out <comparison.json>]
                 """).ConfigureAwait(false);
             return 0;
+        }
+
+        if (string.Equals(args[0], "run-live", StringComparison.OrdinalIgnoreCase))
+        {
+            return await RunLiveAsync(args, output, error).ConfigureAwait(false);
         }
 
         if (string.Equals(args[0], "compare", StringComparison.OrdinalIgnoreCase))
@@ -45,6 +51,76 @@ public static class EvalCli
         }
 
         return await RunScoreAsync(args, output, error).ConfigureAwait(false);
+    }
+
+    private static async Task<int> RunLiveAsync(string[] args, TextWriter output, TextWriter error)
+    {
+        var fixturesPath = ReadOption(args, "--fixtures");
+        var resultsPath = ReadOption(args, "--results");
+        var baseUrl = ReadOption(args, "--base-url");
+        var model = ReadOption(args, "--model");
+        var apiKeyEnv = ReadOption(args, "--api-key-env") ?? "REVIEWBOT_EVAL_OPENAI_API_KEY";
+        var configPath = ReadOption(args, "--config");
+        var manifestPath = ReadOption(args, "--manifest");
+        var retrieval = ParseBool(ReadOption(args, "--retrieval"), defaultValue: false);
+        var contextTokens = ParseInt(ReadOption(args, "--context-tokens"), defaultValue: 32768);
+        var indexCacheDir = ReadOption(args, "--index-cache-dir") ??
+            Path.Combine(Path.GetTempPath(), "reviewbot-eval-index", Guid.NewGuid().ToString("N"));
+
+        if (fixturesPath is null || resultsPath is null || baseUrl is null || model is null)
+        {
+            await error.WriteLineAsync(
+                "The run-live command requires --fixtures, --results, --base-url, and --model.")
+                .ConfigureAwait(false);
+            return 2;
+        }
+
+        var apiKey = Environment.GetEnvironmentVariable(apiKeyEnv);
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            await error.WriteLineAsync(
+                $"The run-live command requires API key environment variable {apiKeyEnv}.")
+                .ConfigureAwait(false);
+            return 2;
+        }
+
+        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var parsedBaseUrl))
+        {
+            await error.WriteLineAsync("--base-url must be an absolute URI.").ConfigureAwait(false);
+            return 2;
+        }
+
+        try
+        {
+            manifestPath ??= Path.Combine(resultsPath, "manifest.json");
+            var results = await new LiveEvalRunner()
+                .RunAsync(
+                    new LiveEvalOptions(
+                        fixturesPath,
+                        resultsPath,
+                        manifestPath,
+                        parsedBaseUrl,
+                        model,
+                        apiKey,
+                        retrieval,
+                        configPath,
+                        contextTokens,
+                        indexCacheDir),
+                    output)
+                .ConfigureAwait(false);
+
+            var promptTokens = results.Sum(result => result.TokenUsage?.PromptTokens ?? 0);
+            var completionTokens = results.Sum(result => result.TokenUsage?.CompletionTokens ?? 0);
+            await output.WriteLineAsync(
+                $"Wrote {results.Count} result files to {resultsPath} (prompt_tokens={promptTokens}, completion_tokens={completionTokens}).")
+                .ConfigureAwait(false);
+            return 0;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or HttpRequestException or ArgumentException)
+        {
+            await error.WriteLineAsync(exception.Message).ConfigureAwait(false);
+            return 1;
+        }
     }
 
     private static async Task<int> RunScoreAsync(string[] args, TextWriter output, TextWriter error)
@@ -209,6 +285,20 @@ public static class EvalCli
 
         return null;
     }
+
+    private static bool ParseBool(string? value, bool defaultValue) =>
+        string.IsNullOrWhiteSpace(value)
+            ? defaultValue
+            : bool.TryParse(value, out var parsed)
+                ? parsed
+                : defaultValue;
+
+    private static int ParseInt(string? value, int defaultValue) =>
+        string.IsNullOrWhiteSpace(value)
+            ? defaultValue
+            : int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : defaultValue;
 
     private static string[] ReadPositionals(string[] args)
     {

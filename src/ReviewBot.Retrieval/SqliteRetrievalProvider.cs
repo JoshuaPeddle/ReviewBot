@@ -8,8 +8,8 @@ namespace ReviewBot.Retrieval;
 
 public sealed class SqliteRetrievalProvider : IRetrievalProvider
 {
-    private const double RetrievalContentBudgetFraction = 0.3d;
-    private const double AverageBytesPerToken = 3d;
+    private const double RetrievalContentBudgetFraction = 0.2d;
+    private const double AverageBytesPerToken = 5d;
     private const int MaxCallersPerSymbol = 3;
 
     private readonly IRepoIndexFactory indexFactory;

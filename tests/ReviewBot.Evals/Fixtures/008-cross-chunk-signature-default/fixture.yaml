@@ -1,0 +1,7 @@
+name: Cross-chunk webhook signature default disables verification
+category: cross_chunk_reference
+difficulty: high
+description: |
+  The webhook option default changes to not require signatures while the endpoint
+  now gates validation on that option. The security regression is visible only by
+  connecting the default with the endpoint check.

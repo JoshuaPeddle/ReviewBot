@@ -1,0 +1,12 @@
+{
+  "summary": "The pagination configuration now allows a zero page size to reach the fetch call.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.GitHub/Pulls/PullRequestFetcher.cs",
+      "line": 23,
+      "severity": "warning",
+      "confidence": "high",
+      "body": "PageSize now defaults to 0, but this validation only rejects negative values. The default will pass a zero per-page value to the GitHub fetch instead of using a valid page size."
+    }
+  ]
+}

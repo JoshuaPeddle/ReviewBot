@@ -3,7 +3,7 @@
   "comments": [
     {
       "path": "src/ReviewBot.Api/Webhooks/WebhookSignatureValidator.cs",
-      "line": 21,
+      "line": 20,
       "severity": "error",
       "confidence": "high",
       "body": "Returning whether the secret is blank leaks configuration state across the webhook trust boundary. Missing or malformed signatures should fail closed without revealing anything about the secret."

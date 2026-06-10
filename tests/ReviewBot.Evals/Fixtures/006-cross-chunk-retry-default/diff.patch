@@ -1,0 +1,22 @@
+diff --git a/src/ReviewBot.Core/Options/RetryOptions.cs b/src/ReviewBot.Core/Options/RetryOptions.cs
+index 6a11111..6a22222 100644
+--- a/src/ReviewBot.Core/Options/RetryOptions.cs
++++ b/src/ReviewBot.Core/Options/RetryOptions.cs
+@@ -3,5 +3,5 @@ namespace ReviewBot.Core.Options;
+ public sealed record RetryOptions
+ {
+-    public int MaxAttempts { get; init; } = 3;
++    public int MaxAttempts { get; init; } = 0;
+ }
+diff --git a/src/ReviewBot.Api/Workers/RetryLoop.cs b/src/ReviewBot.Api/Workers/RetryLoop.cs
+index 7b11111..7b22222 100644
+--- a/src/ReviewBot.Api/Workers/RetryLoop.cs
++++ b/src/ReviewBot.Api/Workers/RetryLoop.cs
+@@ -7,7 +7,7 @@ public sealed class RetryLoop
+     public async Task RunAsync(RetryOptions options, Func<Task> action)
+     {
+-        if (options.MaxAttempts <= 0)
++        if (options.MaxAttempts < 0)
+         {
+             throw new ArgumentOutOfRangeException(nameof(options.MaxAttempts));
+         }

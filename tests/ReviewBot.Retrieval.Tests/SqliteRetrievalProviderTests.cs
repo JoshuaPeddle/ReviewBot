@@ -55,7 +55,7 @@ public sealed class SqliteRetrievalProviderTests
     }
 
     [Fact]
-    public async Task GetContextAsyncCapsSnippetsToThirtyPercentOfContentBudget()
+    public async Task GetContextAsyncCapsSnippetsToTwentyPercentOfContentBudget()
     {
         var index = new FakeRepoIndex();
         index.Results[("GetAsync", RepoSymbolKind.Method)] =
@@ -86,8 +86,8 @@ public sealed class SqliteRetrievalProviderTests
         var result = await provider.GetContextAsync("octo", "reviewbot", request, budget);
 
         result.Snippets.Should().ContainSingle();
-        result.Snippets[0].Content.Should().HaveLength(90);
-        result.Budget.ConsumedSections.Should().Contain(new PromptBudgetSection("retrieval", 30));
+        result.Snippets[0].Content.Should().HaveLength(100);
+        result.Budget.ConsumedSections.Should().Contain(new PromptBudgetSection("retrieval", 34));
     }
 
     [Fact]

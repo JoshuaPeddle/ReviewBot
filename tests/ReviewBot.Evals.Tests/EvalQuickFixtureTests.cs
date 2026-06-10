@@ -4,7 +4,7 @@ namespace ReviewBot.Evals.Tests;
 
 public sealed class EvalQuickFixtureTests
 {
-    private const int ExpectedQuickFixtureCount = 5;
+    private const int ExpectedQuickFixtureCount = 8;
 
     [Fact]
     public async Task QuickFixtureCorpusScoresCleanly()
@@ -54,6 +54,7 @@ public sealed class EvalQuickFixtureTests
 
         categories.Should().Contain("large_pr_chunking");
         categories.Should().Contain("cross_chunk_reference");
+        categories.Count(category => category == "cross_chunk_reference").Should().BeGreaterThanOrEqualTo(4);
     }
 
     private static string FindRepoRoot()

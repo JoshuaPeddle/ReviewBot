@@ -1,0 +1,8 @@
+must_flag:
+  - path: src/ReviewBot.Api/Webhooks/WebhookEndpoint.cs
+    line_range: [15, 15]
+    severity_at_least: error
+    topic: webhook_signature_disabled_by_default
+    must_mention_any: ["signature", "RequireSignature", "default", "false", "unauthenticated"]
+max_total_comments: 3
+expected_review_state: REQUEST_CHANGES
