@@ -218,12 +218,15 @@ review:
     on_push: false
 
 retrieval:
-  # Deterministic repository-context retrieval. The config and prompt lane are
-  # present for Phase 22, but the worker does not fetch retrieval snippets yet.
-  # Default: false until the retrieval provider is wired end-to-end.
+  # Deterministic repository-context retrieval. When enabled, the worker
+  # extracts symbols from changed files, looks them up in a SHA-scoped SQLite
+  # symbol index, and injects definitions plus top-3 callers as snippets
+  # under `## Repository context`. Symbol-aware budget capping prevents
+  # retrieval from consuming more than 20% of the content budget.
+  # Default: false. Set to true once you have a writable index_cache_dir.
   enabled: false
 
-  # Maximum retrieved context bytes to include in a review once retrieval is active.
+  # Maximum retrieved context bytes to include in a review.
   max_bytes: 102400
 
   # Symbol lookup mode: callers, definitions, or both.
