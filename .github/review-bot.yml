@@ -18,8 +18,7 @@ model:
   provider: openai
 
   # Model name passed to the provider API.
-  # Default: claude-opus-4-7 (anthropic) / gpt-5.1 (openai)
-  name: qwen/qwen3.5-9b
+  name: qwen/qwen3.6-27b
 
 review:
   # Post inline comments on individual diff lines.

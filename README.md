@@ -1,6 +1,8 @@
 # ReviewBot
 
-A self-hosted GitHub App that reviews pull requests with any Anthropic, OpenAI-compatible, or local LLM. MIT-licensed; designed to be brought up on your own hardware with a small local model (Qwen, Llama, Granite) and reviewed against real production PRs.
+A self-hosted GitHub App that reviews pull requests with any Anthropic, OpenAI-compatible, or local LLM. MIT-licensed; designed to be brought up on your own hardware with a strong local model and pointed at real production PRs.
+
+The reference local profile is **`qwen/qwen3.6-27b` at 72K context** — runs on a 24GB NVIDIA card (3090/4090/A5000) or a 32GB+ M-series Mac with unified memory. Smaller 7B-class models (Qwen 2.5 7B, Llama 3.1 8B) work on 8–16GB GPUs with reduced quality.
 
 Reviews fire automatically when a PR is opened, reopened, or updated, or on demand when someone comments `/review` on the PR.
 
@@ -36,7 +38,7 @@ GitHub ──webhook──► POST /webhook ──► Channel Queue ──► Re
 
 ## Quick start — local model with Docker Compose
 
-The fastest path: ReviewBot + Ollama + a small local model, one command.
+The fastest path: ReviewBot + Ollama + a local model, one command.
 
 ```bash
 cp .env.example .env
@@ -46,10 +48,15 @@ docker compose up
 
 The compose stack runs:
 
-- `ollama` — pulls `qwen2.5:7b-instruct-q4_K_M` (~5 GB) on first start.
+- `ollama` — pulls the model named by `REVIEWBOT_MODEL_NAME` on first start. Default: the reference profile `qwen/qwen3.6-27b` (~17 GB pull, needs a 24GB GPU or 32GB+ M-series Mac).
 - `reviewbot` — the bot, listening on `:8080`.
+- `jaeger` — OTel trace viewer at [http://localhost:16686](http://localhost:16686). Comment out if you have your own collector.
 
 Confirm it's up: `curl http://localhost:8080/healthz`.
+
+If your hardware can't host the reference model, set `REVIEWBOT_MODEL_NAME=qwen2.5:7b-instruct-q4_K_M` (or `llama3.1:8b-instruct-q4_K_M`) in `.env` before bringing the stack up. Expect lower review quality.
+
+If you already run a separate OpenAI-compatible server (LM Studio, vLLM, a remote GPU box), comment out the `ollama` and `model-puller` services in `docker-compose.yml` and set `REVIEWBOT__OpenAi__BaseUrl` to your endpoint.
 
 Forward GitHub webhooks to your machine with [smee.io](https://smee.io) or [ngrok](https://ngrok.com) and point your GitHub App's webhook URL at it.
 
@@ -90,7 +97,7 @@ enabled: true
 
 model:
   provider: openai             # anthropic | openai (openai works for Ollama too)
-  name: qwen2.5:7b-instruct-q4_K_M
+  name: qwen/qwen3.6-27b       # reference profile; swap for any local or hosted model
 
 review:
   inline_comments: true
@@ -139,7 +146,7 @@ export REVIEWBOT__OpenAi__ResponseFormat="text"     # most local servers don't s
 ```yaml
 model:
   provider: openai
-  name: qwen2.5:7b-instruct-q4_K_M
+  name: qwen/qwen3.6-27b        # or qwen2.5:7b-instruct-q4_K_M on smaller hardware
 ```
 
 ### Anthropic
@@ -210,9 +217,11 @@ The metric `reviewbot.cost.usd_total` is exposed alongside the existing `reviewb
 make eval-quick                # canned 8-fixture smoke
 dotnet run --project tests/ReviewBot.Evals -- run-live \
   --base-url http://localhost:11434/v1 \
-  --model qwen2.5:7b-instruct-q4_K_M \
+  --model qwen/qwen3.6-27b \
   --retrieval-enabled
 ```
+
+The reference model for measuring retrieval quality is `qwen/qwen3.6-27b`. The historical numbers in [CHANGELOG.md](CHANGELOG.md) were taken on the smaller `qwen3.5-9b` — those remain as a record but should not be used as the v0.3 ship-gate baseline.
 
 Live runs emit a manifest (`runs/...-manifest.json`) recording which retrieval snippets were injected per fixture so you can audit retrieval signal independent of LLM variance.
 

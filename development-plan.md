@@ -8,13 +8,15 @@ ReviewBot is a self-hosted GitHub App that reviews pull requests with any Anthro
 
 ## Strategic context
 
-The wedge is being a competent self-hosted alternative for the common adoption profile: a small local model (Qwen 9B, 32K context) on a developer's own hardware, reviewing real production PRs. The critical reliability gap that profile exposed — silent prompt overflow on small models — is structurally closed (Phase 22 shipped budget-aware prompts, multi-pass chunking, and retrieval; Phase 23 shipped traces, OTel, and cost). The remaining gap to v0.3 is adoption ergonomics and measured proof of quality, not more features.
+The wedge is being a competent self-hosted alternative for the common adoption profile: a developer running a strong local model on their own hardware, reviewing real production PRs. The reference profile is **`qwen/qwen3.6-27b` at 72K context** — fits a 24GB NVIDIA card (3090/4090/A5000) or a 32GB+ M-series Mac with unified memory. A 7B-class model remains a documented fallback for tighter machines, but it is not the reference for quality measurement.
+
+The critical reliability gap the small-model profile exposed — silent prompt overflow — is structurally closed (Phase 22 shipped budget-aware prompts, multi-pass chunking, and retrieval; Phase 23 shipped traces, OTel, and cost). The remaining gap to v0.3 is adoption ergonomics and measured proof of quality, not more features.
 
 ## v0.3 ship gate
 
 Three conditions, all measured:
 
-1. **Quality**: retrieval lifts F1 by ≥0.05 on a ≥16-fixture corpus, averaged over 3 trials, on the reference local model. Today the manifest-backed run shows aggregate F1 unchanged (0.737 → 0.737, 1 regression, 2 improved, 5 unchanged) — the case has not been made.
+1. **Quality**: retrieval lifts F1 by ≥0.05 on a ≥16-fixture corpus, averaged over 3 trials, on the reference local model (`qwen/qwen3.6-27b`, 72K context). Today's existing data point is on the smaller `qwen3.5-9b` and shows aggregate F1 unchanged (0.737 → 0.737, 1 regression, 2 improved, 5 unchanged) — the case has not been made, and the corpus needs to be re-run on the reference model.
 2. **Adoption**: one-command Docker bring-up works end-to-end against a real GitHub App, documented in the README.
 3. **Honesty**: README accurately reflects shipped features, with the local-model story front and center.
 
@@ -97,7 +99,7 @@ Currently half-deprecated: spec says it becomes opt-in once retrieval is stable,
 - **Severity calibration.** The LLM overuses `error`, which triggers `request_changes_on_error` as a false merge block. Eval should report severity distribution per model; add fixture categories that should produce exactly one `error` and zero `error` despite real bugs.
 - **Pre-LLM secret scrub.** Regex over diff and retrieved files before prompt assembly. Either redact or abort. Closes the gap when a secret ends up in a `.cs` file.
 - **Inline `suggestion` blocks.** GitHub renders ` ```suggestion ``` ` as one-click diffs. Prompt mentions it but model rarely produces them. Add eval fixtures grading for mechanical fixes.
-- **Public eval scoreboard.** Run the eval against Claude Opus 4.7, Sonnet 4.6, GPT-5.1, Qwen 9B, Llama 3.1 8B. Publish in README.
+- **Public eval scoreboard.** Run the eval against Claude Opus 4.7, Sonnet 4.6, GPT-5.1, qwen/qwen3.6-27b (reference), qwen2.5:7b (fallback), Llama 3.1 8B. Publish in README.
 - **Smaller model for self-critique.** Critique is binary classification per comment. A cheaper/faster model would make critique cost-free. Wire after deliverable #2 makes per-phase cost visible.
 - **Conversation continuity.** When a PR author replies "this is intentional, see ADR-042," don't re-flag next push. Requires comment-thread tracking + reply classification. Defer to v2.
 - **Phase 24 — WebUI.** Blazor Server, single Basic Auth password. Pages: reviews list, trace detail, metrics dashboard, config editor, eval results browser. Deferred until v0.3 ships.

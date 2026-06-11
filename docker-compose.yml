@@ -36,8 +36,12 @@ services:
     environment:
       - OLLAMA_HOST=http://ollama:11434
     entrypoint: ["sh", "-c"]
+    # The reference model is qwen/qwen3.6-27b. If your Ollama registry can't
+    # resolve that exact tag, set REVIEWBOT_MODEL_NAME in .env to the closest
+    # available Qwen3 ~27-32B tag, or comment out the ollama services and
+    # point REVIEWBOT__OpenAi__BaseUrl at an external LM Studio / vLLM server.
     command:
-      - "ollama pull ${REVIEWBOT_MODEL_NAME:-qwen2.5:7b-instruct-q4_K_M}"
+      - "ollama pull ${REVIEWBOT_MODEL_NAME:-qwen/qwen3.6-27b}"
     restart: "no"
 
   reviewbot:
@@ -62,7 +66,7 @@ services:
       # Local model via Ollama (OpenAI-compatible endpoint)
       - REVIEWBOT__OpenAi__ApiKey=ollama
       - REVIEWBOT__OpenAi__BaseUrl=http://ollama:11434/v1
-      - REVIEWBOT__OpenAi__ModelName=${REVIEWBOT_MODEL_NAME:-qwen2.5:7b-instruct-q4_K_M}
+      - REVIEWBOT__OpenAi__ModelName=${REVIEWBOT_MODEL_NAME:-qwen/qwen3.6-27b}
       - REVIEWBOT__OpenAi__ResponseFormat=text
 
       # Persistence (sqlite on a volume so state survives restarts)
