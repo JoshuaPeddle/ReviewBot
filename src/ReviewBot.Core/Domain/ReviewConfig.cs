@@ -74,7 +74,11 @@ public sealed record RetrievalConfig(
     public static RetrievalConfig Default { get; } = new(
         Enabled: false,
         MaxBytes: 102_400,
-        SymbolLookupDepth: CallersDepth,
+        // "both" surfaces method/type definitions with their bodies AND top-K
+        // caller spans. Definitions are what give the model semantic context
+        // for cross-file reasoning; "callers" alone returns only one-line
+        // usage rows and silently bypasses body extraction.
+        SymbolLookupDepth: BothDepth,
         Embeddings: false,
         IndexCacheDir: "/var/cache/reviewbot/index");
 }

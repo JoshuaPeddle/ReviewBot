@@ -1,0 +1,12 @@
+{
+  "summary": "UserRepository.FindByNameAsync interpolates the user-supplied name directly into SQL while UserSearchEndpoint forwards an unsanitized query parameter.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Persistence/Users/UserRepository.cs",
+      "line": 13,
+      "severity": "error",
+      "confidence": "high",
+      "body": "Switching from a parameterized @name bind to string interpolation introduces a SQL injection vulnerability. UserSearchEndpoint passes the value straight from the query string. Revert to the parameterized form so Dapper escapes the value safely."
+    }
+  ]
+}

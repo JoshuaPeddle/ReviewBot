@@ -4,5 +4,10 @@ must_flag:
     severity_at_least: error
     topic: webhook_signature_disabled_by_default
     must_mention_any: ["signature", "RequireSignature", "default", "false", "unauthenticated"]
+    # The bug spans both files; flagging the default in WebhookOptions.cs is an
+    # equally valid cause-site flag for the same root cause.
+    additional_locations:
+      - path: src/ReviewBot.Api/Webhooks/WebhookOptions.cs
+        line_range: [5, 5]
 max_total_comments: 3
 expected_review_state: REQUEST_CHANGES

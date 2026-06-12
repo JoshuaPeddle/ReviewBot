@@ -64,34 +64,120 @@ public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
         path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ||
         path.EndsWith(".csx", StringComparison.OrdinalIgnoreCase);
 
+    // Tuned for local 27B / consumer-hardware deployments where very large
+    // retrieval prompts have caused LM Studio / Ollama to OOM or 400. Tighter
+    // caps lose long-method context but keep the pipeline reliable. Bump for
+    // cloud / larger-context deployments.
+    private const int MaxBodyLines = 30;
+
     public IReadOnlyList<RepoSymbol> Parse(string path, string content)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(content);
 
-        var symbols = new List<RepoSymbol>();
-        var seen = new HashSet<(string Name, RepoSymbolKind Kind, RepoSymbolRole Role, int Line)>();
+        var rawLines = SplitLines(content).ToArray();
+        var sanitized = new string[rawLines.Length];
         var inBlockComment = false;
         var rawStringQuoteCount = 0;
-        var lineNumber = 0;
-
-        foreach (var rawLine in SplitLines(content))
+        for (var i = 0; i < rawLines.Length; i++)
         {
-            lineNumber++;
-            var code = CSharpLexicalSanitizer.StripCommentsAndStrings(
-                rawLine,
+            sanitized[i] = CSharpLexicalSanitizer.StripCommentsAndStrings(
+                rawLines[i],
                 ref inBlockComment,
                 ref rawStringQuoteCount);
+        }
 
+        var symbols = new List<RepoSymbol>();
+        var seen = new HashSet<(string Name, RepoSymbolKind Kind, RepoSymbolRole Role, int Line)>();
+
+        for (var i = 0; i < rawLines.Length; i++)
+        {
+            var code = sanitized[i];
             if (string.IsNullOrWhiteSpace(code))
             {
                 continue;
             }
 
-            AddSymbolsFromLine(path, code, lineNumber, symbols, seen);
+            AddSymbolsFromLine(path, code, i + 1, symbols, seen, rawLines, sanitized);
         }
 
         return symbols;
+    }
+
+    private static (string? Body, int? StartLine, int? EndLine) ExtractMethodBody(
+        string[] rawLines,
+        string[] sanitized,
+        int declarationIndex)
+    {
+        // Expression-bodied method: `public int X() => 42;` — body is the declaration line.
+        if (sanitized[declarationIndex].Contains("=>", StringComparison.Ordinal))
+        {
+            return (rawLines[declarationIndex], declarationIndex + 1, declarationIndex + 1);
+        }
+
+        var depth = 0;
+        var bodyStartIndex = -1;
+        for (var i = declarationIndex; i < rawLines.Length; i++)
+        {
+            var line = sanitized[i];
+            var opens = CountChar(line, '{');
+            var closes = CountChar(line, '}');
+            depth += opens - closes;
+
+            if (bodyStartIndex < 0 && opens > 0)
+            {
+                // Body starts at the declaration line so the signature stays attached.
+                bodyStartIndex = declarationIndex;
+            }
+
+            if (bodyStartIndex >= 0 && depth <= 0)
+            {
+                var bodyEndIndex = i;
+                var bodyText = JoinLines(rawLines, bodyStartIndex, bodyEndIndex);
+                return (bodyText, bodyStartIndex + 1, bodyEndIndex + 1);
+            }
+
+            // Cap runaway bodies (very long methods or unbalanced braces).
+            if (bodyStartIndex >= 0 && i - bodyStartIndex >= MaxBodyLines - 1)
+            {
+                var cappedEnd = bodyStartIndex + MaxBodyLines - 1;
+                var bodyText = JoinLines(rawLines, bodyStartIndex, cappedEnd);
+                return (bodyText, bodyStartIndex + 1, cappedEnd + 1);
+            }
+        }
+
+        // No body found (interface/abstract method with `;`, or partial file). Leave null.
+        return (null, null, null);
+    }
+
+    private static int CountChar(string value, char target)
+    {
+        var count = 0;
+        foreach (var ch in value)
+        {
+            if (ch == target)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static string JoinLines(string[] rawLines, int startIndex, int endIndex)
+    {
+        var builder = new System.Text.StringBuilder();
+        for (var i = startIndex; i <= endIndex; i++)
+        {
+            if (i > startIndex)
+            {
+                builder.Append('\n');
+            }
+
+            builder.Append(rawLines[i]);
+        }
+
+        return builder.ToString();
     }
 
     private static void AddSymbolsFromLine(
@@ -99,10 +185,13 @@ public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
         string code,
         int lineNumber,
         List<RepoSymbol> symbols,
-        HashSet<(string Name, RepoSymbolKind Kind, RepoSymbolRole Role, int Line)> seen)
+        HashSet<(string Name, RepoSymbolKind Kind, RepoSymbolRole Role, int Line)> seen,
+        string[] rawLines,
+        string[] sanitized)
     {
         var signature = code.Trim();
         var definitionsOnLine = new HashSet<string>(StringComparer.Ordinal);
+        var declarationIndex = lineNumber - 1;
 
         var usingMatch = UsingPattern.Match(code);
         if (usingMatch.Success)
@@ -123,7 +212,8 @@ public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
         {
             var name = methodDeclaration.Groups["name"].Value;
             definitionsOnLine.Add(name);
-            AddSymbol(name, RepoSymbolKind.Method, RepoSymbolRole.Definition);
+            var (body, bodyStart, bodyEnd) = ExtractMethodBody(rawLines, sanitized, declarationIndex);
+            AddSymbol(name, RepoSymbolKind.Method, RepoSymbolRole.Definition, body, bodyStart, bodyEnd);
         }
 
         var fieldDeclaration = FieldDeclarationPattern.Match(code);
@@ -165,7 +255,13 @@ public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
             AddSymbol(name, RepoSymbolKind.Type, RepoSymbolRole.Usage);
         }
 
-        void AddSymbol(string name, RepoSymbolKind kind, RepoSymbolRole role)
+        void AddSymbol(
+            string name,
+            RepoSymbolKind kind,
+            RepoSymbolRole role,
+            string? body = null,
+            int? bodyStartLine = null,
+            int? bodyEndLine = null)
         {
             if (string.IsNullOrWhiteSpace(name) ||
                 IsKeyword(name) ||
@@ -174,7 +270,7 @@ public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
                 return;
             }
 
-            symbols.Add(new RepoSymbol(name, kind, role, path, lineNumber, signature));
+            symbols.Add(new RepoSymbol(name, kind, role, path, lineNumber, signature, body, bodyStartLine, bodyEndLine));
         }
     }
 

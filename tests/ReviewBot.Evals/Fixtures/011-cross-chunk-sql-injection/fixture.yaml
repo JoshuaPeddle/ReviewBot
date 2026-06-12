@@ -1,0 +1,9 @@
+name: Repository swaps parameterized SQL for string interpolation while endpoint forwards user input
+category: cross_chunk_reference
+difficulty: high
+description: |
+  UserRepository.FindByNameAsync stops binding the name as a parameter and
+  interpolates it directly into the SQL string. The change is innocuous on its
+  own until the reviewer notices UserSearchEndpoint takes the name straight
+  from a query string and forwards it. The bug is a SQL injection vulnerability
+  visible only when both files are considered together.

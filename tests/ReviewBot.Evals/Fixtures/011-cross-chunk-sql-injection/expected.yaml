@@ -1,0 +1,18 @@
+must_flag:
+  - path: src/ReviewBot.Persistence/Users/UserRepository.cs
+    line_range: [11, 13]
+    severity_at_least: error
+    topic: sql_injection
+    must_mention_any:
+      - SQL injection
+      - sanitize
+      - parameteri
+      - interpolation
+      - string concatenation
+      - bind
+      - escape
+    additional_locations:
+      - path: src/ReviewBot.Api/Endpoints/UserSearchEndpoint.cs
+        line_range: [8, 11]
+max_total_comments: 3
+expected_review_state: REQUEST_CHANGES

@@ -65,8 +65,8 @@ public sealed class LiveEvalRunner
                 ModelName = options.Model,
                 ResponseFormat = "text",
                 Temperature = 0.2f,
-                MaxTokens = 4096,
-                TimeoutSeconds = 600
+                MaxTokens = options.MaxTokens,
+                TimeoutSeconds = options.RequestTimeoutSeconds
             },
             NullLogger<OpenAiReviewLlm>.Instance);
         var fixtures = Directory
@@ -87,7 +87,39 @@ public sealed class LiveEvalRunner
                 $"Running {Path.GetFileName(fixtureDirectory)} (retrieval={options.RetrievalEnabled.ToString().ToLowerInvariant()}, snippets={requestContext.Snippets.Count})")
                 .ConfigureAwait(false);
 
-            var result = await llm.ReviewAsync(requestContext.Request, ct).ConfigureAwait(false);
+            var fixtureStartedAt = DateTimeOffset.UtcNow;
+            ReviewResult result;
+            string status;
+            using (var fixtureCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                fixtureCts.CancelAfter(TimeSpan.FromSeconds(options.PerFixtureTimeoutSeconds));
+                try
+                {
+                    result = await llm.ReviewAsync(requestContext.Request, fixtureCts.Token).ConfigureAwait(false);
+                    status = "succeeded";
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    var elapsedSeconds = (DateTimeOffset.UtcNow - fixtureStartedAt).TotalSeconds;
+                    var isTimeout = fixtureCts.IsCancellationRequested ||
+                        ex is OperationCanceledException ||
+                        ContainsCancellationOrTimeout(ex);
+                    var reason = isTimeout
+                        ? (fixtureCts.IsCancellationRequested
+                            ? $"hit per-fixture timeout ({options.PerFixtureTimeoutSeconds}s)"
+                            : $"LLM transport timed out: {ex.GetBaseException().Message}")
+                        : $"LLM error: {ex.GetBaseException().Message}";
+                    await output.WriteLineAsync(
+                        $"FAIL {Path.GetFileName(fixtureDirectory)} after {elapsedSeconds:F0}s ({reason}); writing empty result and continuing.")
+                        .ConfigureAwait(false);
+                    result = new ReviewResult(
+                        Summary: $"Eval fixture aborted: {reason}.",
+                        Comments: Array.Empty<InlineComment>(),
+                        ContextRequests: Array.Empty<ContextRequest>());
+                    status = isTimeout ? "timed_out" : "errored";
+                }
+            }
+
             var outputPath = Path.Combine(options.ResultsDirectory, $"{Path.GetFileName(fixtureDirectory)}.json");
             await File.WriteAllTextAsync(outputPath, JsonSerializer.Serialize(result, JsonOptions), ct).ConfigureAwait(false);
             results.Add(new LiveEvalFixtureResult(
@@ -101,6 +133,8 @@ public sealed class LiveEvalRunner
                 FixtureName: fixture.Metadata.Name,
                 Category: fixture.Metadata.Category,
                 ResultPath: outputPath,
+                Status: status,
+                ElapsedSeconds: (DateTimeOffset.UtcNow - fixtureStartedAt).TotalSeconds,
                 CommentCount: result.Comments.Count,
                 RetrievalSnippetCount: requestContext.Snippets.Count,
                 RetrievalSymbolsQueried: requestContext.SymbolsQueried,
@@ -124,6 +158,31 @@ public sealed class LiveEvalRunner
             .ConfigureAwait(false);
 
         return results;
+    }
+
+    private static bool ContainsCancellationOrTimeout(Exception exception)
+    {
+        // The OpenAI SDK's ClientRetryPolicy wraps retry failures in
+        // AggregateException, so a per-fixture timeout that fires while the
+        // SDK is mid-retry surfaces as a non-cancellation outer exception.
+        // Walk inner / aggregate exceptions to detect the cancellation root.
+        if (exception is OperationCanceledException or TimeoutException)
+        {
+            return true;
+        }
+
+        if (exception is AggregateException aggregate)
+        {
+            foreach (var inner in aggregate.InnerExceptions)
+            {
+                if (ContainsCancellationOrTimeout(inner))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return exception.InnerException is not null && ContainsCancellationOrTimeout(exception.InnerException);
     }
 
     private static async Task<LiveEvalRequestContext> BuildRequestAsync(
@@ -328,6 +387,8 @@ public sealed record LiveEvalFixtureManifest(
     string FixtureName,
     string Category,
     string ResultPath,
+    string Status,
+    double ElapsedSeconds,
     int CommentCount,
     int RetrievalSnippetCount,
     int RetrievalSymbolsQueried,

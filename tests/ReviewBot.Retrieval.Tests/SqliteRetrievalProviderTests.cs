@@ -11,7 +11,7 @@ namespace ReviewBot.Retrieval.Tests;
 public sealed class SqliteRetrievalProviderTests
 {
     [Fact]
-    public async Task GetContextAsyncReturnsDefinitionsThenTopThreeCallersForDiffSymbols()
+    public async Task GetContextAsyncReturnsDefinitionsThenTopTwoCallersForDiffSymbols()
     {
         var index = new FakeRepoIndex();
         index.Results[("GetAsync", RepoSymbolKind.Method)] =
@@ -49,9 +49,8 @@ public sealed class SqliteRetrievalProviderTests
             .Equal(
                 ("src/IUsers.cs", 4, "Task<User?> GetAsync(int id);"),
                 ("src/Caller1.cs", 10, "repository.GetAsync(id);"),
-                ("src/Caller2.cs", 20, "await users.GetAsync(id);"),
-                ("src/Caller3.cs", 30, "return repo.GetAsync(id);"));
-        result.Snippets.Should().NotContain(snippet => snippet.Path == "src/Caller4.cs");
+                ("src/Caller2.cs", 20, "await users.GetAsync(id);"));
+        result.Snippets.Should().NotContain(snippet => snippet.Path == "src/Caller3.cs" || snippet.Path == "src/Caller4.cs");
     }
 
     [Fact]
@@ -86,8 +85,8 @@ public sealed class SqliteRetrievalProviderTests
         var result = await provider.GetContextAsync("octo", "reviewbot", request, budget);
 
         result.Snippets.Should().ContainSingle();
-        result.Snippets[0].Content.Should().HaveLength(100);
-        result.Budget.ConsumedSections.Should().Contain(new PromptBudgetSection("retrieval", 34));
+        result.Snippets[0].Content.Should().HaveLength(60);
+        result.Budget.ConsumedSections.Should().Contain(new PromptBudgetSection("retrieval", 24));
     }
 
     [Fact]

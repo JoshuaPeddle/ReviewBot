@@ -16,7 +16,7 @@ The critical reliability gap the small-model profile exposed — silent prompt o
 
 Three conditions, all measured:
 
-1. **Quality**: retrieval lifts F1 by ≥0.05 on a ≥16-fixture corpus, averaged over 3 trials, on the reference local model (`qwen/qwen3.6-27b`, 72K context). Today's existing data point is on the smaller `qwen3.5-9b` and shows aggregate F1 unchanged (0.737 → 0.737, 1 regression, 2 improved, 5 unchanged) — the case has not been made, and the corpus needs to be re-run on the reference model.
+1. **Quality**: retrieval lifts F1 by ≥0.05 on a ≥16-fixture corpus, averaged over 3 trials, on the reference local model (`qwen/qwen3.6-27b`, 72K context). Latest measurement on the 11-fixture corpus (June 11): baseline F1 = 0.957, retrieval (bodies, 30-line cap, `both` depth) F1 = 0.952. The corpus saturates at F1 ≈ 1.0 — the gate cannot be answered without more fixtures specifically engineered so the bug requires deep cross-file body context. Body extraction now ships and fires by default; the remaining quality work is corpus design, not retrieval plumbing.
 2. **Adoption**: one-command Docker bring-up works end-to-end against a real GitHub App, documented in the README.
 3. **Honesty**: README accurately reflects shipped features, with the local-model story front and center.
 
@@ -30,12 +30,15 @@ Until all three are true, do not start new features.
 
 #### 1. Expand eval corpus and measure with repeated trials
 
-The current 8 fixtures repeat the same cross-chunk shape ("file A default change bypasses file B null check") several times. The aggregate signal is too narrow to make architectural decisions on.
+Partial progress on June 11 (see CHANGELOG entry "Body-bearing retrieval, scorer flexibility, corpus expansion"): added 3 fixtures (009 hardcoded-secret, 010 async-race, 011 SQL-injection), bringing corpus to 11. Scorer extended with `additional_locations` so cross-file bugs can be flagged at either cause or effect site. Body extraction works and fires by default. But: corpus still saturates at F1 ≈ 1.0 against the reference model, so the +0.05 ship-gate cannot be answered yet.
 
-- Add fixture diversity (target ≥16 total): subtle regression in a large refactor, dead-code introduction, concurrency race across files, secret introduction in a `.cs` file, API breaking change, performance regression (N+1, allocation-in-loop), security (SQL/XSS), unused result of fallible call.
-- Audit existing `006-cross-chunk-api-contract`, `007-cross-chunk-shared-utility`, `008-cross-chunk-conditional-compilation`, `009-cross-chunk-dependency-injection` on disk that aren't reflected in plan; either integrate or remove.
-- Repeat trials: run each retrieval-on / retrieval-off pair 3 times per fixture. Aggregate F1 with std-dev so a 0.05 effect isn't drowned by ±0.10 variance.
-- Stop test: `make eval-quick` reports mean F1 ± std-dev for both retrieval modes; the v0.3 ship-gate query is a single command.
+Remaining work:
+
+- **Design retrieval-differentiating fixtures (target +5 fixtures)**: bugs that are only spottable when the model can read a method body from another file. Examples: callee contract violation (caller passes a value forbidden by the callee's docstring/preconditions), interface impl drift (a hidden non-edited implementor of the changed interface breaks), private helper invariant (a method assumes its caller has validated input, but the caller no longer does), invalidated cache key (a cache write uses a different key shape than the read). The point is: baseline-only model lacks the body; retrieval-on model has it.
+- **Address LM Studio capacity wall on fixture 005**: it timed out at 285s on the retrieval pass even with the 30-line body cap. Either tune per-fixture retrieval budgets further, accept that this model can't review that prompt, or design the prompt assembly to leave more headroom.
+- **Clean up stale fixture directories**: `006-cross-chunk-api-contract`, `007-cross-chunk-shared-utility`, `008-cross-chunk-conditional-compilation`, `009-cross-chunk-dependency-injection` exist with `repo-state/` but no `fixture.yaml`. Decide: complete or delete.
+- **Repeat trials**: run each retrieval-on / retrieval-off pair 3 times per fixture, report mean F1 ± std-dev. Single-trial measurements can't distinguish a 0.04 effect from noise.
+- **Stop test**: `make eval-quick` reports mean F1 ± std-dev for both retrieval modes; the v0.3 ship-gate query is a single command.
 
 #### 2. Promote the phase label on `reviewbot.cost.usd_total`
 
@@ -73,7 +76,7 @@ Currently half-deprecated: spec says it becomes opt-in once retrieval is stable,
 
 ## Open risks
 
-**Multi-pass quality on cross-chunk bugs.** Manifest-backed retrieval comparison shows aggregate F1 unchanged. Local model variance can swamp signal on an 8-fixture corpus. Mitigation: deliverable #1.
+**Multi-pass quality on cross-chunk bugs.** June 11 measurement on the 11-fixture corpus shows retrieval lifts precision by +0.083 (suppresses model false positives) but the corpus saturates at F1 ≈ 1.0, so the +0.05 F1 ship gate cannot be answered without harder fixtures. Mitigation: deliverable #1 ("Design retrieval-differentiating fixtures").
 
 **Silent chunk-skipping.** `max_chunks: 10` on a small model + 80-file PR drops files. The skipped-file note in the merged summary is not a substitute for the operator knowing whether the dropped files contained the bug. Mitigation candidate: either make `max_chunks` overflow a hard error or surface a coverage % in the trace and posted summary. Pick when delivering #4.
 
@@ -85,7 +88,7 @@ Currently half-deprecated: spec says it becomes opt-in once retrieval is stable,
 
 **Retrieval cold-start latency.** First retrieval-enabled review of a SHA clones a temp checkout and may full-parse. Delta reviews with an indexed base now copy unchanged symbols (CHANGELOG: changed-path incremental indexing). Remaining exposure: review of a SHA whose base wasn't indexed. Mitigation: measure in Phase 23 traces; revisit persistent index workspaces if visible.
 
-**Retrieval parser quality.** Lexical C# parser produces false positives that dilute the retrieval budget. Mitigation: measure via eval; switch to tree-sitter or Roslyn once the gap is confirmed (deferred item below).
+**Retrieval parser quality.** Lexical C# parser produces false positives that dilute the retrieval budget. Symbol-body extraction shipped June 11 (30-line brace-balanced cap on method definitions) and works empirically — snippets are now real method bodies, not 1-line stubs. Remaining lexical-parser exposure: false-positive symbol matches on common names, missed bodies for constructors (no return type), and partial-method edge cases. Mitigation: measure via eval once corpus exposes the gap; consider tree-sitter / Roslyn upgrade then.
 
 **Retrieval index eviction discovery.** Nightly eviction only sweeps cache directories opened by the running process; cannot discover custom `retrieval.index_cache_dir` values that were only used before a restart. Mitigation: persisted cache-directory registry if real deployments rely on many custom caches.
 

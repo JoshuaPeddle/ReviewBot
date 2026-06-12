@@ -10,4 +10,7 @@ public sealed record LiveEvalOptions(
     bool RetrievalEnabled,
     string? ConfigPath,
     int ContextTokens,
-    string IndexCacheDir);
+    string IndexCacheDir,
+    int PerFixtureTimeoutSeconds = 240,
+    int RequestTimeoutSeconds = 180,
+    int MaxTokens = 16384);

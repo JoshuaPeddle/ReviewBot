@@ -102,12 +102,35 @@ public sealed class RuleBasedScorer
 
     private static bool MatchesMustFlag(MustFlagExpectation expectation, InlineComment comment)
     {
-        return string.Equals(comment.Path, expectation.Path, StringComparison.Ordinal) &&
-            comment.Line >= expectation.StartLine &&
-            comment.Line <= expectation.EndLine &&
-            comment.Severity >= expectation.SeverityAtLeast &&
-            MentionsAnyKeyword(comment.Body, expectation.MustMentionAny);
+        if (comment.Severity < expectation.SeverityAtLeast ||
+            !MentionsAnyKeyword(comment.Body, expectation.MustMentionAny))
+        {
+            return false;
+        }
+
+        if (MatchesLocation(expectation.Path, expectation.StartLine, expectation.EndLine, comment))
+        {
+            return true;
+        }
+
+        if (expectation.AdditionalLocations is { Count: > 0 } extras)
+        {
+            foreach (var location in extras)
+            {
+                if (MatchesLocation(location.Path, location.StartLine, location.EndLine, comment))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
+
+    private static bool MatchesLocation(string path, int startLine, int endLine, InlineComment comment) =>
+        string.Equals(comment.Path, path, StringComparison.Ordinal) &&
+        comment.Line >= startLine &&
+        comment.Line <= endLine;
 
     private static bool MentionsAnyKeyword(string body, IReadOnlyList<string> keywords)
     {

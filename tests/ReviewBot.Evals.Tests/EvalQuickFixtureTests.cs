@@ -4,7 +4,7 @@ namespace ReviewBot.Evals.Tests;
 
 public sealed class EvalQuickFixtureTests
 {
-    private const int ExpectedQuickFixtureCount = 8;
+    private const int ExpectedQuickFixtureCount = 11;
 
     [Fact]
     public async Task QuickFixtureCorpusScoresCleanly()

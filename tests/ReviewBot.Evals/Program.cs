@@ -28,7 +28,7 @@ public static class EvalCli
                 Usage:
                   dotnet run --project tests/ReviewBot.Evals -- score --fixture <dir> --result <llm-result.json> [--out <score.json>]
                   dotnet run --project tests/ReviewBot.Evals -- score --fixtures <dir> --results <dir> [--out <run.json>]
-                  dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>]
+                  dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>] [--context-tokens 32768] [--per-fixture-timeout 240] [--request-timeout 180] [--max-tokens 16384] [--index-cache-dir <dir>]
                   dotnet run --project tests/ReviewBot.Evals -- compare <baseline-run.json> <candidate-run.json> [--out <comparison.json>]
                 """).ConfigureAwait(false);
             return 0;
@@ -64,6 +64,9 @@ public static class EvalCli
         var manifestPath = ReadOption(args, "--manifest");
         var retrieval = ParseBool(ReadOption(args, "--retrieval"), defaultValue: false);
         var contextTokens = ParseInt(ReadOption(args, "--context-tokens"), defaultValue: 32768);
+        var perFixtureTimeoutSeconds = ParseInt(ReadOption(args, "--per-fixture-timeout"), defaultValue: 240);
+        var requestTimeoutSeconds = ParseInt(ReadOption(args, "--request-timeout"), defaultValue: 180);
+        var maxTokens = ParseInt(ReadOption(args, "--max-tokens"), defaultValue: 16384);
         var indexCacheDir = ReadOption(args, "--index-cache-dir") ??
             Path.Combine(Path.GetTempPath(), "reviewbot-eval-index", Guid.NewGuid().ToString("N"));
 
@@ -105,7 +108,10 @@ public static class EvalCli
                         retrieval,
                         configPath,
                         contextTokens,
-                        indexCacheDir),
+                        indexCacheDir,
+                        perFixtureTimeoutSeconds,
+                        requestTimeoutSeconds,
+                        maxTokens),
                     output)
                 .ConfigureAwait(false);
 

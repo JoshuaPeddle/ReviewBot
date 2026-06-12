@@ -215,13 +215,13 @@ public sealed class SqliteRepoIndex : IRepoIndex
         await using var command = connection.CreateCommand();
         command.CommandText = kind is null
             ? """
-              SELECT name, kind, role, path, line, signature
+              SELECT name, kind, role, path, line, signature, body_text, body_start, body_end
               FROM repo_symbols
               WHERE owner = $owner AND repo = $repo AND sha = $sha AND name = $name
               ORDER BY role ASC, path ASC, line ASC
               """
             : """
-              SELECT name, kind, role, path, line, signature
+              SELECT name, kind, role, path, line, signature, body_text, body_start, body_end
               FROM repo_symbols
               WHERE owner = $owner AND repo = $repo AND sha = $sha AND name = $name AND kind = $kind
               ORDER BY role ASC, path ASC, line ASC
@@ -238,17 +238,23 @@ public sealed class SqliteRepoIndex : IRepoIndex
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
         {
-            results.Add(new RepoSymbol(
-                reader.GetString(0),
-                (RepoSymbolKind)reader.GetInt32(1),
-                (RepoSymbolRole)reader.GetInt32(2),
-                reader.GetString(3),
-                reader.GetInt32(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5)));
+            results.Add(ReadSymbol(reader));
         }
 
         return results;
     }
+
+    private static RepoSymbol ReadSymbol(SqliteDataReader reader) =>
+        new(
+            reader.GetString(0),
+            (RepoSymbolKind)reader.GetInt32(1),
+            (RepoSymbolRole)reader.GetInt32(2),
+            reader.GetString(3),
+            reader.GetInt32(4),
+            reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : reader.GetInt32(7),
+            reader.IsDBNull(8) ? null : reader.GetInt32(8));
 
     public async Task<bool> IsIndexedAsync(RepoIndexKey key, CancellationToken ct = default)
     {
@@ -326,6 +332,9 @@ public sealed class SqliteRepoIndex : IRepoIndex
                 path TEXT NOT NULL,
                 line INTEGER NOT NULL,
                 signature TEXT NULL,
+                body_text TEXT NULL,
+                body_start INTEGER NULL,
+                body_end INTEGER NULL,
                 indexed_at TEXT NOT NULL,
                 last_accessed_at TEXT NOT NULL,
                 PRIMARY KEY (owner, repo, sha, name, kind, role, path, line)
@@ -348,6 +357,30 @@ public sealed class SqliteRepoIndex : IRepoIndex
             """;
 
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        // Additive migration for indices created before the body fields existed.
+        // SQLite rejects duplicate columns with error 1; swallow that one only.
+        await TryAddColumnAsync(connection, "body_text", "TEXT NULL", ct).ConfigureAwait(false);
+        await TryAddColumnAsync(connection, "body_start", "INTEGER NULL", ct).ConfigureAwait(false);
+        await TryAddColumnAsync(connection, "body_end", "INTEGER NULL", ct).ConfigureAwait(false);
+    }
+
+    private static async Task TryAddColumnAsync(
+        SqliteConnection connection,
+        string columnName,
+        string columnDefinition,
+        CancellationToken ct)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"ALTER TABLE repo_symbols ADD COLUMN {columnName} {columnDefinition}";
+        try
+        {
+            await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // Column already exists. No-op.
+        }
     }
 
     private static async Task DeleteKeyAsync(
@@ -386,10 +419,10 @@ public sealed class SqliteRepoIndex : IRepoIndex
         command.CommandText =
             """
             INSERT OR REPLACE INTO repo_symbols (
-                owner, repo, sha, name, kind, role, path, line, signature, indexed_at, last_accessed_at
+                owner, repo, sha, name, kind, role, path, line, signature, body_text, body_start, body_end, indexed_at, last_accessed_at
             )
             VALUES (
-                $owner, $repo, $sha, $name, $kind, $role, $path, $line, $signature, $indexedAt, $lastAccessedAt
+                $owner, $repo, $sha, $name, $kind, $role, $path, $line, $signature, $bodyText, $bodyStart, $bodyEnd, $indexedAt, $lastAccessedAt
             )
             """;
 
@@ -400,6 +433,9 @@ public sealed class SqliteRepoIndex : IRepoIndex
         command.Parameters.AddWithValue("$path", symbol.Path);
         command.Parameters.AddWithValue("$line", symbol.Line);
         command.Parameters.AddWithValue("$signature", symbol.Signature is null ? DBNull.Value : symbol.Signature);
+        command.Parameters.AddWithValue("$bodyText", symbol.Body is null ? DBNull.Value : symbol.Body);
+        command.Parameters.AddWithValue("$bodyStart", symbol.BodyStartLine is null ? DBNull.Value : symbol.BodyStartLine);
+        command.Parameters.AddWithValue("$bodyEnd", symbol.BodyEndLine is null ? DBNull.Value : symbol.BodyEndLine);
         command.Parameters.AddWithValue("$indexedAt", now);
         command.Parameters.AddWithValue("$lastAccessedAt", now);
 
@@ -464,7 +500,7 @@ public sealed class SqliteRepoIndex : IRepoIndex
         command.Transaction = (SqliteTransaction)transaction;
         command.CommandText =
             """
-            SELECT name, kind, role, path, line, signature
+            SELECT name, kind, role, path, line, signature, body_text, body_start, body_end
             FROM repo_symbols
             WHERE owner = $owner AND repo = $repo AND sha = $sha
             ORDER BY path ASC, line ASC, name ASC, kind ASC, role ASC
@@ -476,13 +512,7 @@ public sealed class SqliteRepoIndex : IRepoIndex
         await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
         {
-            symbols.Add(new RepoSymbol(
-                reader.GetString(0),
-                (RepoSymbolKind)reader.GetInt32(1),
-                (RepoSymbolRole)reader.GetInt32(2),
-                reader.GetString(3),
-                reader.GetInt32(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5)));
+            symbols.Add(ReadSymbol(reader));
         }
 
         return symbols;

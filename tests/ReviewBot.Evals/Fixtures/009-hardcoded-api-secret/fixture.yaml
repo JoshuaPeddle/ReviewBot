@@ -1,0 +1,7 @@
+name: Hardcoded API secret committed in source
+category: security_boundary
+difficulty: medium
+description: |
+  PaymentClient is changed from reading the bearer token via IOptions to
+  embedding it as a string literal in the constructor. The reviewer should
+  flag the hardcoded credential as a security regression.

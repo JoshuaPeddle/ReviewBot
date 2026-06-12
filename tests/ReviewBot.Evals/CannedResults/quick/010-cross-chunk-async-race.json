@@ -1,0 +1,12 @@
+{
+  "summary": "SessionCache now mutates its Dictionary without the SemaphoreSlim, and SessionService fans the cache out across concurrent Task.WhenAll loads.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Core/Sessions/SessionCache.cs",
+      "line": 9,
+      "severity": "error",
+      "confidence": "high",
+      "body": "Removing the SemaphoreSlim leaves the underlying Dictionary unsynchronized while SessionService.ResolveManyAsync now fans GetOrCreateAsync out across concurrent tasks. The read-then-write race can drop entries or throw under concurrent invocation. Restore the lock or switch to ConcurrentDictionary."
+    }
+  ]
+}

@@ -8,7 +8,8 @@ public class HeuristicTokenEstimatorTests
     [Theory]
     [InlineData(null, 0)]
     [InlineData("", 0)]
-    [InlineData("hello world", 4)]
+    // CharactersPerToken = 2.5: ceil(11 / 2.5) = 5; ceil(7 / 2.5) = 3.
+    [InlineData("hello world", 5)]
     [InlineData("1234567", 3)]
     public void EstimateTokensUsesCeilingCharacterHeuristic(string? text, int expectedTokens)
     {
@@ -32,6 +33,6 @@ public class HeuristicTokenEstimatorTests
 
         var tokens = estimator.EstimateTokens(source);
 
-        tokens.Should().Be((int)Math.Ceiling(source.Length / 3d));
+        tokens.Should().Be((int)Math.Ceiling(source.Length / 2.5));
     }
 }

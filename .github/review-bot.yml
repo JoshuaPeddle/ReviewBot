@@ -66,7 +66,7 @@ retrieval:
     max_bytes: 51200
 
     # Symbol lookup mode: callers, definitions, or both.
-    symbol_lookup_depth: callers
+    symbol_lookup_depth: both
 
     # Embedding retrieval lane.
     embeddings: false

@@ -4,3 +4,15 @@ obj/
 riderModule.iml
 /_ReSharper.Caches/
 /runs/
+*.user
+.env
+.env.eval
+.DS_Store
+.idea/
+
+# Runtime artifacts produced by the ReviewBot worker / retrieval index.
+# These are local-state directories, not source code.
+src/ReviewBot.Api/cache/
+src/ReviewBot.Api/traces/
+src/ReviewBot.Api/reviewbot.db
+src/ReviewBot.Api/reviewbot-dev.db

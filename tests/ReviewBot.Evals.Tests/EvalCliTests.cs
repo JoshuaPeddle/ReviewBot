@@ -145,6 +145,8 @@ public sealed class EvalCliTests : IDisposable
                     FixtureName: "Example",
                     Category: "cross_chunk_reference",
                     ResultPath: "results/001-example.json",
+                    Status: "succeeded",
+                    ElapsedSeconds: 12.3,
                     CommentCount: 1,
                     RetrievalSnippetCount: 1,
                     RetrievalSymbolsQueried: 2,

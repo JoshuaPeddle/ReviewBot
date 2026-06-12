@@ -4,5 +4,10 @@ must_flag:
     severity_at_least: warning
     topic: zero_retry_attempts_accepted
     must_mention_any: ["zero", "0", "MaxAttempts", "attempt", "default"]
+    # The bug spans both files; flagging the default in RetryOptions.cs is an
+    # equally valid cause-site flag for the same root cause.
+    additional_locations:
+      - path: src/ReviewBot.Core/Options/RetryOptions.cs
+        line_range: [5, 5]
 max_total_comments: 3
 expected_review_state: REQUEST_CHANGES

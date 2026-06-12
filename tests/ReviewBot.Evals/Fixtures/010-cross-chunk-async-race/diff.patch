@@ -1,0 +1,46 @@
+diff --git a/src/ReviewBot.Core/Sessions/SessionCache.cs b/src/ReviewBot.Core/Sessions/SessionCache.cs
+index 2bb11111..2bb22222 100644
+--- a/src/ReviewBot.Core/Sessions/SessionCache.cs
++++ b/src/ReviewBot.Core/Sessions/SessionCache.cs
+@@ -3,21 +3,12 @@ namespace ReviewBot.Core.Sessions;
+ public sealed class SessionCache
+ {
+     private readonly Dictionary<string, Session> entries = new();
+-    private readonly SemaphoreSlim mutex = new(1, 1);
+
+     public async Task<Session> GetOrCreateAsync(string id, Func<Task<Session>> factory)
+     {
+-        await mutex.WaitAsync();
+-        try
+-        {
+-            if (entries.TryGetValue(id, out var existing)) return existing;
+-            var created = await factory();
+-            entries[id] = created;
+-            return created;
+-        }
+-        finally
+-        {
+-            mutex.Release();
+-        }
++        if (entries.TryGetValue(id, out var existing)) return existing;
++        var created = await factory();
++        entries[id] = created;
++        return created;
+     }
+ }
+diff --git a/src/ReviewBot.Core/Sessions/SessionService.cs b/src/ReviewBot.Core/Sessions/SessionService.cs
+index 2cc11111..2cc22222 100644
+--- a/src/ReviewBot.Core/Sessions/SessionService.cs
++++ b/src/ReviewBot.Core/Sessions/SessionService.cs
+@@ -7,8 +7,9 @@ public sealed class SessionService
+
+     public SessionService(SessionCache cache) => this.cache = cache;
+
+-    public Task<Session> ResolveAsync(string id, Func<string, Task<Session>> loader) =>
+-        cache.GetOrCreateAsync(id, () => loader(id));
++    public Task<Session[]> ResolveManyAsync(IEnumerable<string> ids, Func<string, Task<Session>> loader)
++    {
++        var tasks = ids.Select(id => cache.GetOrCreateAsync(id, () => loader(id)));
++        return Task.WhenAll(tasks);
++    }
+ }
