@@ -1,0 +1,14 @@
+name: Poll for updates immediately on startup
+category: cross_file_body
+difficulty: high
+description: |
+  The first poll currently waits a full 30-second interval before running.
+  Pass 0 so polling starts right away instead of waiting.
+notes: |
+  Maintainer notes (not shown to the model — the loader ignores this key).
+  Planted bug: PollScheduler.Start (repo-state only, never in the diff) treats
+  a non-positive interval as "polling disabled" and returns without starting
+  the loop, so Start(0) silently disables polling entirely. The author believes
+  0 means "no startup delay". Baseline cannot know the callee's semantics; the
+  retrieval pass extracts `Start` from the added line and injects the method
+  body containing the `<= 0` guard.

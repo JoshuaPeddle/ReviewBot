@@ -1,0 +1,12 @@
+{
+  "summary": "Direct WriteBatchAsync call violates the writer's non-empty batch precondition.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Persistence/Reviews/ReviewCommentArchiver.cs",
+      "line": 14,
+      "severity": "error",
+      "confidence": "high",
+      "body": "CommentBatchWriter.WriteBatchAsync reads batch[0] to pick the archive table and assumes callers pass a non-empty batch. The old CommentBatching.Chunk loop never produced an empty batch, but comments is empty for clean reviews, so this now throws ArgumentOutOfRangeException. Guard for empty input before calling."
+    }
+  ]
+}

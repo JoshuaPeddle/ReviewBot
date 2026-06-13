@@ -1,0 +1,22 @@
+name: Send review notifications to all channels concurrently
+category: cross_file_body
+difficulty: high
+description: |
+  Notification channels are independent and IO-bound, so fan sends out with
+  Task.WhenAll instead of awaiting each channel in turn. This cuts
+  end-of-review latency when several channels are configured.
+notes: |
+  Maintainer notes (not shown to the model — the loader ignores this key).
+  Planted bug: EmailChannel (repo-state only, not in the diff) reuses a shared
+  StringBuilder across SendAsync calls, written under the old guarantee that
+  the dispatcher invokes channels sequentially. Task.WhenAll makes concurrent
+  SendAsync calls interleave Clear/Append on that shared buffer. The interface
+  says nothing about thread safety; only the implementor body shows the hazard.
+  Retrieval extracts `SendAsync` from the added line and injects all
+  implementor definition bodies. Keywords require naming EmailChannel or its
+  shared buffer — generic "make sure channels are thread-safe" advice from the
+  baseline does not score.
+  Calibration (2026-06-12 smoke run): both modes also emit a defensible
+  warning that Task.WhenAll changes failure/exception semantics. must_not_flag
+  forgives warning-level comments on the dispatcher so that noise doesn't
+  decide pass/fail; only the EmailChannel shared-buffer finding scores.

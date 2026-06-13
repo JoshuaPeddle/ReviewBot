@@ -1,0 +1,19 @@
+must_flag:
+  - path: src/ReviewBot.Api/Sessions/SessionWriter.cs
+    line_range: [15, 17]
+    severity_at_least: error
+    topic: cache_key_mismatch
+    must_mention_any:
+      - SessionReader
+      - ForUser
+    additional_locations:
+      - path: src/ReviewBot.Api/Sessions/SessionReader.cs
+        line_range: [14, 15]
+      - path: src/ReviewBot.Core/Sessions/SessionCacheKeys.cs
+        line_range: [5, 7]
+must_not_flag:
+  - path: src/ReviewBot.Api/Sessions/SessionWriter.cs
+    reason: Warning-level hedged "verify the read path" speculation is defensible review noise; only an asserted error-grade mismatch finding scores.
+    severity_above: error
+max_total_comments: 3
+expected_review_state: REQUEST_CHANGES

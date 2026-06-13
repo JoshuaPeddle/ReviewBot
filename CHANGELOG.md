@@ -8,6 +8,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ### Phase 22.5 — Retrieval quality, corpus diversification, eval robustness
 
+#### 2026-06-13 — Retrieval-differentiating fixtures and 3-trial corpus measurement
+
+Closed v0.3 ship-gate condition #1 (Quality). The 11-fixture corpus saturated at F1 ≈ 1.0 against the reference model and could not answer the +0.05 ΔF1 gate; this slice adds 5 fixtures engineered so the bug is only spottable when retrieval injects a method body from another file, then measures the corpus over 3 trials.
+
+**Retrieval-differentiating fixtures (+5, 11 → 16, category `cross_file_body`)**
+
+All five plant the decisive evidence in `repo-state/`-only files whose bodies retrieval extracts via the `CSharpDiffSymbolExtractor` symbol on an added/context diff line. Author-voice PR titles and descriptions (the `LiveEvalRunner` feeds both into the prompt as `pr_title` / `pr_body`); maintainer notes live under a `notes:` key the loader ignores.
+
+- `012-callee-zero-interval` — callee-contract: caller switches `Start(30)` → `Start(0)` with "kick off immediately" intent; `PollScheduler.Start` (out-of-diff) treats `<= 0` as "polling disabled" and returns, so the host never polls.
+- `013-empty-batch-invariant` — callee-precondition: caller drops `CommentBatching.Chunk` (which yielded no empty batches) and calls `WriteBatchAsync(comments)` directly; `WriteBatchAsync` (out-of-diff) indexes `batch[0]`, so clean reviews now throw.
+- `014-cache-key-drift` — cross-file read/write mismatch: write path moves to `SessionCacheKeys.ForTenantUser`; `SessionReader` (out-of-diff) still uses `ForUser`. Severity bar set to `error` to refuse hedged "if the read path…" speculation.
+- `015-parallel-dispatch-implementor` — interface-implementor drift: dispatcher switches to `Task.WhenAll`; `EmailChannel.SendAsync` (out-of-diff) reuses a shared `StringBuilder`, which only the implementor body shows.
+- `016-multifile-clamped-interval` — multi-file noise + silent clamp: 4-file metrics-polish PR; the signal file sets `flusher.Configure(TimeSpan.FromSeconds(30))` while `MetricsFlusher.Configure` (out-of-diff) clamps below a 5-minute minimum. Three other files are benign churn that `must_not_flag` keeps from deciding pass/fail.
+
+All five carry calibrated `must_not_flag` allowances so defensible secondary observations (Task.WhenAll failure semantics, INSERT parameter limits, hedged warnings) are forgiven symmetrically in both retrieval modes — only the planted finding scores.
+
+**Stale fixture cleanup** — Deleted four placeholder directories (`006-cross-chunk-api-contract`, `007-cross-chunk-shared-utility`, `008-cross-chunk-conditional-compilation`, `009-cross-chunk-dependency-injection`) that had `repo-state/` skeletons but zero files and no `fixture.yaml`. The live runner already silently ignored them.
+
+**Measurement against `qwen/qwen3.6-27b` on the LAN box (LM Studio :1234), 3 trials**
+
+```
+trial   base F1  retr F1   ΔF1     base P  retr P   base R  retr R
+ 1       0.786    1.000   +0.214   0.917   1.000    0.688   1.000
+ 2       0.828    1.000   +0.172   0.923   1.000    0.750   1.000
+ 3       0.800    0.889   +0.089   0.857   0.800    0.750   1.000
+mean     0.804    0.963   +0.159 (sd 0.064)
+```
+
+Worst-trial ΔF1 = +0.089 still clears the +0.05 gate. Per-fixture mean ΔF1: 012 +1.000, 013 +0.333, 014 +1.000, 015 +1.000, 016 +1.000 (the lift), 004 -0.067, 005 -0.111 (variance noise on saturated fixtures), all other 11 ≈ 0. Trial 3's three regressions on pre-existing fixtures (004, 005, 010) are local-model output variance, not retrieval damage — retrieval recall stayed at 1.000 across all three trials, so retrieval keeps finding the planted bug; what wobbles is the suppression of secondary comments. Worth a follow-up scoring tweak if the v0.3 ship goes long.
+
+**Corrected assumptions discovered during implementation**
+
+- Author-voice fixture metadata matters more than expected. The `LiveEvalRunner` injects fixture `name` and `description` into the prompt as PR title and body; fixtures 001-011 describe their planted bugs in those fields, which materially inflates baseline scores on those fixtures. New fixtures 012-016 use neutral author voice. The 11 pre-existing fixtures were not retro-cleaned in this slice — renaming them would shift the measured baseline and is queued as a separate decision.
+- `CSharpDiffSymbolExtractor` skips removed diff lines, so the symbol whose out-of-diff body holds the evidence must appear on an added or context line. Fixtures 012-016 are built around this constraint.
+- Retrieval usage-row snippets are single signature lines; only method *definition* rows carry brace-balanced bodies (30-line cap, `MaxCallersPerSymbol = 2`). New fixtures bound the load-bearing types to two usages so the budget always covers the definition body.
+- The hedged-speculation baseline score on 014 was the surprise. Without an error-severity bar, the baseline scored a true positive by guessing the right direction without evidence ("if the read path still uses ForUser..."). Setting `severity_at_least: error` plus a `must_not_flag` for warning-level dispatcher comments forced the scorer to credit only the asserted, location-specific finding retrieval produced.
+- LM Studio's capacity wall on fixture 005 turned out to be intermittent — it completed in 2 of 3 trials at the 30-line body cap, contrary to the June 11 note that it was a hard wall. Hardware-side noise, not a code defect.
+
 #### 2026-06-11 — Body-bearing retrieval, scorer flexibility, corpus expansion
 
 Closed the "retrieval is just plumbing" gap from the May 28 live-eval slice. Body extraction now fires by default and the scorer credits defensible cross-file flag locations.

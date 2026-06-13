@@ -1,0 +1,13 @@
+diff --git a/src/ReviewBot.Api/Sessions/SessionWriter.cs b/src/ReviewBot.Api/Sessions/SessionWriter.cs
+index 4432ad4..dad5d61 100644
+--- a/src/ReviewBot.Api/Sessions/SessionWriter.cs
++++ b/src/ReviewBot.Api/Sessions/SessionWriter.cs
+@@ -13,7 +13,7 @@ public sealed class SessionWriter
+ 
+     public async Task StoreAsync(string userId, ReviewSession session, CancellationToken ct)
+     {
+-        var key = SessionCacheKeys.ForUser(userId);
++        var key = SessionCacheKeys.ForTenantUser(session.TenantId, userId);
+         await cache.SetAsync(key, session, ct).ConfigureAwait(false);
+     }
+ }

@@ -16,11 +16,11 @@ The critical reliability gap the small-model profile exposed — silent prompt o
 
 Three conditions, all measured:
 
-1. **Quality**: retrieval lifts F1 by ≥0.05 on a ≥16-fixture corpus, averaged over 3 trials, on the reference local model (`qwen/qwen3.6-27b`, 72K context). Latest measurement on the 11-fixture corpus (June 11): baseline F1 = 0.957, retrieval (bodies, 30-line cap, `both` depth) F1 = 0.952. The corpus saturates at F1 ≈ 1.0 — the gate cannot be answered without more fixtures specifically engineered so the bug requires deep cross-file body context. Body extraction now ships and fires by default; the remaining quality work is corpus design, not retrieval plumbing.
+1. **Quality**: retrieval lifts F1 by ≥0.05 on a ≥16-fixture corpus, averaged over 3 trials, on the reference local model (`qwen/qwen3.6-27b`, 72K context). **PASS (June 13)**: 16-fixture corpus over 3 trials, mean baseline F1 = 0.804, mean retrieval F1 = 0.963, **ΔF1 = +0.159 (sd 0.064)**; worst-trial ΔF1 = +0.089. Five new retrieval-differentiating fixtures (012-016) carry the lift; the 11 pre-existing fixtures average ≈ 0 ΔF1 because they saturate at F1 ≈ 1.0 on both modes.
 2. **Adoption**: one-command Docker bring-up works end-to-end against a real GitHub App, documented in the README.
 3. **Honesty**: README accurately reflects shipped features, with the local-model story front and center.
 
-Until all three are true, do not start new features.
+Conditions #2 and #3 are the remaining gate work.
 
 ---
 
@@ -28,17 +28,14 @@ Until all three are true, do not start new features.
 
 ### Deliverables, ordered
 
-#### 1. Expand eval corpus and measure with repeated trials
+#### 1. Expand eval corpus and measure with repeated trials — DONE (June 13)
 
-Partial progress on June 11 (see CHANGELOG entry "Body-bearing retrieval, scorer flexibility, corpus expansion"): added 3 fixtures (009 hardcoded-secret, 010 async-race, 011 SQL-injection), bringing corpus to 11. Scorer extended with `additional_locations` so cross-file bugs can be flagged at either cause or effect site. Body extraction works and fires by default. But: corpus still saturates at F1 ≈ 1.0 against the reference model, so the +0.05 ship-gate cannot be answered yet.
+Shipped: 16-fixture corpus, 3-trial measurement, +0.159 mean ΔF1 (sd 0.064). See CHANGELOG "Retrieval-differentiating fixtures and 3-trial corpus measurement".
 
-Remaining work:
+Residual items left for later (not gate-blocking):
 
-- **Design retrieval-differentiating fixtures (target +5 fixtures)**: bugs that are only spottable when the model can read a method body from another file. Examples: callee contract violation (caller passes a value forbidden by the callee's docstring/preconditions), interface impl drift (a hidden non-edited implementor of the changed interface breaks), private helper invariant (a method assumes its caller has validated input, but the caller no longer does), invalidated cache key (a cache write uses a different key shape than the read). The point is: baseline-only model lacks the body; retrieval-on model has it.
-- **Address LM Studio capacity wall on fixture 005**: it timed out at 285s on the retrieval pass even with the 30-line body cap. Either tune per-fixture retrieval budgets further, accept that this model can't review that prompt, or design the prompt assembly to leave more headroom.
-- **Clean up stale fixture directories**: `006-cross-chunk-api-contract`, `007-cross-chunk-shared-utility`, `008-cross-chunk-conditional-compilation`, `009-cross-chunk-dependency-injection` exist with `repo-state/` but no `fixture.yaml`. Decide: complete or delete.
-- **Repeat trials**: run each retrieval-on / retrieval-off pair 3 times per fixture, report mean F1 ± std-dev. Single-trial measurements can't distinguish a 0.04 effect from noise.
-- **Stop test**: `make eval-quick` reports mean F1 ± std-dev for both retrieval modes; the v0.3 ship-gate query is a single command.
+- LM Studio capacity wall on fixture 005 turned out to be intermittent — it completed in 2 of 3 trials at the 30-line body cap. Not blocking, but worth a follow-up note if it returns.
+- A 3-trial `make eval-quick` aggregator (mean F1 ± sd in one command) is still nice-to-have; right now the aggregation is a one-shot Python script. Defer.
 
 #### 2. Promote the phase label on `reviewbot.cost.usd_total`
 
@@ -76,7 +73,7 @@ Currently half-deprecated: spec says it becomes opt-in once retrieval is stable,
 
 ## Open risks
 
-**Multi-pass quality on cross-chunk bugs.** June 11 measurement on the 11-fixture corpus shows retrieval lifts precision by +0.083 (suppresses model false positives) but the corpus saturates at F1 ≈ 1.0, so the +0.05 F1 ship gate cannot be answered without harder fixtures. Mitigation: deliverable #1 ("Design retrieval-differentiating fixtures").
+**Multi-pass quality on cross-chunk bugs.** Closed June 13 by the 16-fixture, 3-trial measurement (ΔF1 = +0.159 ± 0.064; worst trial +0.089). The lift is carried by 5 new retrieval-differentiating fixtures (012-016); the 11 original fixtures still saturate at F1 ≈ 1.0 on both modes, so any future regression check should weight the differentiating fixtures specifically.
 
 **Silent chunk-skipping.** `max_chunks: 10` on a small model + 80-file PR drops files. The skipped-file note in the merged summary is not a substitute for the operator knowing whether the dropped files contained the bug. Mitigation candidate: either make `max_chunks` overflow a hard error or surface a coverage % in the trace and posted summary. Pick when delivering #4.
 

@@ -1,0 +1,20 @@
+name: Archive review comments in a single batch write
+category: cross_file_body
+difficulty: high
+description: |
+  Chunked archive writes showed up in worker profiles on large PRs. The whole
+  comment set fits comfortably in one multi-row INSERT, so drop the per-100
+  chunking and write the batch in one call.
+notes: |
+  Maintainer notes (not shown to the model — the loader ignores this key).
+  Planted bug: CommentBatchWriter.WriteBatchAsync (repo-state only) reads
+  batch[0] to pick the archive table — callers must guarantee a non-empty
+  batch. The old caller satisfied that structurally: CommentBatching.Chunk
+  yields no batches for empty input. The new direct call passes the raw
+  comment list, which is empty for clean reviews, and throws. No guard is
+  visibly removed in the diff; the invariant lives entirely in the callee
+  body, which retrieval injects via the `WriteBatchAsync` symbol.
+  Calibration (2026-06-12 smoke run): both modes also emit a defensible
+  warning about unbounded single-INSERT parameter limits. must_not_flag
+  forgives warning-level comments on both paths so that secondary noise
+  doesn't decide pass/fail in either mode; only the empty-batch finding scores.

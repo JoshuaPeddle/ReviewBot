@@ -1,0 +1,23 @@
+must_flag:
+  - path: src/ReviewBot.Api/Polling/UpdatePoller.cs
+    line_range: [16, 19]
+    severity_at_least: warning
+    topic: callee_contract
+    must_mention_any:
+      - disable
+      - disabled
+      - no-op
+      - noop
+      - never start
+      - never run
+      - never poll
+      - does not start
+      - doesn't start
+      - won't start
+      - returns without
+      - early return
+    additional_locations:
+      - path: src/ReviewBot.Core/Scheduling/PollScheduler.cs
+        line_range: [13, 19]
+max_total_comments: 3
+expected_review_state: REQUEST_CHANGES

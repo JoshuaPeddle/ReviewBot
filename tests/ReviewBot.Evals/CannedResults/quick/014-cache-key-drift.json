@@ -1,0 +1,12 @@
+{
+  "summary": "Write path moves to a tenant-scoped cache key but the read path still uses the old key shape.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Api/Sessions/SessionWriter.cs",
+      "line": 16,
+      "severity": "error",
+      "confidence": "high",
+      "body": "SessionReader.GetAsync still builds its key with SessionCacheKeys.ForUser, so sessions stored under ForTenantUser are never read back and stale ForUser entries keep serving cross-tenant state — the exact bug this PR sets out to fix. Update the read path (and invalidate old entries) in the same change."
+    }
+  ]
+}

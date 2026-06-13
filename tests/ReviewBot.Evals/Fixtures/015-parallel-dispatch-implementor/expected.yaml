@@ -1,0 +1,19 @@
+must_flag:
+  - path: src/ReviewBot.Api/Notifications/NotificationDispatcher.cs
+    line_range: [15, 18]
+    severity_at_least: warning
+    topic: implementor_thread_safety
+    must_mention_any:
+      - EmailChannel
+      - bodyBuilder
+      - StringBuilder
+      - shared buffer
+    additional_locations:
+      - path: src/ReviewBot.Api/Notifications/EmailChannel.cs
+        line_range: [9, 28]
+must_not_flag:
+  - path: src/ReviewBot.Api/Notifications/NotificationDispatcher.cs
+    reason: Warning-level Task.WhenAll failure-semantics observations are defensible secondary review noise, not the planted bug.
+    severity_above: error
+max_total_comments: 3
+expected_review_state: REQUEST_CHANGES

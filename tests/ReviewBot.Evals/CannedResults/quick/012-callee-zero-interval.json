@@ -1,0 +1,12 @@
+{
+  "summary": "Passing 0 to PollScheduler.Start disables polling instead of starting it immediately.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Api/Polling/UpdatePoller.cs",
+      "line": 18,
+      "severity": "error",
+      "confidence": "high",
+      "body": "PollScheduler.Start treats a non-positive interval as 'polling disabled' and returns without starting the loop, so Start(0) means this host never polls at all — not 'poll immediately'. Use a short first-delay instead, or add an explicit immediate-poll path to the scheduler."
+    }
+  ]
+}

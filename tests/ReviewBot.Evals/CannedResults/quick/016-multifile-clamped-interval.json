@@ -1,0 +1,12 @@
+{
+  "summary": "The 30-second flush interval is silently clamped to the flusher's 5-minute minimum.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Api/Metrics/MetricsStartup.cs",
+      "line": 11,
+      "severity": "warning",
+      "confidence": "high",
+      "body": "MetricsFlusher.Configure clamps anything below MinimumInterval (5 minutes) because the sink rate-limits, so this 30-second setting silently stays at 5 minutes and dashboards will not refresh faster. Either raise the sink limit and the clamp together, or set an interval the flusher actually honors."
+    }
+  ]
+}

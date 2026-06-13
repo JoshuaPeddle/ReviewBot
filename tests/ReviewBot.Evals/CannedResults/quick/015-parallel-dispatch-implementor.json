@@ -1,0 +1,12 @@
+{
+  "summary": "Concurrent channel dispatch races on EmailChannel's shared message buffer.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Api/Notifications/NotificationDispatcher.cs",
+      "line": 17,
+      "severity": "error",
+      "confidence": "high",
+      "body": "EmailChannel reuses a shared StringBuilder (bodyBuilder) across SendAsync calls under the old sequential-dispatch guarantee. With Task.WhenAll, concurrent sends interleave Clear/Append on that buffer and produce corrupted or cross-recipient email bodies. Make EmailChannel build the body locally per send before parallelizing dispatch."
+    }
+  ]
+}
