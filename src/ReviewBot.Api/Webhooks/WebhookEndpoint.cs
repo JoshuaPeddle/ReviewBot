@@ -7,6 +7,9 @@ namespace ReviewBot.Api.Webhooks;
 
 public static class WebhookEndpoint
 {
+    // GitHub caps webhook payloads at 25 MiB. Reject anything larger to bound
+    // memory use and avoid trivial DoS via lying about ContentLength.
+    private const int MaxWebhookBodyBytes = 26_214_400;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public static IEndpointRouteBuilder MapWebhookEndpoint(this IEndpointRouteBuilder endpoints)
@@ -27,7 +30,15 @@ public static class WebhookEndpoint
         CancellationToken ct)
     {
         var deliveryId = request.Headers["X-GitHub-Delivery"].ToString();
-        var body = await ReadBodyAsync(request, ct);
+        var body = await ReadBodyAsync(request, MaxWebhookBodyBytes, ct);
+        if (body is null)
+        {
+            logger.LogWarning(
+                "Rejected webhook delivery {DeliveryId}: body exceeded {MaxBytes} bytes",
+                deliveryId,
+                MaxWebhookBodyBytes);
+            return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+        }
 
         if (!WebhookSignatureValidator.IsValid(
                 options.Value.Secret,
@@ -42,7 +53,7 @@ public static class WebhookEndpoint
         return eventName switch
         {
             "pull_request" => await HandlePullRequestAsync(body, deliveryId, queue, deliveryStore, logger, ct),
-            "issue_comment" => await HandleIssueCommentAsync(body, deliveryId, queue, deliveryStore, logger, ct),
+            "issue_comment" => await HandleIssueCommentAsync(body, deliveryId, options.Value, queue, deliveryStore, logger, ct),
             _ => Results.NoContent()
         };
     }
@@ -107,6 +118,7 @@ public static class WebhookEndpoint
     private static async Task<IResult> HandleIssueCommentAsync(
         byte[] body,
         string deliveryId,
+        WebhookOptions options,
         IReviewJobQueue queue,
         IDeliveryStore deliveryStore,
         ILogger<WebhookEndpointMarker> logger,
@@ -127,6 +139,15 @@ public static class WebhookEndpoint
         {
             logger.LogWarning("Rejected issue_comment delivery {DeliveryId}: missing required fields", deliveryId);
             return Results.BadRequest();
+        }
+
+        if (IsFromBotItself(payload, options.BotSlug))
+        {
+            logger.LogDebug(
+                "Skipped issue_comment delivery {DeliveryId} from bot {BotSlug} to avoid self-trigger loop",
+                deliveryId,
+                options.BotSlug);
+            return Results.NoContent();
         }
 
         if (!ShouldEnqueueComment(payload))
@@ -160,10 +181,29 @@ public static class WebhookEndpoint
         return Results.Accepted();
     }
 
-    private static async Task<byte[]> ReadBodyAsync(HttpRequest request, CancellationToken ct)
+    private static async Task<byte[]?> ReadBodyAsync(HttpRequest request, int maxBytes, CancellationToken ct)
     {
-        using var buffer = new MemoryStream();
-        await request.Body.CopyToAsync(buffer, ct);
+        if (request.ContentLength is { } declared && declared > maxBytes)
+        {
+            return null;
+        }
+
+        using var buffer = new MemoryStream(
+            capacity: (int)Math.Min((long?)request.ContentLength ?? 0, maxBytes));
+        var chunk = new byte[8192];
+        var total = 0;
+        int read;
+        while ((read = await request.Body.ReadAsync(chunk, ct).ConfigureAwait(false)) > 0)
+        {
+            total += read;
+            if (total > maxBytes)
+            {
+                return null;
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
+
         return buffer.ToArray();
     }
 
@@ -174,6 +214,11 @@ public static class WebhookEndpoint
         string.Equals(payload.Action, "created", StringComparison.Ordinal) &&
         payload.Issue.PullRequest is not null &&
         string.Equals(payload.Comment.Body.Trim(), "/review", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsFromBotItself(IssueCommentEvent payload, string botSlug) =>
+        !string.IsNullOrWhiteSpace(botSlug) &&
+        !string.IsNullOrWhiteSpace(payload.Comment.User.Login) &&
+        string.Equals(payload.Comment.User.Login, botSlug, StringComparison.OrdinalIgnoreCase);
 
     private static bool HasRequiredFields(PullRequestEvent payload) =>
         payload.Installation.Id > 0 &&

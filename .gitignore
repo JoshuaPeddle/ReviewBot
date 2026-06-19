@@ -10,6 +10,12 @@ riderModule.iml
 .DS_Store
 .idea/
 
+# Private keys and credentials must never be committed.
+*.pem
+*.key
+*.p12
+*.pfx
+
 # Runtime artifacts produced by the ReviewBot worker / retrieval index.
 # These are local-state directories, not source code.
 src/ReviewBot.Api/cache/

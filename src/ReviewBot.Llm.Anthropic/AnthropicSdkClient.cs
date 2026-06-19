@@ -38,7 +38,7 @@ internal sealed class AnthropicSdkClient : IAnthropicClient
 
         var content = textParts is { Length: > 0 }
             ? string.Concat(textParts)
-            : response.Message.ToString();
+            : response.Message?.ToString() ?? string.Empty;
 
         var usage = response.Usage is not null
             ? new LlmTokenUsage(

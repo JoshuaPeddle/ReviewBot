@@ -39,4 +39,7 @@ internal sealed record CommentRef
 {
     [JsonPropertyName("body")]
     public string Body { get; init; } = "";
+
+    [JsonPropertyName("user")]
+    public UserRef User { get; init; } = new();
 }

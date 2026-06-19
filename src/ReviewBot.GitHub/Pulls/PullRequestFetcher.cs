@@ -483,7 +483,10 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
             "removed" => FileChangeStatus.Removed,
             "renamed" => FileChangeStatus.Renamed,
             "copied" => FileChangeStatus.Copied,
-            _ => throw new InvalidOperationException($"Unsupported GitHub file status '{status}'."),
+            // GitHub has added new file statuses in the past (e.g. "changed",
+            // "unchanged"). Treat an unknown status as a generic Modified so a
+            // single PR with an unfamiliar status does not abort the whole review.
+            _ => FileChangeStatus.Modified,
         };
 
     private sealed record FetchedContent(int Index, string Path, string? Content);
