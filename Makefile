@@ -17,9 +17,10 @@ REVIEWBOT_EVAL_INDEX_CACHE_DIR ?= runs/eval-index
 # rather than burn an hour silently. Default tuned for a 27B thinking model.
 REVIEWBOT_EVAL_PER_FIXTURE_TIMEOUT ?= 240
 REVIEWBOT_EVAL_REQUEST_TIMEOUT ?= 180
-# Larger than the worker default because thinking models consume tokens on the
-# <think> block before producing the structured JSON response.
-REVIEWBOT_EVAL_MAX_TOKENS ?= 16384
+# Output token cap for each eval request. Kept small so prompt + output stays
+# within tight local context windows (e.g. the 32K reference model); 4096 is
+# ample for the structured JSON review response.
+REVIEWBOT_EVAL_MAX_TOKENS ?= 4096
 
 # Single timestamp per `make` invocation. Used so baseline + retrieval + comparison
 # files from one run share a prefix.

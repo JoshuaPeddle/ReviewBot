@@ -13,4 +13,4 @@ public sealed record LiveEvalOptions(
     string IndexCacheDir,
     int PerFixtureTimeoutSeconds = 240,
     int RequestTimeoutSeconds = 180,
-    int MaxTokens = 16384);
+    int MaxTokens = 4096);
