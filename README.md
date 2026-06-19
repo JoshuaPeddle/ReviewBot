@@ -2,7 +2,7 @@
 
 A self-hosted GitHub App that reviews pull requests with any Anthropic, OpenAI-compatible, or local LLM. MIT-licensed; designed to be brought up on your own hardware with a strong local model and pointed at real production PRs.
 
-The reference local profile is **`qwen/qwen3.6-27b` at 72K context** — runs on a 24GB NVIDIA card (3090/4090/A5000) or a 32GB+ M-series Mac with unified memory. Smaller 7B-class models (Qwen 2.5 7B, Llama 3.1 8B) work on 8–16GB GPUs with reduced quality.
+The reference local profile is **`qwen/qwen3.6-27b`** — runs on a 24GB NVIDIA card (3090/4090/A5000) or a 32GB+ M-series Mac with unified memory. Smaller 7B-class models (Qwen 2.5 7B, Llama 3.1 8B) work on 8–16GB GPUs with reduced quality.
 
 Reviews fire automatically when a PR is opened, reopened, or updated, or on demand when someone comments `/review` on the PR.
 
