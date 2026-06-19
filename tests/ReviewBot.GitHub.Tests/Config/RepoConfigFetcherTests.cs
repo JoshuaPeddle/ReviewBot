@@ -156,6 +156,24 @@ public class RepoConfigFetcherTests
     }
 
     [Fact]
+    public async Task FetchAsyncLeavesModelNameEmptyWhenOmittedSoProviderModelIsUsed()
+    {
+        const string yaml = """
+            model:
+              provider: openai
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Model.Should().Be(new ModelConfig("openai", Name: "", BaseUrlEnvVar: null));
+    }
+
+    [Fact]
     public async Task FetchAsyncReturnsDefaultAndLogsWarningWhenYamlIsInvalid()
     {
         var contents = Substitute.For<IRepositoryContentsClient>();

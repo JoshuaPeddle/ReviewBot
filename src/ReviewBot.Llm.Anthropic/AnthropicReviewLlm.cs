@@ -16,6 +16,8 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
 
     public string ProviderName => "anthropic";
 
+    public string ModelName => options.ModelName;
+
     public bool SupportsParallelRequests => true;
 
     private readonly AnthropicLlmOptions options;

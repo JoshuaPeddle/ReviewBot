@@ -16,6 +16,8 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
 
     public string ProviderName => "openai";
 
+    public string ModelName => options.ModelName;
+
     public bool SupportsParallelRequests => false;
 
     private readonly OpenAiLlmOptions options;

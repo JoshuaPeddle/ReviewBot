@@ -67,6 +67,46 @@ public sealed class ReviewLlmFactoryTests
     }
 
     [Fact]
+    public void CreateKeepsProviderModelWhenConfigNameIsBlank()
+    {
+        var anthropic = Substitute.For<IConfigurableReviewLlm>();
+        anthropic.ProviderName.Returns("anthropic");
+
+        var services = new ServiceCollection();
+        services.AddSingleton(new ReviewLlmProviderRegistration("anthropic", _ => anthropic));
+        services.AddReviewLlmFactory();
+        using var provider = services.BuildServiceProvider();
+
+        var llm = provider.GetRequiredService<IReviewLlmFactory>()
+            .Create(new ModelConfig("anthropic", Name: "", BaseUrlEnvVar: null));
+
+        llm.Should().BeSameAs(anthropic);
+        anthropic.DidNotReceiveWithAnyArgs().WithModelName(default!);
+    }
+
+    [Fact]
+    public void ResolveModelNameFallsBackToProviderModelWhenConfigNameIsBlank()
+    {
+        using var provider = BuildProviderWithRealLlms();
+
+        var resolved = provider.GetRequiredService<IReviewLlmFactory>()
+            .ResolveModelName(new ModelConfig("openai", Name: "", BaseUrlEnvVar: null));
+
+        resolved.Should().Be("gpt-default");
+    }
+
+    [Fact]
+    public void ResolveModelNameUsesConfigNameWhenPresent()
+    {
+        using var provider = BuildProviderWithRealLlms();
+
+        var resolved = provider.GetRequiredService<IReviewLlmFactory>()
+            .ResolveModelName(new ModelConfig("openai", "gpt-from-config", BaseUrlEnvVar: null));
+
+        resolved.Should().Be("gpt-from-config");
+    }
+
+    [Fact]
     public void CreateOnlyResolvesSelectedProvider()
     {
         var selected = Substitute.For<IConfigurableReviewLlm>();

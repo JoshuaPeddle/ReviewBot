@@ -141,7 +141,9 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         var provider = MergeProvider(fileConfig.Model?.Provider, owner, repo, sha, path);
         var model = new ModelConfig(
             provider,
-            MergeString(fileConfig.Model?.Name, defaults.Model.Name),
+            // An omitted model name stays empty so the LLM factory falls back to the provider's
+            // configured model (e.g. REVIEWBOT__OpenAi__ModelName) instead of a hardcoded default.
+            (fileConfig.Model?.Name ?? string.Empty).Trim(),
             MergeNullableString(fileConfig.Model?.BaseUrlEnvVar, defaults.Model.BaseUrlEnvVar));
 
         var trigger = new TriggerConfig(

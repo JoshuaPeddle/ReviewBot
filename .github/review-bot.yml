@@ -18,7 +18,8 @@ model:
   provider: openai
 
   # Model name passed to the provider API.
-  name: qwen/qwen3.6-27b
+  # Omitted on purpose: reviews in this repo use the model configured on the host via
+  # REVIEWBOT__OpenAi__ModelName. Set `name:` here to pin a specific model instead.
 
 review:
   # Post inline comments on individual diff lines.

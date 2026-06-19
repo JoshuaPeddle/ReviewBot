@@ -236,6 +236,15 @@ public sealed class ReviewWorker : BackgroundService
             return JobProcessStatus.Skipped;
         }
 
+        // When the repo config omits a model name, resolve the provider's configured model now
+        // (e.g. REVIEWBOT__OpenAi__ModelName) so token budgeting, cost, tracing, and the LLM call all
+        // agree on the concrete model rather than an empty placeholder.
+        if (string.IsNullOrWhiteSpace(config.Model.Name))
+        {
+            config = config with { Model = config.Model with { Name = llmFactory.ResolveModelName(config.Model) } };
+            reviewActivity?.SetTag("review.model", config.Model.Name);
+        }
+
         var repoFullName = $"{job.Owner}/{job.Repo}";
         var lastShaTask = prReviewStateStore
             .GetLastShaAsync(job.InstallationId, repoFullName, job.PrNumber, ct);
