@@ -123,8 +123,10 @@ public sealed class DotNetBuildRunner : IBuildRunner
     // Matches an MSBuild/Roslyn diagnostic line, e.g.
     //   /work/src/Foo.cs(12,34): error CS0103: The name 'x' does not exist [/work/src/Foo.csproj]
     // The column and the trailing "[project]" annotation are optional.
+    // The path group excludes newlines so the pattern stays anchored to a single
+    // line even if a caller ever matches against unsplit multi-line output.
     private static readonly Regex DiagnosticLine = new(
-        @"^(?<path>.+?)\((?<line>\d+)(?:,\d+)?\):\s+(?<sev>error|warning)\s+(?<code>[A-Za-z]+\d+):\s+(?<msg>.+?)(?:\s+\[[^\]]*\])?\s*$",
+        @"^(?<path>[^\r\n]+?)\((?<line>\d+)(?:,\d+)?\):\s+(?<sev>error|warning)\s+(?<code>[A-Za-z]+\d+):\s+(?<msg>[^\r\n]+?)(?:\s+\[[^\]]*\])?\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // Parses per-file diagnostics from build output, de-duplicating the repeats MSBuild
