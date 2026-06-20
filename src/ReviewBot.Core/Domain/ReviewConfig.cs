@@ -103,7 +103,7 @@ public sealed record ReviewOutputConfig(
     int MaxContextFileBytes = 50_000,
     bool RequestChangesOnError = false,
     bool ApproveIfClean = false,
-    int FullFileMaxBytes = 0,
+    int FullFileMaxBytes = 65_536,
     int ResponseReserveTokens = 4_096,
     bool ChunkedReview = true,
     int MaxChunks = 10,
