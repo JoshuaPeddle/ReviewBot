@@ -2111,7 +2111,12 @@ public sealed class ReviewWorker : BackgroundService
             return false;
         }
 
-        return ContainsAny(NormalizeForTextHeuristics(body), CompileFailureClaimPhrases);
+        // Collapse runs of spaces (NormalizeForTextHeuristics turns "C#" into "c "
+        // plus the following space, i.e. a double space) so phrases match cleanly.
+        var normalized = " " + string.Join(
+            ' ',
+            NormalizeForTextHeuristics(body).Split(' ', StringSplitOptions.RemoveEmptyEntries)) + " ";
+        return ContainsAny(normalized, CompileFailureClaimPhrases);
     }
 
     private static bool IsPositiveOnlySummary(string summary)
@@ -2188,13 +2193,15 @@ public sealed class ReviewWorker : BackgroundService
         phrases.Any(phrase => normalizedText.Contains(phrase, StringComparison.Ordinal));
 
     // Phrases (normalized: lower-cased, non-alphanumerics -> spaces, space-padded)
-    // that assert the code does not compile. "#" normalizes to a space, so
-    // "invalid C# syntax" -> " invalid c  syntax " and " invalid c " matches.
+    // that assert the code does not compile. Matched against whitespace-collapsed
+    // normalized text, so "invalid C# syntax" -> " invalid c syntax " (the "#"
+    // becomes a space that the collapse removes). " invalid c syntax " is used
+    // rather than a bare " invalid c " so it can't fire on "invalid cache/class".
     private static readonly string[] CompileFailureClaimPhrases =
     [
         " syntax error ",
         " invalid syntax ",
-        " invalid c ",
+        " invalid c syntax ",
         " does not compile ",
         " will not compile ",
         " won t compile ",
