@@ -25,7 +25,7 @@ public sealed class RuffDiagnosticProvider : IDiagnosticProvider
 
     public string LanguageId => "python";
 
-    public async Task<IReadOnlyList<Diagnostic>> GetDiagnosticsAsync(
+    public async Task<DiagnosticReport> GetDiagnosticsAsync(
         string workspacePath,
         IReadOnlyList<string> changedPaths,
         CancellationToken ct)
@@ -36,7 +36,7 @@ public sealed class RuffDiagnosticProvider : IDiagnosticProvider
             .ToArray();
         if (pythonFiles.Length == 0)
         {
-            return Array.Empty<Diagnostic>();
+            return DiagnosticReport.NotRun;
         }
 
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(TimeoutSeconds));
@@ -47,7 +47,9 @@ public sealed class RuffDiagnosticProvider : IDiagnosticProvider
             var args = new List<string> { "check", "--output-format=json", "--quiet" };
             args.AddRange(pythonFiles);
             var output = await CaptureAsync(workspacePath, new ProcessCommand("ruff", args.ToArray()), linkedCts.Token);
-            return ParseRuffJson(output, workspacePath);
+            // ruff ran successfully (it parsed the files), so the analyzed paths are
+            // proven to parse — verification may refute syntax claims against them.
+            return new DiagnosticReport(true, ParseRuffJson(output, workspacePath), pythonFiles);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -58,7 +60,7 @@ public sealed class RuffDiagnosticProvider : IDiagnosticProvider
             // ruff missing, timed out, or emitted unparseable output — verification
             // proceeds without Python diagnostics rather than failing the review.
             this.logger.LogDebug(ex, "Ruff diagnostics unavailable in {Path}; continuing without them", workspacePath);
-            return Array.Empty<Diagnostic>();
+            return DiagnosticReport.NotRun;
         }
     }
 

@@ -131,7 +131,10 @@ public class ReviewWorkerTests
         var provider = Substitute.For<IDiagnosticProvider>();
         provider.LanguageId.Returns("python");
         provider.GetDiagnosticsAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
-            .Returns([new Diagnostic("app/main.py", 10, DiagnosticSeverity.Warning, "F821", "Undefined name `foo`")]);
+            .Returns(new DiagnosticReport(
+                ToolRan: true,
+                Diagnostics: [new Diagnostic("app/main.py", 10, DiagnosticSeverity.Warning, "F821", "Undefined name `foo`")],
+                AnalyzedPaths: ["app/main.py"]));
 
         await using var fixture = new WorkerFixture(diagnosticProviders: [provider]);
         var files = new[] { CreateFile("app/main.py") };
@@ -167,6 +170,54 @@ public class ReviewWorkerTests
         capturedResult!.Comments.Should().ContainSingle();
         capturedResult.Comments[0].Verification.Should().Be(VerificationStatus.Verified);
         capturedResult.Comments[0].Body.Should().Contain("✓ **Verified**").And.Contain("F821");
+    }
+
+    [Fact]
+    public async Task RefutesCompileClaimsOnFilesAProviderParsedCleanly()
+    {
+        ReviewTrace? capturedTrace = null;
+        var traceWritten = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var traceWriter = Substitute.For<IReviewTraceWriter>();
+        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedTrace = call.Arg<ReviewTrace>();
+                traceWritten.SetResult();
+                return Task.CompletedTask;
+            });
+
+        // Provider ran and reported no error on app/main.py — it is proven to parse.
+        var provider = Substitute.For<IDiagnosticProvider>();
+        provider.LanguageId.Returns("python");
+        provider.GetDiagnosticsAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .Returns(new DiagnosticReport(ToolRan: true, Diagnostics: [], AnalyzedPaths: ["app/main.py"]));
+
+        await using var fixture = new WorkerFixture(traceWriter: traceWriter, diagnosticProviders: [provider]);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = false }
+        };
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default).ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default, default).ReturnsForAnyArgs([CreateFile("app/main.py")]);
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
+            .Returns(new GroundingContext(new LanguageMetadata("python", "3.12", null, []), null, null));
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review.",
+                [new InlineComment("app/main.py", 2, "RIGHT", "This is invalid syntax and will not parse.", Severity.Error, Confidence.High)]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(Task.CompletedTask);
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await traceWritten.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        capturedTrace.Should().NotBeNull();
+        capturedTrace!.DroppedComments.Should().ContainSingle(c =>
+            c.Reason == "verification_parse_contradicts" && c.Body.Contains("invalid syntax"));
+        capturedTrace.FinalComments.Should().BeEmpty();
     }
 
     [Fact]

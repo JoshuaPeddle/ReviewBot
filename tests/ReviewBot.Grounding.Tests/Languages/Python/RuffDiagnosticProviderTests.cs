@@ -37,9 +37,10 @@ public class RuffDiagnosticProviderTests
     {
         var provider = new RuffDiagnosticProvider();
 
-        var diagnostics = await provider.GetDiagnosticsAsync("/work", ["src/App.cs", "README.md"], CancellationToken.None);
+        var report = await provider.GetDiagnosticsAsync("/work", ["src/App.cs", "README.md"], CancellationToken.None);
 
-        diagnostics.Should().BeEmpty();
+        report.ToolRan.Should().BeFalse();
+        report.Diagnostics.Should().BeEmpty();
     }
 
     [Fact]
@@ -47,13 +48,15 @@ public class RuffDiagnosticProviderTests
     {
         var provider = new RuffDiagnosticProvider();
 
-        // All unsafe .py paths — none reach ruff, so no process runs and the result is empty.
-        var diagnostics = await provider.GetDiagnosticsAsync(
+        // All unsafe .py paths — none reach ruff, so no process runs and nothing is analyzed.
+        var report = await provider.GetDiagnosticsAsync(
             "/work",
             ["../../etc/secret.py", "/abs/evil.py", "--output-format.py", @"a\b.py"],
             CancellationToken.None);
 
-        diagnostics.Should().BeEmpty();
+        report.ToolRan.Should().BeFalse();
+        report.AnalyzedPaths.Should().BeEmpty();
+        report.Diagnostics.Should().BeEmpty();
     }
 
     [Fact]
@@ -61,12 +64,14 @@ public class RuffDiagnosticProviderTests
     {
         var provider = new RuffDiagnosticProvider();
 
-        // No ruff on PATH in the unlikely event it's installed, point at a nonexistent dir.
-        var diagnostics = await provider.GetDiagnosticsAsync(
+        // Point at a nonexistent dir so the process can't start; the provider must report
+        // ToolRan == false so verification never treats the file as proven to parse.
+        var report = await provider.GetDiagnosticsAsync(
             Path.Combine(Path.GetTempPath(), $"reviewbot-missing-{Guid.NewGuid():N}"),
             ["app/main.py"],
             CancellationToken.None);
 
-        diagnostics.Should().BeEmpty();
+        report.ToolRan.Should().BeFalse();
+        report.Diagnostics.Should().BeEmpty();
     }
 }

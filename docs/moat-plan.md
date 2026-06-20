@@ -77,6 +77,11 @@ for the findings it can adjudicate. Map onto the existing drop machinery:
   refutation beyond V0 is the next slice and needs the known rule coverage these providers give
   (test-pass / diagnostic-absence cannot safely refute — the bug may live in an untested path).* Run
   the language's analyzer/type-checker on the head
+- **Refutation (safe subset) — shipped.** `FindingRefuter` drops a compile/syntax-failure claim on a
+  file proven to parse cleanly — a successful build (`CompileClaimClassifier`, folding the prior V0
+  heuristic) or a provider that ran over the file and reported no error (`DiagnosticReport.ToolRan`
+  distinguishes "ran clean" from "tool absent"). It stays strictly inside the totally-checkable domain
+  and never refutes logic/type/conditional claims, which ground truth cannot settle.
   workspace, scoped to changed files: Roslyn analyzers (.NET), `tsc --noEmit` + eslint (TS/JS),
   `mypy`/`ruff` (Python), `go vet` (Go). A real diagnostic at/near the finding's line *corroborates*
   (→ `Verified`); an `error`-claim of a class the analyzer fully covers with no matching diagnostic is
@@ -211,6 +216,30 @@ findings against real diagnostics) end to end and is fully gated by the existing
   calibration. Don't widen the funnel — the whole design stays pointed at *precision with proof*.
 
 ## Discovered follow-ups (from dogfooding)
+
+- **Private authenticated package sources + build grounding.** When `grounding.build` is on and a repo
+  restores from a private authenticated feed (ProGet, Azure Artifacts, GitHub Packages, a private npm
+  registry), three problems surface, all worth addressing:
+  1. *Misleading signal.* The workspace clone carries only the GitHub installation token, never feed
+     credentials, so `dotnet restore` (or `npm install`) hits the feed and gets **401**. `DotNetBuildRunner`
+     turns that into `BuildResult(Success: false)`, and grounding then tells the model **"Build: FAILED"**
+     — indistinguishable from genuinely broken code, which can *increase* false "won't compile" findings.
+     *Fix:* detect a restore/auth failure (401 / "unauthorized" in restore output) and surface it as
+     "build not verified (restore failed)" rather than "Build: FAILED"; don't let an auth failure feed the
+     compile-claim signal.
+  2. *No verification value.* A failed build yields no diagnostics, so corroboration can't fire; V0
+     refutation is correctly gated on `Build.Success == true` so it stays safe, but the whole verification
+     stage silently no-ops on these repos. *Fix:* the build-free `IDiagnosticProvider`s are the mitigation
+     — parse-only analyzers (ruff today; a future tsc/eslint would need `npm install` and reintroduce the
+     problem, so prefer true parse-only tools and treat install-required ones as build-grounding-class).
+  3. *Security.* If the host *is* configured with feed credentials, restoring/building an **untrusted PR**
+     executes that PR's build logic (MSBuild targets, source generators, analyzers, `postinstall` scripts)
+     on the host with those creds — an RCE / credential-exposure surface, and a malicious `NuGet.config`
+     could redirect to an attacker feed. *Fix:* document that build grounding must run in an ephemeral,
+     network-restricted, secret-free sandbox; offer opt-in per-install trusted-feed credentials scoped away
+     from untrusted-PR builds. Reasoning: building untrusted code is inherently code execution; the private
+     feed only adds credentials worth stealing, so the boundary, not the feed, is what must be controlled.
+
 
 - **Subject the summary to actionability + self-critique filtering.** PR #34's
   self-review showed confidently-wrong reasoning and literal think-out-loud

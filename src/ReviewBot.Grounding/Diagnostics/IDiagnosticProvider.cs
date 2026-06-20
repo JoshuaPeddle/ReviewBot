@@ -1,5 +1,3 @@
-using ReviewBot.Core.Domain;
-
 namespace ReviewBot.Grounding.Diagnostics;
 
 /// <summary>
@@ -14,7 +12,7 @@ public interface IDiagnosticProvider
 {
     string LanguageId { get; }
 
-    Task<IReadOnlyList<Diagnostic>> GetDiagnosticsAsync(
+    Task<DiagnosticReport> GetDiagnosticsAsync(
         string workspacePath,
         IReadOnlyList<string> changedPaths,
         CancellationToken ct);
