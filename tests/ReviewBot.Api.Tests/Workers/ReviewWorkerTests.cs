@@ -3206,6 +3206,113 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task DropsCompileErrorClaimsWhenBuildSucceeded()
+    {
+        ReviewTrace? capturedTrace = null;
+        var traceWriter = Substitute.For<IReviewTraceWriter>();
+        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedTrace = call.Arg<ReviewTrace>();
+                return Task.CompletedTask;
+            });
+
+        await using var fixture = new WorkerFixture(traceWriter: traceWriter);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = false }
+        };
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        // Build grounding ran and succeeded, so a "won't compile" claim is provably wrong.
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new GroundingContext(
+                new LanguageMetadata("dotnet", "10.0", null, []),
+                new BuildResult(Success: true, Warnings: 0, Errors: 0, Output: "Build succeeded."),
+                null));
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review.",
+                [
+                    new InlineComment("src/App.cs", 1, "RIGHT", "The property initializer `= ;` is invalid C# syntax.", Severity.Error, Confidence.High),
+                    new InlineComment("src/App.cs", 2, "RIGHT", "This should handle null input before dereferencing.", Severity.Warning, Confidence.High)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+        capturedTrace.Should().NotBeNull();
+        capturedTrace!.DroppedComments.Should().ContainSingle(c =>
+            c.Reason == "grounding_build_contradicts" && c.Body.Contains("invalid C# syntax"));
+        capturedTrace.FinalComments.Select(c => c.Body)
+            .Should().ContainSingle().Which.Should().Contain("handle null input");
+    }
+
+    [Fact]
+    public async Task KeepsNonCompileInvalidClaimsEvenWhenBuildSucceeded()
+    {
+        ReviewTrace? capturedTrace = null;
+        var traceWriter = Substitute.For<IReviewTraceWriter>();
+        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedTrace = call.Arg<ReviewTrace>();
+                return Task.CompletedTask;
+            });
+
+        await using var fixture = new WorkerFixture(traceWriter: traceWriter);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = false }
+        };
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new GroundingContext(
+                new LanguageMetadata("dotnet", "10.0", null, []),
+                new BuildResult(Success: true, Warnings: 0, Errors: 0, Output: "Build succeeded."),
+                null));
+        // "invalid cache key" is a runtime concern, not a compile claim — it must
+        // survive a successful build (regression guard for the old " invalid c " phrase).
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "This builds an invalid cache key for the lookup.", Severity.Warning, Confidence.High)]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+        capturedTrace.Should().NotBeNull();
+        capturedTrace!.DroppedComments.Should().NotContain(c => c.Reason == "grounding_build_contradicts");
+        capturedTrace.FinalComments.Select(c => c.Body)
+            .Should().ContainSingle().Which.Should().Contain("invalid cache key");
+    }
+
+    [Fact]
     public async Task TraceContainsChunkDataAndTimingsAfterReview()
     {
         ReviewTrace? capturedTrace = null;

@@ -415,7 +415,7 @@ public sealed class ReviewWorker : BackgroundService
                 .ConfigureAwait(false);
             result = ReviewResultMerger.Merge(chunkOutcomes.Select(o => o.Result).ToArray());
             rawCandidateComments = result.Comments;
-            var filteredComments = FilterCandidateComments(result, config);
+            var filteredComments = FilterCandidateComments(result, config, grounding);
             var critiquedComments = await ApplySelfCritiqueWithDropsAsync(llm, reviewedFiles, filteredComments.Comments, config, ct)
                 .ConfigureAwait(false);
             candidateComments = critiquedComments.Comments;
@@ -467,7 +467,7 @@ public sealed class ReviewWorker : BackgroundService
             metrics.RecordLlmDuration(sw.Elapsed.TotalMilliseconds, config.Model.Provider);
 
             var initialResult = result;
-            var initialFilteredComments = FilterCandidateComments(initialResult, config);
+            var initialFilteredComments = FilterCandidateComments(initialResult, config, grounding);
             var speculativeSelfCritique = StartSelfCritiqueIfNeeded(llm, files, initialFilteredComments.Comments, config, ct);
             AgenticContextReviewOutcome agenticOutcome;
 
@@ -505,7 +505,7 @@ public sealed class ReviewWorker : BackgroundService
             {
                 CancelSelfCritique(speculativeSelfCritique);
                 rawCandidateComments = result.Comments;
-                var filteredComments = FilterCandidateComments(result, config);
+                var filteredComments = FilterCandidateComments(result, config, grounding);
                 var critiquedComments = await ApplySelfCritiqueWithDropsAsync(llm, files, filteredComments.Comments, config, ct)
                     .ConfigureAwait(false);
                 candidateComments = critiquedComments.Comments;
@@ -1977,7 +1977,10 @@ public sealed class ReviewWorker : BackgroundService
     private static bool ShouldCritiqueComment(InlineComment comment) =>
         comment.Confidence != Confidence.High || comment.Severity == Severity.Error;
 
-    private static CommentFilterResult FilterCandidateComments(ReviewResult result, ReviewConfig config)
+    private static CommentFilterResult FilterCandidateComments(
+        ReviewResult result,
+        ReviewConfig config,
+        GroundingContext? grounding)
     {
         if (!config.Review.InlineComments)
         {
@@ -1993,7 +1996,7 @@ public sealed class ReviewWorker : BackgroundService
 
         foreach (var comment in result.Comments)
         {
-            var reason = GetCommentDropReason(comment, config);
+            var reason = GetCommentDropReason(comment, config, grounding);
             if (reason is null)
             {
                 kept.Add(comment);
@@ -2006,11 +2009,18 @@ public sealed class ReviewWorker : BackgroundService
         return new CommentFilterResult(kept.ToArray(), dropped.ToArray());
     }
 
-    private static string? GetCommentDropReason(InlineComment comment, ReviewConfig config)
+    private static string? GetCommentDropReason(InlineComment comment, ReviewConfig config, GroundingContext? grounding)
     {
         if (comment.Confidence < config.Review.MinConfidence)
         {
             return "below_min_confidence";
+        }
+
+        // A successful Tier-2 build proves the code compiles, so a comment that
+        // asserts a compile/syntax failure is provably wrong — drop it.
+        if (ClaimsCompileFailureContradictedByBuild(comment.Body, grounding))
+        {
+            return "grounding_build_contradicts";
         }
 
         if (IsPraiseOnlyComment(comment.Body))
@@ -2092,6 +2102,23 @@ public sealed class ReviewWorker : BackgroundService
             !ContainsAny(normalized, ActionableConcernPhrases);
     }
 
+    private static bool ClaimsCompileFailureContradictedByBuild(string body, GroundingContext? grounding)
+    {
+        // Only refute when the build actually ran and succeeded; a failed build
+        // means a "won't compile" comment might well be correct.
+        if (grounding?.Build is not { Success: true } || string.IsNullOrWhiteSpace(body))
+        {
+            return false;
+        }
+
+        // Collapse runs of spaces (NormalizeForTextHeuristics turns "C#" into "c "
+        // plus the following space, i.e. a double space) so phrases match cleanly.
+        var normalized = " " + string.Join(
+            ' ',
+            NormalizeForTextHeuristics(body).Split(' ', StringSplitOptions.RemoveEmptyEntries)) + " ";
+        return ContainsAny(normalized, CompileFailureClaimPhrases);
+    }
+
     private static bool IsPositiveOnlySummary(string summary)
     {
         if (string.IsNullOrWhiteSpace(summary))
@@ -2164,6 +2191,32 @@ public sealed class ReviewWorker : BackgroundService
 
     private static bool ContainsAny(string normalizedText, IReadOnlyList<string> phrases) =>
         phrases.Any(phrase => normalizedText.Contains(phrase, StringComparison.Ordinal));
+
+    // Phrases (normalized: lower-cased, non-alphanumerics -> spaces, space-padded)
+    // that assert the code does not compile. Matched against whitespace-collapsed
+    // normalized text, so "invalid C# syntax" -> " invalid c syntax " (the "#"
+    // becomes a space that the collapse removes). " invalid c syntax " is used
+    // rather than a bare " invalid c " so it can't fire on "invalid cache/class".
+    private static readonly string[] CompileFailureClaimPhrases =
+    [
+        " syntax error ",
+        " invalid syntax ",
+        " invalid c syntax ",
+        " does not compile ",
+        " will not compile ",
+        " won t compile ",
+        " doesn t compile ",
+        " cannot compile ",
+        " can t compile ",
+        " fails to compile ",
+        " compilation error ",
+        " compile error ",
+        " compiler error ",
+        " will not build ",
+        " won t build ",
+        " fails to build ",
+        " build error ",
+    ];
 
     private static readonly string[] PraiseCommentPhrases =
     [
