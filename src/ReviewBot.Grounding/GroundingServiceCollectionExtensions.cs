@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using ReviewBot.Grounding.Build;
 using ReviewBot.Grounding.Detection;
+using ReviewBot.Grounding.Diagnostics;
 using ReviewBot.Grounding.Workspace;
 
 namespace ReviewBot.Grounding;
@@ -37,6 +38,12 @@ public sealed class GroundingBuilder
     public GroundingBuilder AddTestRunner<T>() where T : class, ITestRunner
     {
         services.AddSingleton<ITestRunner, T>();
+        return this;
+    }
+
+    public GroundingBuilder AddDiagnosticProvider<T>() where T : class, IDiagnosticProvider
+    {
+        services.AddSingleton<IDiagnosticProvider, T>();
         return this;
     }
 }
