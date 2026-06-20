@@ -6,6 +6,7 @@ riderModule.iml
 /runs/
 *.user
 .env
+.env.local
 .env.eval
 .DS_Store
 .idea/

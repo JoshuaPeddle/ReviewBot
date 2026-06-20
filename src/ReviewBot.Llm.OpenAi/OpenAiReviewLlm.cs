@@ -153,7 +153,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
     }
 
     private IOpenAiChatClient GetClient() =>
-        configuredClient ?? (sdkClient ??= new OpenAiSdkChatClient(options));
+        configuredClient ?? (sdkClient ??= new OpenAiSdkChatClient(options, logger));
 
     private static PromptPayload BuildRepairPrompt(string failedResponse, bool includeContextRequests)
     {

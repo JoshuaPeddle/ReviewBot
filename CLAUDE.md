@@ -17,6 +17,38 @@ dotnet format                      # apply .editorconfig style
 - **Central package management**: all package versions are pinned in `Directory.Packages.props`. Add a `<PackageReference>` without a version in the `.csproj`, and the version in `Directory.Packages.props`.
 - File-scoped namespaces and `this.`-qualified fields are the house style (see `.editorconfig`); match the surrounding code.
 
+## Dogfood every change: have ReviewBot review your own PR (REQUIRED)
+
+ReviewBot reviews ReviewBot. After you finish a unit of work, **run it through the bot and read its review before considering the task done** — both to improve the change and to find bugs in ReviewBot itself. This is the project's core feedback loop; treat it as part of "done", not an optional extra.
+
+Tooling lives in `scripts/` and reads `.env.local` (gitignored — GitHub App creds + LLM endpoint, mirroring the Rider "ReviewBot.Api" run config; recreate it from there if missing). The bot is the **reviewbotdemo** GitHub App installed on `JoshuaPeddle/ReviewBot`, so the PR must be on that repo.
+
+The loop:
+
+```bash
+# 1. Do the work, commit it, open a PR (branch off main; never commit secrets).
+git switch -c my-change && git commit -am "..." && git push -u origin my-change
+gh pr create --fill                      # note the PR number, e.g. 21
+
+# 2. Start the bot (background) and wait for health.
+scripts/reviewbot-serve.sh > /tmp/reviewbot.log 2>&1 &
+until curl -fsS http://127.0.0.1:5174/healthz >/dev/null; do sleep 2; done
+
+# 3. Trigger a review (POSTs a locally-signed synthetic webhook for that PR).
+scripts/trigger-review.sh <pr-number>    # returns HTTP 202 + a delivery id
+
+# 4. Wait for the worker to post, then read the review back.
+tail -f /tmp/reviewbot.log               # watch until the trace is written / review posted
+scripts/read-review.sh <pr-number>       # bot's summary + inline comments + trace path
+```
+
+How it works: `trigger-review.sh` resolves the PR head SHA via `gh`, builds a `pull_request` `opened` payload, signs it with HMAC-SHA256 using the local webhook secret, and POSTs to `/webhook` — no GitHub webhook tunnel needed. Re-running on the same SHA re-reviews the whole PR (the worker only skips a delta with zero changed files). The per-review trace at `src/ReviewBot.Api/traces/<owner>/<repo>/<pr>-<delivery>.json` has candidate-vs-posted comments, drop reasons, token usage, and the prompt budget — that file, not just the posted comments, is how you judge the bot.
+
+Then act on what you read, in **both** directions:
+
+1. **Improve your change** — triage the bot's findings; apply the correct ones.
+2. **Improve ReviewBot** — the loop is also an eval. When the bot misbehaves (a 400 that fails the whole review, a hallucinated finding like "`= ;` is invalid C# syntax" when the source is `= "";`, comments on files outside the diff that get dropped, malformed JSON), that is a ReviewBot bug. Fix it (with a unit test) as part of the same effort. Example already landed this way: `OpenAiContextLimitFitter` refits output tokens and retries when a strict server (vLLM) rejects a request whose prompt + output exceeds the model context window.
+
 ## Running tests
 
 ```
