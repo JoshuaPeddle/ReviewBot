@@ -89,10 +89,18 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         this.logger = logger ?? NullLogger<CompositeGroundingProvider>.Instance;
     }
 
-    public async Task<GroundingContext> GetContextAsync(GroundingRequest request, CancellationToken ct)
+    public async Task<GroundingContext> GetContextAsync(
+        GroundingRequest request,
+        CancellationToken ct,
+        ISharedWorkspace? sharedWorkspace = null)
     {
         if (!request.Config.Enabled)
             return Empty;
+
+        // When a job-scoped workspace is supplied, grounding clones through it and
+        // leaves disposal to the scope so retrieval and verification can reuse the
+        // same checkout. Without one, grounding owns and disposes its own clone.
+        var ownsWorkspace = sharedWorkspace is null;
 
         try
         {
@@ -117,8 +125,8 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
 
                 // Start the workspace clone concurrently with Tier 1 metadata extraction.
                 // The clone URL is known as soon as the detector matches; we don't need metadata first.
-                if (request.Config.Build && workspaceFactory is not null)
-                    cloneTask = StartCloneAsync(request, ct);
+                if (request.Config.Build && (sharedWorkspace is not null || workspaceFactory is not null))
+                    cloneTask = StartCloneAsync(request, sharedWorkspace, ct);
 
                 try
                 {
@@ -130,7 +138,8 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
                 catch
                 {
                     // Metadata extraction failed — cancel and dispose any in-flight clone to avoid leaks.
-                    if (cloneTask is not null)
+                    // A shared clone is owned by the scope; leave it for other consumers / scope disposal.
+                    if (cloneTask is not null && ownsWorkspace)
                         await CancelAndDisposeCloneAsync(cloneTask).ConfigureAwait(false);
                     throw;
                 }
@@ -145,6 +154,7 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
                         language.LanguageId,
                         request,
                         checkResult,
+                        ownsWorkspace,
                         ct)
                     .ConfigureAwait(false);
                 buildResult = localResult.Build;
@@ -202,11 +212,42 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         }
     }
 
-    private Task<IWorkspace?> StartCloneAsync(GroundingRequest request, CancellationToken ct)
+    private Task<IWorkspace?> StartCloneAsync(
+        GroundingRequest request,
+        ISharedWorkspace? sharedWorkspace,
+        CancellationToken ct)
     {
-        var cloneUrl = $"https://github.com/{request.Owner}/{request.Repo}.git";
+        // Prefer the PR head's clone URL (a fork remote for cross-repo PRs); the
+        // base-repo URL only holds the head SHA for same-repo branches.
+        var cloneUrl = string.IsNullOrWhiteSpace(request.HeadCloneUrl)
+            ? $"https://github.com/{request.Owner}/{request.Repo}.git"
+            : request.HeadCloneUrl;
         var workspaceRequest = new WorkspaceRequest(cloneUrl, request.HeadSha, request.InstallationToken);
-        return CloneWorkspaceAsync(workspaceRequest, request, ct);
+        return sharedWorkspace is not null
+            ? CloneSharedWorkspaceAsync(sharedWorkspace, workspaceRequest, request, ct)
+            : CloneWorkspaceAsync(workspaceRequest, request, ct);
+    }
+
+    private async Task<IWorkspace?> CloneSharedWorkspaceAsync(
+        ISharedWorkspace sharedWorkspace,
+        WorkspaceRequest workspaceRequest,
+        GroundingRequest request,
+        CancellationToken ct)
+    {
+        try
+        {
+            return await sharedWorkspace.GetOrCreateAsync(workspaceRequest, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Shared workspace clone failed for {Owner}/{Repo}; build grounding skipped",
+                request.Owner, request.Repo);
+            return null;
+        }
     }
 
     private async Task<IWorkspace?> CloneWorkspaceAsync(
@@ -241,6 +282,7 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         string languageId,
         GroundingRequest request,
         TestResult? checkResult,
+        bool ownsWorkspace,
         CancellationToken ct)
     {
         using var buildActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.grounding.tier2_build");
@@ -286,7 +328,8 @@ public sealed class CompositeGroundingProvider : IGroundingProvider
         }
         finally
         {
-            if (workspace is not null)
+            // A shared clone is owned by the job scope; only dispose a clone we own.
+            if (workspace is not null && ownsWorkspace)
                 await workspace.DisposeAsync().ConfigureAwait(false);
         }
     }

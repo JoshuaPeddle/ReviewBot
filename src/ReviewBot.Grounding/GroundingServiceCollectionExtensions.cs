@@ -10,6 +10,7 @@ public static class GroundingServiceCollectionExtensions
     public static GroundingBuilder AddGrounding(this IServiceCollection services)
     {
         services.AddSingleton<IWorkspaceFactory, GitWorkspaceFactory>();
+        services.AddSingleton<ISharedWorkspaceFactory, SharedWorkspaceFactory>();
         services.AddSingleton<IGroundingProvider, CompositeGroundingProvider>();
         return new GroundingBuilder(services);
     }
