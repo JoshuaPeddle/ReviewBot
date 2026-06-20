@@ -406,6 +406,7 @@ public sealed class ReviewWorker : BackgroundService
                     fullFileContents,
                     job,
                     installationToken.Token,
+                    promptBudget.ResponseReserveTokens,
                     ct)
                 .ConfigureAwait(false);
             result = ReviewResultMerger.Merge(chunkOutcomes.Select(o => o.Result).ToArray());
@@ -823,6 +824,7 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyDictionary<string, string>? fullFileContents,
         ReviewJob job,
         string installationToken,
+        int maxOutputTokens,
         CancellationToken ct)
     {
         if (llm.SupportsParallelRequests)
@@ -837,6 +839,7 @@ public sealed class ReviewWorker : BackgroundService
                     fullFileContents,
                     job,
                     installationToken,
+                    maxOutputTokens,
                     ct)))
                 .ConfigureAwait(false);
         }
@@ -854,6 +857,7 @@ public sealed class ReviewWorker : BackgroundService
                     fullFileContents,
                     job,
                     installationToken,
+                    maxOutputTokens,
                     ct)
                 .ConfigureAwait(false));
         }
@@ -871,6 +875,7 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyDictionary<string, string>? fullFileContents,
         ReviewJob job,
         string installationToken,
+        int maxOutputTokens,
         CancellationToken ct)
     {
         using var chunkActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.chunk_review");
@@ -889,7 +894,7 @@ public sealed class ReviewWorker : BackgroundService
             repositoryContext,
             ChunkIndex: chunk.Index,
             TotalChunks: chunk.TotalChunks,
-            MaxOutputTokens: config.Review.ResponseReserveTokens);
+            MaxOutputTokens: maxOutputTokens);
 
         var prompt = PromptBuilder.Build(request);
         ReviewResult result;
