@@ -62,7 +62,7 @@ public sealed class EvalQuickFixtureTests
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "development-plan.md")))
+            if (File.Exists(Path.Combine(directory.FullName, "ReviewBot.sln")))
             {
                 return directory.FullName;
             }

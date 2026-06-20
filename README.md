@@ -254,7 +254,6 @@ dotnet test tests/ReviewBot.E2eTests # LLM in-the-loop test, requires REVIEWBOT_
 
 ## Roadmap and history
 
-- [development-plan.md](development-plan.md) — current roadmap and ship gate.
 - [CHANGELOG.md](CHANGELOG.md) — shipped slices with corrected assumptions per phase.
 
 ## License
