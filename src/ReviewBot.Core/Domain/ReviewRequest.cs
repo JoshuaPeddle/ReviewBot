@@ -15,7 +15,11 @@ public sealed record ReviewRequest(
     // Output-token allowance for the LLM call, derived from the prompt budget's
     // response reserve so that prompt + output is guaranteed to fit the model
     // context window. Null falls back to the provider's configured default.
-    int? MaxOutputTokens = null);
+    int? MaxOutputTokens = null,
+    // True when this is an incremental re-review: the files below are only those
+    // changed since the previous review, not the whole PR. Lets the prompt tell
+    // the model to scope its summary to the update.
+    bool IsIncrementalUpdate = false);
 
 public sealed record RepositoryContextSnippet(
     string Path,

@@ -26,6 +26,26 @@ public class PromptBuilderTests
     }
 
     [Fact]
+    public void UserPromptScopesSummaryToTheUpdateForIncrementalReviews()
+    {
+        var request = CreateRequest() with { IsIncrementalUpdate = true };
+
+        var payload = PromptBuilder.Build(request);
+
+        payload.UserPrompt.Should().Contain("incremental re-review");
+        payload.UserPrompt.Should().Contain("changed since the previous review");
+        payload.UserPrompt.Should().Contain("not the pull request as a whole");
+    }
+
+    [Fact]
+    public void UserPromptOmitsIncrementalScopeForFullReviews()
+    {
+        var payload = PromptBuilder.Build(CreateRequest());
+
+        payload.UserPrompt.Should().NotContain("incremental re-review");
+    }
+
+    [Fact]
     public void SystemPromptContainsCustomInstructionsWhenSet()
     {
         var request = CreateRequest(config: ReviewConfig.Default with

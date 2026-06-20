@@ -246,10 +246,19 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
         prompt.Append("\n\nPR Body:\n");
         prompt.Append(request.PrBody);
 
+        if (request.IsIncrementalUpdate)
+        {
+            prompt.Append(
+                "\n\nReview scope:\nThis is an incremental re-review of an open pull request. " +
+                "Only the files changed since the previous review are included below — not the whole PR. " +
+                "Review just these changes and frame your summary as the changes in this update " +
+                "(e.g. \"This update …\"), not the pull request as a whole.");
+        }
+
         if (request is { ChunkIndex: not null, TotalChunks: not null } &&
             request.TotalChunks > 1)
         {
-            prompt.Append("\n\nReview scope:\n(reviewing chunk ");
+            prompt.Append(request.IsIncrementalUpdate ? "\n(reviewing chunk " : "\n\nReview scope:\n(reviewing chunk ");
             prompt.Append(request.ChunkIndex.Value);
             prompt.Append(" of ");
             prompt.Append(request.TotalChunks.Value);
