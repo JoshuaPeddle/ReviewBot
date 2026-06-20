@@ -439,6 +439,29 @@ public sealed class OpenAiReviewLlmTests
             .Which.ModelName.Should().Be("gpt-override");
     }
 
+    [Fact]
+    public async Task UsesRequestMaxOutputTokensWhenSet()
+    {
+        var client = new FakeOpenAiChatClient("""{"summary":"ok","comments":[]}""");
+        var llm = CreateLlm(client);
+
+        await llm.ReviewAsync(CreateRequest() with { MaxOutputTokens = 777 }, CancellationToken.None);
+
+        client.Requests.Should().ContainSingle().Which.MaxTokens.Should().Be(777);
+    }
+
+    [Fact]
+    public async Task FallsBackToConfiguredMaxTokensWhenRequestOutputUnset()
+    {
+        var client = new FakeOpenAiChatClient("""{"summary":"ok","comments":[]}""");
+        var llm = CreateLlm(client);
+
+        await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+
+        // OpenAiLlmOptions default MaxTokens (no per-request override supplied).
+        client.Requests.Should().ContainSingle().Which.MaxTokens.Should().Be(4096);
+    }
+
     private static OpenAiReviewLlm CreateLlm(FakeOpenAiChatClient client) =>
         CreateLlm(client, _ => Task.CompletedTask);
 

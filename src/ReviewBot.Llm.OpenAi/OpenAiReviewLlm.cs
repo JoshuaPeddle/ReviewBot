@@ -53,7 +53,10 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
         var prompt = PromptBuilder.Build(request);
         var responseFormat = OpenAiResponseFormats.Normalize(options.ResponseFormat);
         var includeContextRequests = request.Config.Review.AgenticContext;
-        var (firstResponse, firstUsage) = await SendAsync(prompt, [prompt.UserPrompt], responseFormat, includeContextRequests, "review", ct);
+        // Prefer the budget-derived output allowance so prompt + output fits the
+        // model context window; fall back to the host default when unset.
+        var maxOutputTokens = request.MaxOutputTokens is > 0 ? request.MaxOutputTokens.Value : options.MaxTokens;
+        var (firstResponse, firstUsage) = await SendAsync(prompt, [prompt.UserPrompt], responseFormat, includeContextRequests, "review", maxOutputTokens, ct);
         var firstParse = LlmResultParser.Parse(firstResponse, logger);
         if (firstParse is { Success: true, Value: not null })
         {
@@ -67,7 +70,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
         ct.ThrowIfCancellationRequested();
 
         var repairPrompt = BuildRepairPrompt(firstResponse, includeContextRequests);
-        var (repairResponse, repairUsage) = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], responseFormat, includeContextRequests, "review", ct);
+        var (repairResponse, repairUsage) = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], responseFormat, includeContextRequests, "review", maxOutputTokens, ct);
         var totalUsage = firstUsage?.Add(repairUsage) ?? repairUsage;
         var repairParse = LlmResultParser.Parse(repairResponse, logger);
         if (repairParse is { Success: true, Value: not null })
@@ -92,7 +95,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
         ArgumentNullException.ThrowIfNull(prompt);
         ArgumentException.ThrowIfNullOrWhiteSpace(phase);
 
-        var (content, _) = await SendAsync(prompt, [prompt.UserPrompt], OpenAiResponseFormats.Text, includeContextRequestsInJsonSchema: false, phase, ct);
+        var (content, _) = await SendAsync(prompt, [prompt.UserPrompt], OpenAiResponseFormats.Text, includeContextRequestsInJsonSchema: false, phase, options.MaxTokens, ct);
         return content;
     }
 
@@ -113,13 +116,14 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
         string responseFormat,
         bool includeContextRequestsInJsonSchema,
         string phase,
+        int maxOutputTokens,
         CancellationToken ct)
     {
         var request = new OpenAiChatRequest(
             SystemPrompt: prompt.SystemPrompt,
             UserMessages: userMessages,
             ModelName: options.ModelName,
-            MaxTokens: options.MaxTokens,
+            MaxTokens: maxOutputTokens,
             Temperature: options.Temperature,
             ResponseFormat: responseFormat,
             IncludeContextRequestsInJsonSchema: includeContextRequestsInJsonSchema);

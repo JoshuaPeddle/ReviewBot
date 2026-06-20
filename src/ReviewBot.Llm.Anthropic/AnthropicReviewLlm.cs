@@ -54,7 +54,10 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         ArgumentNullException.ThrowIfNull(request);
 
         var prompt = PromptBuilder.Build(request);
-        var (firstResponse, firstUsage) = await SendAsync(prompt, [prompt.UserPrompt], enablePromptCaching: true, "review", ct);
+        // Prefer the budget-derived output allowance so prompt + output fits the
+        // model context window; fall back to the host default when unset.
+        var maxOutputTokens = request.MaxOutputTokens is > 0 ? request.MaxOutputTokens.Value : options.MaxTokens;
+        var (firstResponse, firstUsage) = await SendAsync(prompt, [prompt.UserPrompt], enablePromptCaching: true, "review", maxOutputTokens, ct);
         var firstParse = LlmResultParser.Parse(firstResponse, logger);
         if (firstParse is { Success: true, Value: not null })
         {
@@ -68,7 +71,7 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         ct.ThrowIfCancellationRequested();
 
         var repairPrompt = BuildRepairPrompt(firstResponse, request.Config.Review.AgenticContext);
-        var (repairResponse, repairUsage) = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], enablePromptCaching: false, "review", ct);
+        var (repairResponse, repairUsage) = await SendAsync(repairPrompt, [repairPrompt.UserPrompt], enablePromptCaching: false, "review", maxOutputTokens, ct);
         var totalUsage = firstUsage?.Add(repairUsage) ?? repairUsage;
         var repairParse = LlmResultParser.Parse(repairResponse, logger);
         if (repairParse is { Success: true, Value: not null })
@@ -90,7 +93,7 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         ArgumentNullException.ThrowIfNull(prompt);
         ArgumentException.ThrowIfNullOrWhiteSpace(phase);
 
-        var (content, _) = await SendAsync(prompt, [prompt.UserPrompt], enablePromptCaching: true, phase, ct);
+        var (content, _) = await SendAsync(prompt, [prompt.UserPrompt], enablePromptCaching: true, phase, options.MaxTokens, ct);
         return content;
     }
 
@@ -110,13 +113,14 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
         IReadOnlyList<string> userMessages,
         bool enablePromptCaching,
         string phase,
+        int maxOutputTokens,
         CancellationToken ct)
     {
         var request = new AnthropicMessageRequest(
             SystemPrompt: prompt.SystemPrompt,
             UserMessages: userMessages,
             ModelName: options.ModelName,
-            MaxTokens: options.MaxTokens,
+            MaxTokens: maxOutputTokens,
             Temperature: options.Temperature,
             EnablePromptCaching: enablePromptCaching && options.PromptCachingEnabled);
 

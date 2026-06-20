@@ -436,7 +436,8 @@ public sealed class ReviewWorker : BackgroundService
                 config,
                 grounding,
                 fullFileContents,
-                repositoryContext);
+                repositoryContext,
+                MaxOutputTokens: promptBudget.ResponseReserveTokens);
 
             var prompt = PromptBuilder.Build(request);
             ReviewResult singleChunkResult;
@@ -887,7 +888,8 @@ public sealed class ReviewWorker : BackgroundService
             FilterFullFileContents(fullFileContents, chunk.Files),
             repositoryContext,
             ChunkIndex: chunk.Index,
-            TotalChunks: chunk.TotalChunks);
+            TotalChunks: chunk.TotalChunks,
+            MaxOutputTokens: config.Review.ResponseReserveTokens);
 
         var prompt = PromptBuilder.Build(request);
         ReviewResult result;
