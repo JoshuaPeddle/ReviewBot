@@ -11,7 +11,7 @@ public class DomainModelTests
         var config = ReviewConfig.Default;
 
         config.Model.Provider.Should().Be("openai");
-        config.Model.Name.Should().Be("qwen3.5:9b-q4_K_M");
+        config.Model.Name.Should().Be("qwen3.6-27b");
         config.Review.InlineComments.Should().BeTrue();
         config.Review.Summary.Should().BeTrue();
         config.Review.MaxFiles.Should().Be(50);
