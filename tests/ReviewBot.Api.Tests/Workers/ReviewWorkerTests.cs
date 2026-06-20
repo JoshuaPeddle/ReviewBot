@@ -2205,7 +2205,9 @@ public class ReviewWorkerTests
         await using var fixture = new WorkerFixture();
         var config = ReviewConfig.Default with
         {
-            Review = ReviewConfig.Default.Review with { AgenticContext = true }
+            // Isolate the agentic-context second pass from self-critique, which now
+            // also scrutinises the high-confidence error comment it returns.
+            Review = ReviewConfig.Default.Review with { AgenticContext = true, SelfCritique = false }
         };
         IReadOnlyList<ContextRequest>? fetchedRequests = null;
         PromptPayload? enrichedPrompt = null;
@@ -2627,10 +2629,13 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs(config);
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        // High-confidence, non-error comments stay exempt from critique. (A
+        // high-confidence *error* comment would be critiqued — see
+        // SelfCritiqueCritiquesHighConfidenceErrorComments.)
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult(
                 "Review complete.",
-                [new InlineComment("src/App.cs", 1, "RIGHT", "Certain issue.", Severity.Error, Confidence.High)]));
+                [new InlineComment("src/App.cs", 1, "RIGHT", "Worth a look.", Severity.Warning, Confidence.High)]));
         fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(_ =>
             {
@@ -2644,6 +2649,44 @@ public class ReviewWorkerTests
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         await fixture.Llm.DidNotReceiveWithAnyArgs()
+            .CompleteRawAsync(default!, default, default!);
+    }
+
+    [Fact]
+    public async Task SelfCritiqueCritiquesHighConfidenceErrorComments()
+    {
+        await using var fixture = new WorkerFixture();
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = true }
+        };
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review complete.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "This is invalid syntax.", Severity.Error, Confidence.High)]));
+        // Critique judges the confident-but-wrong error comment and drops it.
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
+            .Returns("""{"retained_indices":[],"rationale":"the flagged code is valid"}""");
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        // A confident error claim must be scrutinised, not auto-retained.
+        await fixture.Llm.ReceivedWithAnyArgs()
             .CompleteRawAsync(default!, default, default!);
     }
 
@@ -2680,7 +2723,8 @@ public class ReviewWorkerTests
             .Returns(new ReviewResult(
                 "Mixed confidence.",
                 [
-                    new InlineComment("src/App.cs", 1, "RIGHT", "High stays.", Severity.Error, Confidence.High),
+                    // High-confidence + non-error => exempt from critique (still retained).
+                    new InlineComment("src/App.cs", 1, "RIGHT", "High stays.", Severity.Warning, Confidence.High),
                     new InlineComment("src/App.cs", 2, "RIGHT", "Medium kept.", Severity.Warning, Confidence.Medium),
                     new InlineComment("src/App.cs", 3, "RIGHT", "Low dropped.", Severity.Info, Confidence.Low),
                     new InlineComment("src/App.cs", 4, "RIGHT", "Medium kept too.", Severity.Warning, Confidence.Medium)
