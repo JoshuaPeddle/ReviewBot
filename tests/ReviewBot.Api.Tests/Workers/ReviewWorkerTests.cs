@@ -224,7 +224,7 @@ public class ReviewWorkerTests
                 fileContentFetchStarted.SetResult();
                 return [("src/App.cs", "public class App { }")];
             });
-        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
             .Returns(_ =>
             {
                 groundingCompleted.SetResult();
@@ -261,7 +261,7 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs(config);
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
-        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
             .ReturnsForAnyArgs(_ =>
             {
                 groundingStarted.SetResult();
@@ -1682,7 +1682,7 @@ public class ReviewWorkerTests
             .Returns(ReviewConfig.Default);
         fixture.PullRequestFetcher.FetchFilesAsync("octo-org", "reviewbot", 42, "install-token", 50, Arg.Any<IReadOnlySet<string>?>(), Arg.Any<CancellationToken>())
             .Returns([CreateFile("src/App.cs")]);
-        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
             .Returns(call =>
             {
                 capturedGroundingRequest = call.Arg<GroundingRequest>();
@@ -1723,7 +1723,7 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs(ReviewConfig.Default);
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
-        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
             .Returns(expectedGrounding);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(call =>
@@ -2847,7 +2847,7 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs(ReviewConfig.Default);
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
-        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
             .Returns(new GroundingContext(null, null, null));
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult("no grounding, still reviewed", []));
@@ -3229,7 +3229,7 @@ public class ReviewWorkerTests
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         // Build grounding ran and succeeded, so a "won't compile" claim is provably wrong.
-        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
             .Returns(new GroundingContext(
                 new LanguageMetadata("dotnet", "10.0", null, []),
                 new BuildResult(Success: true, Warnings: 0, Errors: 0, Output: "Build succeeded."),
@@ -3283,7 +3283,7 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs(config);
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
-        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
             .Returns(new GroundingContext(
                 new LanguageMetadata("dotnet", "10.0", null, []),
                 new BuildResult(Success: true, Warnings: 0, Errors: 0, Output: "Build succeeded."),
@@ -3730,6 +3730,9 @@ public class ReviewWorkerTests
             RepoIndexFactory = Substitute.For<IRepoIndexFactory>();
             RepoIndex = Substitute.For<IRepoIndex>();
             WorkspaceFactory = Substitute.For<IWorkspaceFactory>();
+            // Real shared-workspace scope over the substitute factory: tests that stub
+            // WorkspaceFactory.CreateAsync keep working, since GetOrCreateAsync delegates to it.
+            SharedWorkspaceFactory = new SharedWorkspaceFactory(WorkspaceFactory);
             CostCalculator = costCalculator ?? Substitute.For<IReviewCostCalculator>();
 
             TokenProvider.GetTokenAsync(98765, Arg.Any<CancellationToken>())
@@ -3748,7 +3751,7 @@ public class ReviewWorkerTests
                     Arg.Any<PromptBudget>(),
                     Arg.Any<CancellationToken>())
                 .Returns(call => new RetrievalContextResult([], call.Arg<PromptBudget>()));
-            GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>())
+            GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
                 .Returns(new GroundingContext(null, null, null));
             // Default: no prior review recorded (first review)
             PrReviewStateStore.GetLastShaAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
@@ -3771,7 +3774,7 @@ public class ReviewWorkerTests
                 ReviewTokenEstimator,
                 RetrievalProvider,
                 RepoIndexFactory,
-                WorkspaceFactory,
+                SharedWorkspaceFactory,
                 CostCalculator,
                 traceWriter ?? NullReviewTraceWriter.Instance,
                 TimeProvider.System,
@@ -3812,6 +3815,8 @@ public class ReviewWorkerTests
         public IRepoIndex RepoIndex { get; }
 
         public IWorkspaceFactory WorkspaceFactory { get; }
+
+        public ISharedWorkspaceFactory SharedWorkspaceFactory { get; }
 
         public IReviewCostCalculator CostCalculator { get; }
 

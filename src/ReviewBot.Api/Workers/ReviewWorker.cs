@@ -40,7 +40,7 @@ public sealed class ReviewWorker : BackgroundService
     private readonly IReviewPromptTokenEstimator tokenEstimator;
     private readonly IRetrievalProvider retrievalProvider;
     private readonly IRepoIndexFactory repoIndexFactory;
-    private readonly IWorkspaceFactory workspaceFactory;
+    private readonly ISharedWorkspaceFactory sharedWorkspaceFactory;
     private readonly IReviewCostCalculator costCalculator;
     private readonly IReviewTraceWriter traceWriter;
     private readonly TimeProvider clock;
@@ -61,7 +61,7 @@ public sealed class ReviewWorker : BackgroundService
         IReviewPromptTokenEstimator tokenEstimator,
         IRetrievalProvider retrievalProvider,
         IRepoIndexFactory repoIndexFactory,
-        IWorkspaceFactory workspaceFactory,
+        ISharedWorkspaceFactory sharedWorkspaceFactory,
         IReviewCostCalculator costCalculator,
         IReviewTraceWriter traceWriter,
         TimeProvider clock,
@@ -81,7 +81,7 @@ public sealed class ReviewWorker : BackgroundService
         this.tokenEstimator = tokenEstimator ?? throw new ArgumentNullException(nameof(tokenEstimator));
         this.retrievalProvider = retrievalProvider ?? throw new ArgumentNullException(nameof(retrievalProvider));
         this.repoIndexFactory = repoIndexFactory ?? throw new ArgumentNullException(nameof(repoIndexFactory));
-        this.workspaceFactory = workspaceFactory ?? throw new ArgumentNullException(nameof(workspaceFactory));
+        this.sharedWorkspaceFactory = sharedWorkspaceFactory ?? throw new ArgumentNullException(nameof(sharedWorkspaceFactory));
         this.costCalculator = costCalculator ?? throw new ArgumentNullException(nameof(costCalculator));
         this.traceWriter = traceWriter ?? throw new ArgumentNullException(nameof(traceWriter));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
@@ -330,17 +330,23 @@ public sealed class ReviewWorker : BackgroundService
             return JobProcessStatus.Skipped;
         }
 
+        // One workspace per job: grounding clones it, retrieval indexing reuses the
+        // same checkout, and it is disposed once when the job ends rather than each
+        // stage cloning (and discarding) its own copy.
+        await using var sharedWorkspace = sharedWorkspaceFactory.Create();
+
         var groundingRequest = new GroundingRequest(
             Owner: job.Owner,
             Repo: job.Repo,
             HeadSha: metadata.HeadSha,
             InstallationToken: installationToken.Token,
-            Config: config.Grounding);
+            Config: config.Grounding,
+            HeadCloneUrl: metadata.HeadCloneUrl);
         var groundingSw = Stopwatch.StartNew();
         GroundingContext grounding;
         using (var _ = ReviewBotActivitySource.Instance.StartActivity("reviewbot.grounding"))
         {
-            grounding = await GetGroundingContextAsync(groundingRequest, job, ct).ConfigureAwait(false);
+            grounding = await GetGroundingContextAsync(groundingRequest, sharedWorkspace, job, ct).ConfigureAwait(false);
         }
 
         var groundingElapsed = groundingSw.Elapsed;
@@ -364,6 +370,7 @@ public sealed class ReviewWorker : BackgroundService
                     installationToken.Token,
                     lastSha,
                     changedPathsSinceLastReview,
+                    sharedWorkspace,
                     ct)
                 .ConfigureAwait(false);
             retrievalActivity?.SetTag("retrieval.snippets_returned", retrievalContext.Snippets.Count);
@@ -1119,11 +1126,12 @@ public sealed class ReviewWorker : BackgroundService
 
     private async Task<GroundingContext> GetGroundingContextAsync(
         GroundingRequest request,
+        ISharedWorkspace sharedWorkspace,
         ReviewJob job,
         CancellationToken ct)
     {
         var groundingSw = Stopwatch.StartNew();
-        var grounding = await groundingProvider.GetContextAsync(request, ct).ConfigureAwait(false);
+        var grounding = await groundingProvider.GetContextAsync(request, ct, sharedWorkspace).ConfigureAwait(false);
         groundingSw.Stop();
         var groundingResult = grounding.Tests is not null
             ? (grounding.Tests.Failed == 0 ? "checks_success" : "checks_failed")
@@ -1155,6 +1163,7 @@ public sealed class ReviewWorker : BackgroundService
         string installationToken,
         string? lastIndexedSha,
         IReadOnlySet<string>? changedPathsSinceLastReview,
+        ISharedWorkspace sharedWorkspace,
         CancellationToken ct)
     {
         if (!config.Retrieval.Enabled)
@@ -1169,6 +1178,7 @@ public sealed class ReviewWorker : BackgroundService
                 installationToken,
                 lastIndexedSha,
                 changedPathsSinceLastReview,
+                sharedWorkspace,
                 ct)
             .ConfigureAwait(false);
         if (!indexReady)
@@ -1216,6 +1226,7 @@ public sealed class ReviewWorker : BackgroundService
         string installationToken,
         string? lastIndexedSha,
         IReadOnlySet<string>? changedPathsSinceLastReview,
+        ISharedWorkspace sharedWorkspace,
         CancellationToken ct)
     {
         var repoIndex = repoIndexFactory.Create(config.Retrieval.IndexCacheDir);
@@ -1243,8 +1254,10 @@ public sealed class ReviewWorker : BackgroundService
                 metadata.HeadSha,
                 job.PrNumber);
 
-            await using var workspace = await workspaceFactory
-                .CreateAsync(new WorkspaceRequest(cloneUrl, metadata.HeadSha, installationToken), ct)
+            // Reuse the job-scoped checkout (grounding may have already cloned it);
+            // the scope owns disposal, so this method must not dispose the workspace.
+            var workspace = await sharedWorkspace
+                .GetOrCreateAsync(new WorkspaceRequest(cloneUrl, metadata.HeadSha, installationToken), ct)
                 .ConfigureAwait(false);
             var request = new RepoIndexRequest(job.Owner, job.Repo, metadata.HeadSha, workspace.LocalPath, config.Ignore);
             if (lastIndexedSha is not null &&

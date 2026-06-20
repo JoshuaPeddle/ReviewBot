@@ -210,6 +210,51 @@ public class CompositeGroundingProviderTests
     }
 
     [Fact]
+    public async Task GetContextAsyncWithSharedWorkspaceBuildsButLeavesDisposalToTheScope()
+    {
+        var detector = Substitute.For<ILanguageDetector>();
+        detector.CanDetect(Arg.Any<IReadOnlyList<string>>()).Returns(true);
+        var language = new LanguageMetadata("dotnet", "10.0", null, []);
+        detector.ExtractMetadataAsync(Arg.Any<IRepoContentReader>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(language);
+
+        var runner = Substitute.For<IBuildRunner>();
+        runner.LanguageId.Returns("dotnet");
+        var buildResult = new BuildResult(true, 0, 0, "Build succeeded");
+        runner.RunAsync(Arg.Any<string>(), Arg.Any<GroundingConfig>(), Arg.Any<CancellationToken>())
+            .Returns(buildResult);
+
+        var workspace = Substitute.For<IWorkspace>();
+        workspace.LocalPath.Returns("/tmp/shared-workspace");
+        workspace.DisposeAsync().Returns(ValueTask.CompletedTask);
+
+        // Shared scope owns the clone; grounding's own factory must not be used.
+        var sharedFactory = Substitute.For<IWorkspaceFactory>();
+        sharedFactory.CreateAsync(Arg.Any<WorkspaceRequest>(), Arg.Any<CancellationToken>()).Returns(workspace);
+        var shared = new SharedWorkspace(sharedFactory);
+
+        var ownFactory = Substitute.For<IWorkspaceFactory>();
+        var reader = Substitute.For<IRepoContentReader>();
+        reader.ListRootFilesAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(["MyApp.csproj"]);
+
+        var buildRequest = Request with { Config = GroundingConfig.Default with { Build = true } };
+        var provider = CreateProviderWithBuild([detector], [runner], ownFactory, reader);
+
+        var ctx = await provider.GetContextAsync(buildRequest, CancellationToken.None, shared);
+
+        ctx.Build.Should().BeSameAs(buildResult);
+        await runner.Received(1).RunAsync("/tmp/shared-workspace", Arg.Any<GroundingConfig>(), Arg.Any<CancellationToken>());
+        // Grounding cloned through the shared scope, not its own factory, and did not dispose it.
+        await ownFactory.DidNotReceive().CreateAsync(Arg.Any<WorkspaceRequest>(), Arg.Any<CancellationToken>());
+        await workspace.DidNotReceive().DisposeAsync();
+
+        // The scope — not grounding — disposes the clone exactly once.
+        await shared.DisposeAsync();
+        await workspace.Received(1).DisposeAsync();
+    }
+
+    [Fact]
     public async Task GetContextAsyncSkipsBuildWhenBuildDisabled()
     {
         var detector = Substitute.For<ILanguageDetector>();
