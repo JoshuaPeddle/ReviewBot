@@ -184,8 +184,13 @@ public class CompositionRootTests
 
         tokenProvider.GetTokenAsync(98765, Arg.Any<CancellationToken>())
             .Returns(new InstallationToken("install-token", DateTimeOffset.UtcNow.AddHours(1)));
+        // This test exercises the webhook -> worker -> post pipeline, not retrieval
+        // (which now defaults on and would clone/index the repo), so opt out of it.
         repoConfigFetcher.FetchAsync("octo-org", "reviewbot", "head-sha-abc", "install-token", Arg.Any<CancellationToken>())
-            .Returns(ReviewConfig.Default);
+            .Returns(ReviewConfig.Default with
+            {
+                Retrieval = ReviewConfig.Default.Retrieval with { Enabled = false }
+            });
         pullRequestFetcher.FetchMetadataAsync("octo-org", "reviewbot", 42, "install-token", Arg.Any<CancellationToken>())
             .Returns(new PullRequestMetadata("Improve parser", "Adds coverage.", "base-sha", "head-sha-abc"));
         pullRequestFetcher.FetchFilesAsync("octo-org", "reviewbot", 42, "install-token", 50, Arg.Any<IReadOnlySet<string>?>(), Arg.Any<CancellationToken>())

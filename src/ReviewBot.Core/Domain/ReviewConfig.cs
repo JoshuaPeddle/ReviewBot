@@ -74,7 +74,7 @@ public sealed record RetrievalConfig(
     public const string BothDepth = "both";
 
     public static RetrievalConfig Default { get; } = new(
-        Enabled: false,
+        Enabled: true,
         MaxBytes: 102_400,
         // "both" surfaces method/type definitions with their bodies AND top-K
         // caller spans. Definitions are what give the model semantic context
