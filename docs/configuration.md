@@ -174,13 +174,15 @@ review:
   chunk_headroom: 0.80
 
   # Minimum confidence for inline comments to be posted: low, medium, or high.
-  # Default: low (no confidence-based filtering).
-  min_confidence: low
+  # Default: medium (drops comments the model itself tags low-confidence; a
+  # comment with no confidence field counts as high, so it is kept).
+  min_confidence: medium
 
   # Run a second LLM pass over surviving low/medium-confidence comments to remove
   # likely false positives. High-confidence comments are retained without critique.
-  # Default: false
-  self_critique: false
+  # Runs only when there is a non-high-confidence comment to critique.
+  # Default: true
+  self_critique: true
 
   # Allow the first LLM pass to request a small number of additional repo files.
   # The worker validates paths, applies ignore globs, rejects secret-looking files,
@@ -195,11 +197,12 @@ review:
   max_context_file_bytes: 50000
 
   # Fetch and include full file contents for changed, non-deleted files whose
-  # patch is at or below this byte threshold. This can reduce false positives
-  # for small files but increases prompt size; tune it to the model context window.
+  # patch is at or below this byte threshold, giving the model surrounding code
+  # rather than just the diff hunk. Inclusion is bounded by the prompt budget, so
+  # on a small-context model fewer/no files fit even with a large threshold.
   # 0 disables full-file context.
-  # Default: 0
-  full_file_max_bytes: 0
+  # Default: 65536
+  full_file_max_bytes: 65536
 
   # Post REQUEST_CHANGES instead of COMMENT when any surviving inline comment
   # has severity: error. This can block merges on protected branches.

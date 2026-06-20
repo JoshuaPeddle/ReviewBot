@@ -45,8 +45,9 @@ review:
   # Minimum confidence level for inline comments to be posted. Comments below this
   # threshold are silently dropped before posting. "low" posts everything; "high" posts
   # only comments the model is certain about.
-  # One of: low, medium, high. Default: low
-  #min_confidence: medium
+  # One of: low, medium, high. Default: medium (drops comments the model itself
+  # tags low-confidence; set to low to post everything).
+  #min_confidence: low
 
   trigger:
     # Review when the bot is explicitly added as a reviewer on the PR.
@@ -61,7 +62,7 @@ retrieval:
     # Deterministic repository-context retrieval: a SQLite symbol index built per
     # head SHA, from which definitions and top callers referenced by the diff are
     # injected as review context (bounded by the prompt budget).
-    # Default: false
+    # Default: true
     enabled: true
 
     # Maximum retrieved context bytes to include in a review.

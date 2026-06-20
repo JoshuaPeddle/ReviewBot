@@ -8,3 +8,6 @@ grounding:
   enabled: true
   build: false
   tests: true
+
+retrieval:
+  enabled: false

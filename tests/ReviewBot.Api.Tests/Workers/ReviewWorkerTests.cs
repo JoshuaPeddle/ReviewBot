@@ -958,8 +958,12 @@ public class ReviewWorkerTests
         ReviewRequest? capturedRequest = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        // Full-file context now defaults on; disable it explicitly for this test.
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(ReviewConfig.Default);
+            .ReturnsForAnyArgs(ReviewConfig.Default with
+            {
+                Review = ReviewConfig.Default.Review with { FullFileMaxBytes = 0 }
+            });
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
@@ -2163,8 +2167,13 @@ public class ReviewWorkerTests
         await using var fixture = new WorkerFixture();
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        // Full-file context now defaults on; disable it so this test only exercises
+        // the agentic-context fetch path.
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(ReviewConfig.Default);
+            .ReturnsForAnyArgs(ReviewConfig.Default with
+            {
+                Review = ReviewConfig.Default.Review with { FullFileMaxBytes = 0 }
+            });
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
@@ -2424,7 +2433,10 @@ public class ReviewWorkerTests
             Review = ReviewConfig.Default.Review with
             {
                 AgenticContext = true,
-                SelfCritique = true
+                SelfCritique = true,
+                // Isolate the agentic-context/self-critique interplay from the
+                // now-default-on full-file fetch path.
+                FullFileMaxBytes = 0
             }
         };
         var agenticFetchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2573,8 +2585,12 @@ public class ReviewWorkerTests
         await using var fixture = new WorkerFixture();
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        // Self-critique now defaults on, so disable it explicitly for this test.
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(ReviewConfig.Default);
+            .ReturnsForAnyArgs(ReviewConfig.Default with
+            {
+                Review = ReviewConfig.Default.Review with { SelfCritique = false }
+            });
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
@@ -2644,9 +2660,12 @@ public class ReviewWorkerTests
             });
 
         await using var fixture = new WorkerFixture(traceWriter: traceWriter);
+        // Pin MinConfidence=Low so the low-confidence comment survives the confidence
+        // filter and reaches self-critique (the behavior under test); the default is
+        // now Medium, which would drop it earlier.
         var config = ReviewConfig.Default with
         {
-            Review = ReviewConfig.Default.Review with { SelfCritique = true }
+            Review = ReviewConfig.Default.Review with { SelfCritique = true, MinConfidence = Confidence.Low }
         };
         ReviewResult? postedResult = null;
         PromptPayload? critiquePrompt = null;

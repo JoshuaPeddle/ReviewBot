@@ -74,7 +74,7 @@ public sealed record RetrievalConfig(
     public const string BothDepth = "both";
 
     public static RetrievalConfig Default { get; } = new(
-        Enabled: false,
+        Enabled: true,
         MaxBytes: 102_400,
         // "both" surfaces method/type definitions with their bodies AND top-K
         // caller spans. Definitions are what give the model semantic context
@@ -96,14 +96,14 @@ public sealed record ReviewOutputConfig(
     int MaxFiles,
     int MaxPatchLines,
     TriggerConfig Trigger,
-    Confidence MinConfidence = Confidence.Low,
-    bool SelfCritique = false,
+    Confidence MinConfidence = Confidence.Medium,
+    bool SelfCritique = true,
     bool AgenticContext = false,
     int MaxContextRequests = 5,
     int MaxContextFileBytes = 50_000,
     bool RequestChangesOnError = false,
     bool ApproveIfClean = false,
-    int FullFileMaxBytes = 0,
+    int FullFileMaxBytes = 65_536,
     int ResponseReserveTokens = 4_096,
     bool ChunkedReview = true,
     int MaxChunks = 10,
