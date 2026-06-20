@@ -174,13 +174,15 @@ review:
   chunk_headroom: 0.80
 
   # Minimum confidence for inline comments to be posted: low, medium, or high.
-  # Default: low (no confidence-based filtering).
-  min_confidence: low
+  # Default: medium (drops comments the model itself tags low-confidence; a
+  # comment with no confidence field counts as high, so it is kept).
+  min_confidence: medium
 
   # Run a second LLM pass over surviving low/medium-confidence comments to remove
   # likely false positives. High-confidence comments are retained without critique.
-  # Default: false
-  self_critique: false
+  # Runs only when there is a non-high-confidence comment to critique.
+  # Default: true
+  self_critique: true
 
   # Allow the first LLM pass to request a small number of additional repo files.
   # The worker validates paths, applies ignore globs, rejects secret-looking files,

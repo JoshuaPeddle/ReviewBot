@@ -97,7 +97,7 @@ public sealed record ReviewOutputConfig(
     int MaxPatchLines,
     TriggerConfig Trigger,
     Confidence MinConfidence = Confidence.Medium,
-    bool SelfCritique = false,
+    bool SelfCritique = true,
     bool AgenticContext = false,
     int MaxContextRequests = 5,
     int MaxContextFileBytes = 50_000,
