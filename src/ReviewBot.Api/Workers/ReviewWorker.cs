@@ -537,9 +537,11 @@ public sealed class ReviewWorker : BackgroundService
             ];
         }
 
-        candidateComments = await ApplyVerificationAsync(
+        var verification = await ApplyVerificationAsync(
                 candidateComments, grounding, config, files, sharedWorkspace, metadata, installationToken.Token, job, ct)
             .ConfigureAwait(false);
+        candidateComments = verification.Comments;
+        droppedComments = CombineDroppedComments(droppedComments, verification.RefutedDrops);
         result = ApplyOutputConfig(result, candidateComments, config);
         if (config.Review.Summary)
         {
@@ -2096,11 +2098,11 @@ public sealed class ReviewWorker : BackgroundService
         return dropped.ToArray();
     }
 
-    // Cross-checks findings against ground-truth build diagnostics: a finding the
-    // compiler independently flags is marked Verified and annotated with the
-    // corroborating diagnostic. Purely additive — it never drops a finding — and a
-    // no-op unless build grounding produced diagnostics.
-    private async Task<IReadOnlyList<InlineComment>> ApplyVerificationAsync(
+    // Verifies findings against ground truth before posting: refutes compile/syntax
+    // claims on files an analyzer proved parse cleanly (dropping them), then marks
+    // findings an analyzer independently corroborates as Verified. A no-op unless
+    // build grounding or a diagnostic provider produced ground truth.
+    private async Task<VerificationOutcome> ApplyVerificationAsync(
         IReadOnlyList<InlineComment> comments,
         GroundingContext grounding,
         ReviewConfig config,
@@ -2113,42 +2115,59 @@ public sealed class ReviewWorker : BackgroundService
     {
         if (!config.Review.Verification.Enabled || comments.Count == 0)
         {
-            return comments;
+            return new VerificationOutcome(comments, []);
         }
 
-        var diagnostics = await GatherDiagnosticsAsync(
+        var gathered = await GatherDiagnosticsAsync(
                 grounding, config, files, sharedWorkspace, metadata, installationToken, job, ct)
             .ConfigureAwait(false);
-        if (diagnostics.Count == 0)
+
+        // Refute compile/syntax-failure claims on files an analyzer proved parse cleanly.
+        var refutation = FindingRefuter.Refute(comments, gathered.CleanlyParsedPaths);
+        var refutedDrops = refutation.Refuted.Count == 0
+            ? Array.Empty<DroppedComment>()
+            : refutation.Refuted.Select(c => new DroppedComment(c, "verification_parse_contradicts")).ToArray();
+        if (refutation.Refuted.Count > 0)
         {
-            return comments;
+            logger.LogInformation(
+                "Verification: refuted {RefutedCount} compile/syntax claim(s) on cleanly-parsed file(s) for {Owner}/{Repo}#{PrNumber}",
+                refutation.Refuted.Count,
+                job.Owner,
+                job.Repo,
+                job.PrNumber);
         }
 
-        var corroborated = FindingCorroborator.Corroborate(comments, diagnostics);
-        var verifiedCount = corroborated.Count(c => c.Evidence is not null);
-        if (verifiedCount == 0)
+        // Corroborate the survivors against diagnostics.
+        var survivors = refutation.Kept;
+        var finalComments = survivors;
+        if (gathered.Diagnostics.Count > 0)
         {
-            return comments;
+            var corroborated = FindingCorroborator.Corroborate(survivors, gathered.Diagnostics);
+            var verifiedCount = corroborated.Count(c => c.Evidence is not null);
+            if (verifiedCount > 0)
+            {
+                logger.LogInformation(
+                    "Verification: corroborated {VerifiedCount}/{CommentCount} finding(s) against diagnostics for {Owner}/{Repo}#{PrNumber}",
+                    verifiedCount,
+                    survivors.Count,
+                    job.Owner,
+                    job.Repo,
+                    job.PrNumber);
+                finalComments = corroborated
+                    .Select(c => c.Evidence is { } evidence
+                        ? AppendVerificationEvidence(c.Comment, evidence)
+                        : c.Comment)
+                    .ToArray();
+            }
         }
 
-        logger.LogInformation(
-            "Verification: corroborated {VerifiedCount}/{CommentCount} finding(s) against diagnostics for {Owner}/{Repo}#{PrNumber}",
-            verifiedCount,
-            comments.Count,
-            job.Owner,
-            job.Repo,
-            job.PrNumber);
-
-        return corroborated
-            .Select(c => c.Evidence is { } evidence
-                ? AppendVerificationEvidence(c.Comment, evidence)
-                : c.Comment)
-            .ToArray();
+        return new VerificationOutcome(finalComments, refutedDrops);
     }
 
     // Combines build diagnostics (when build grounding ran) with cheap, build-free
-    // diagnostics from language providers (e.g. ruff) run against the existing checkout.
-    private async Task<IReadOnlyList<Diagnostic>> GatherDiagnosticsAsync(
+    // diagnostics from language providers (e.g. ruff) run against the existing checkout,
+    // and records which files an analyzer proved parse cleanly (for refutation).
+    private async Task<GatheredDiagnostics> GatherDiagnosticsAsync(
         GroundingContext grounding,
         ReviewConfig config,
         IReadOnlyList<FileChange> files,
@@ -2164,13 +2183,14 @@ public sealed class ReviewWorker : BackgroundService
             diagnostics.AddRange(buildDiagnostics);
         }
 
-        diagnostics.AddRange(await RunDiagnosticProvidersAsync(
+        var providerResult = await RunDiagnosticProvidersAsync(
                 grounding, config, files, sharedWorkspace, metadata, installationToken, job, ct)
-            .ConfigureAwait(false));
-        return diagnostics;
+            .ConfigureAwait(false);
+        diagnostics.AddRange(providerResult.Diagnostics);
+        return new GatheredDiagnostics(diagnostics, providerResult.CleanlyParsedPaths);
     }
 
-    private async Task<IReadOnlyList<Diagnostic>> RunDiagnosticProvidersAsync(
+    private async Task<GatheredDiagnostics> RunDiagnosticProvidersAsync(
         GroundingContext grounding,
         ReviewConfig config,
         IReadOnlyList<FileChange> files,
@@ -2183,7 +2203,7 @@ public sealed class ReviewWorker : BackgroundService
         var languageId = grounding.Language?.LanguageId;
         if (languageId is null || diagnosticProviders.Count == 0)
         {
-            return [];
+            return GatheredDiagnostics.Empty;
         }
 
         var providers = diagnosticProviders
@@ -2191,7 +2211,7 @@ public sealed class ReviewWorker : BackgroundService
             .ToArray();
         if (providers.Length == 0)
         {
-            return [];
+            return GatheredDiagnostics.Empty;
         }
 
         // Reuse the checkout retrieval indexing or build grounding already made; never
@@ -2199,7 +2219,7 @@ public sealed class ReviewWorker : BackgroundService
         var cloneExists = config.Retrieval.Enabled || (config.Grounding.Enabled && config.Grounding.Build);
         if (!cloneExists)
         {
-            return [];
+            return GatheredDiagnostics.Empty;
         }
 
         string workspacePath;
@@ -2216,17 +2236,32 @@ public sealed class ReviewWorker : BackgroundService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Verification: workspace unavailable for diagnostic providers; skipping");
-            return [];
+            return GatheredDiagnostics.Empty;
         }
 
         var changedPaths = files.Select(f => f.Path).ToArray();
         var results = new List<Diagnostic>();
+        var cleanlyParsed = new HashSet<string>(StringComparer.Ordinal);
         foreach (var provider in providers)
         {
             try
             {
                 using var _ = ReviewBotActivitySource.Instance.StartActivity("reviewbot.verification.diagnostics");
-                results.AddRange(await provider.GetDiagnosticsAsync(workspacePath, changedPaths, ct).ConfigureAwait(false));
+                var report = await provider.GetDiagnosticsAsync(workspacePath, changedPaths, ct).ConfigureAwait(false);
+                results.AddRange(report.Diagnostics);
+                if (report.ToolRan)
+                {
+                    // A file the tool analyzed with no error-severity diagnostic is proven
+                    // to parse, so a compile/syntax claim against it can be refuted.
+                    var erroredPaths = report.Diagnostics
+                        .Where(d => d.Severity == DiagnosticSeverity.Error)
+                        .Select(d => d.Path)
+                        .ToHashSet(StringComparer.Ordinal);
+                    foreach (var path in report.AnalyzedPaths.Where(p => !erroredPaths.Contains(p)))
+                    {
+                        cleanlyParsed.Add(path);
+                    }
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2234,17 +2269,29 @@ public sealed class ReviewWorker : BackgroundService
             }
         }
 
-        return results;
+        return new GatheredDiagnostics(results, cleanlyParsed);
     }
 
     private static InlineComment AppendVerificationEvidence(InlineComment comment, Diagnostic evidence)
     {
         var severity = evidence.Severity == DiagnosticSeverity.Error ? "error" : "warning";
-        var note = $"> ✓ **Verified** — the build reports `{severity} {evidence.Code}` at line {evidence.Line}: {evidence.Message}";
+        var note = $"> ✓ **Verified** — an analyzer reports `{severity} {evidence.Code}` at line {evidence.Line}: {evidence.Message}";
         var body = string.IsNullOrWhiteSpace(comment.Body)
             ? note
             : $"{comment.Body.TrimEnd()}\n\n{note}";
         return comment with { Body = body };
+    }
+
+    private sealed record VerificationOutcome(
+        IReadOnlyList<InlineComment> Comments,
+        IReadOnlyList<DroppedComment> RefutedDrops);
+
+    private sealed record GatheredDiagnostics(
+        IReadOnlyList<Diagnostic> Diagnostics,
+        IReadOnlySet<string> CleanlyParsedPaths)
+    {
+        public static GatheredDiagnostics Empty { get; } =
+            new([], new HashSet<string>(StringComparer.Ordinal));
     }
 
     private static ReviewResult ApplyOutputConfig(
@@ -2278,18 +2325,9 @@ public sealed class ReviewWorker : BackgroundService
     private static bool ClaimsCompileFailureContradictedByBuild(string body, GroundingContext? grounding)
     {
         // Only refute when the build actually ran and succeeded; a failed build
-        // means a "won't compile" comment might well be correct.
-        if (grounding?.Build is not { Success: true } || string.IsNullOrWhiteSpace(body))
-        {
-            return false;
-        }
-
-        // Collapse runs of spaces (NormalizeForTextHeuristics turns "C#" into "c "
-        // plus the following space, i.e. a double space) so phrases match cleanly.
-        var normalized = " " + string.Join(
-            ' ',
-            NormalizeForTextHeuristics(body).Split(' ', StringSplitOptions.RemoveEmptyEntries)) + " ";
-        return ContainsAny(normalized, CompileFailureClaimPhrases);
+        // means a "won't compile" comment might well be correct. A successful build
+        // proves the code compiles, so any compile/syntax-failure claim is wrong.
+        return grounding?.Build is { Success: true } && CompileClaimClassifier.IsCompileFailureClaim(body);
     }
 
     private static bool IsPositiveOnlySummary(string summary)
@@ -2364,32 +2402,6 @@ public sealed class ReviewWorker : BackgroundService
 
     private static bool ContainsAny(string normalizedText, IReadOnlyList<string> phrases) =>
         phrases.Any(phrase => normalizedText.Contains(phrase, StringComparison.Ordinal));
-
-    // Phrases (normalized: lower-cased, non-alphanumerics -> spaces, space-padded)
-    // that assert the code does not compile. Matched against whitespace-collapsed
-    // normalized text, so "invalid C# syntax" -> " invalid c syntax " (the "#"
-    // becomes a space that the collapse removes). " invalid c syntax " is used
-    // rather than a bare " invalid c " so it can't fire on "invalid cache/class".
-    private static readonly string[] CompileFailureClaimPhrases =
-    [
-        " syntax error ",
-        " invalid syntax ",
-        " invalid c syntax ",
-        " does not compile ",
-        " will not compile ",
-        " won t compile ",
-        " doesn t compile ",
-        " cannot compile ",
-        " can t compile ",
-        " fails to compile ",
-        " compilation error ",
-        " compile error ",
-        " compiler error ",
-        " will not build ",
-        " won t build ",
-        " fails to build ",
-        " build error ",
-    ];
 
     private static readonly string[] PraiseCommentPhrases =
     [
