@@ -1335,11 +1335,28 @@ public sealed class ReviewWorker : BackgroundService
             0,
             EstimateTokens(config, groundedSystemPrompt) - systemPromptTokens);
 
+        // Scale the response reserve to the detected window so a fixed reserve
+        // can't starve the prompt on a small-context model (no-op at 32K+).
+        var responseReserveTokens = ContextBudget.ResolveResponseReserveTokens(
+            config.Review.ResponseReserveTokens,
+            contextWindowTokens);
+        if (responseReserveTokens != config.Review.ResponseReserveTokens)
+        {
+            logger.LogInformation(
+                "Clamped response reserve from {ConfiguredReserve} to {EffectiveReserve} token(s) to fit the {ContextTokens}-token context window for {Owner}/{Repo}#{PrNumber}",
+                config.Review.ResponseReserveTokens,
+                responseReserveTokens,
+                contextWindowTokens,
+                job.Owner,
+                job.Repo,
+                job.PrNumber);
+        }
+
         var budget = PromptBudget.Create(
             contextWindowTokens,
             systemPromptTokens,
             groundingTokens,
-            config.Review.ResponseReserveTokens);
+            responseReserveTokens);
 
         var metadataTokens = EstimateTokens(config, metadata.Title) +
             EstimateTokens(config, metadata.Body);
