@@ -6,3 +6,6 @@ ignore:
 grounding:
   enabled: true
   build: false
+
+retrieval:
+  enabled: false

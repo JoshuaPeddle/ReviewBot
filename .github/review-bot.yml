@@ -61,7 +61,7 @@ retrieval:
     # Deterministic repository-context retrieval: a SQLite symbol index built per
     # head SHA, from which definitions and top callers referenced by the diff are
     # injected as review context (bounded by the prompt budget).
-    # Default: false
+    # Default: true
     enabled: true
 
     # Maximum retrieved context bytes to include in a review.
