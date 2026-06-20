@@ -21,6 +21,7 @@ using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding;
+using ReviewBot.Grounding.Diagnostics;
 using ReviewBot.Grounding.Workspace;
 using ReviewBot.Retrieval;
 using ReviewBot.Retrieval.Indexing;
@@ -122,6 +123,50 @@ public class ReviewWorkerTests
         capturedResult!.Comments.Should().ContainSingle();
         capturedResult.Comments[0].Verification.Should().Be(VerificationStatus.Verified);
         capturedResult.Comments[0].Body.Should().Contain("✓ **Verified**").And.Contain("CS8602");
+    }
+
+    [Fact]
+    public async Task VerifiesFindingsCorroboratedByALanguageDiagnosticProvider()
+    {
+        var provider = Substitute.For<IDiagnosticProvider>();
+        provider.LanguageId.Returns("python");
+        provider.GetDiagnosticsAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
+            .Returns([new Diagnostic("app/main.py", 10, DiagnosticSeverity.Warning, "F821", "Undefined name `foo`")]);
+
+        await using var fixture = new WorkerFixture(diagnosticProviders: [provider]);
+        var files = new[] { CreateFile("app/main.py") };
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = false }
+        };
+        var comment = new InlineComment("app/main.py", 10, "RIGHT", "`foo` is not defined here.", Severity.Error);
+        // No build grounding — diagnostics come purely from the language provider.
+        var grounding = new GroundingContext(new LanguageMetadata("python", "3.12", null, []), null, null);
+        ReviewResult? capturedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default).ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default, default).ReturnsForAnyArgs(files);
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
+            .Returns(grounding);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("Found one issue.", [comment]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, Arg.Do<ReviewResult>(r => capturedResult = r), default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        capturedResult.Should().NotBeNull();
+        capturedResult!.Comments.Should().ContainSingle();
+        capturedResult.Comments[0].Verification.Should().Be(VerificationStatus.Verified);
+        capturedResult.Comments[0].Body.Should().Contain("✓ **Verified**").And.Contain("F821");
     }
 
     [Fact]
@@ -3795,8 +3840,10 @@ public class ReviewWorkerTests
             IPromptTokenEstimator? tokenEstimator = null,
             IReviewPromptTokenEstimator? reviewTokenEstimator = null,
             IReviewTraceWriter? traceWriter = null,
-            IReviewCostCalculator? costCalculator = null)
+            IReviewCostCalculator? costCalculator = null,
+            IEnumerable<IDiagnosticProvider>? diagnosticProviders = null)
         {
+            DiagnosticProviders = diagnosticProviders?.ToArray() ?? [];
             Queue = new ChannelReviewJobQueue();
             TokenProvider = Substitute.For<IInstallationTokenProvider>();
             PullRequestFetcher = Substitute.For<IPullRequestFetcher>();
@@ -3859,6 +3906,7 @@ public class ReviewWorkerTests
                 RetrievalProvider,
                 RepoIndexFactory,
                 SharedWorkspaceFactory,
+                DiagnosticProviders,
                 CostCalculator,
                 traceWriter ?? NullReviewTraceWriter.Instance,
                 TimeProvider.System,
@@ -3901,6 +3949,8 @@ public class ReviewWorkerTests
         public IWorkspaceFactory WorkspaceFactory { get; }
 
         public ISharedWorkspaceFactory SharedWorkspaceFactory { get; }
+
+        public IReadOnlyList<IDiagnosticProvider> DiagnosticProviders { get; }
 
         public IReviewCostCalculator CostCalculator { get; }
 

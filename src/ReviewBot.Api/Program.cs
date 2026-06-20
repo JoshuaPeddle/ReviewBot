@@ -97,7 +97,8 @@ builder.Services.AddGrounding()
     .AddBuildRunner<DotNetBuildRunner>()
     .AddBuildRunner<PythonBuildRunner>()
     .AddTestRunner<DotNetTestRunner>()
-    .AddTestRunner<PythonTestRunner>();
+    .AddTestRunner<PythonTestRunner>()
+    .AddDiagnosticProvider<RuffDiagnosticProvider>();
 builder.Services.AddReviewTracing();
 builder.Services.AddOptions<CostRateOptions>()
     .BindConfiguration(CostRateOptions.SectionName);

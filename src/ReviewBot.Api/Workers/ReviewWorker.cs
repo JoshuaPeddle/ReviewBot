@@ -17,6 +17,7 @@ using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding;
+using ReviewBot.Grounding.Diagnostics;
 using ReviewBot.Grounding.Workspace;
 using ReviewBot.Retrieval;
 using ReviewBot.Retrieval.Indexing;
@@ -42,6 +43,7 @@ public sealed class ReviewWorker : BackgroundService
     private readonly IRetrievalProvider retrievalProvider;
     private readonly IRepoIndexFactory repoIndexFactory;
     private readonly ISharedWorkspaceFactory sharedWorkspaceFactory;
+    private readonly IReadOnlyList<IDiagnosticProvider> diagnosticProviders;
     private readonly IReviewCostCalculator costCalculator;
     private readonly IReviewTraceWriter traceWriter;
     private readonly TimeProvider clock;
@@ -63,6 +65,7 @@ public sealed class ReviewWorker : BackgroundService
         IRetrievalProvider retrievalProvider,
         IRepoIndexFactory repoIndexFactory,
         ISharedWorkspaceFactory sharedWorkspaceFactory,
+        IEnumerable<IDiagnosticProvider> diagnosticProviders,
         IReviewCostCalculator costCalculator,
         IReviewTraceWriter traceWriter,
         TimeProvider clock,
@@ -83,6 +86,7 @@ public sealed class ReviewWorker : BackgroundService
         this.retrievalProvider = retrievalProvider ?? throw new ArgumentNullException(nameof(retrievalProvider));
         this.repoIndexFactory = repoIndexFactory ?? throw new ArgumentNullException(nameof(repoIndexFactory));
         this.sharedWorkspaceFactory = sharedWorkspaceFactory ?? throw new ArgumentNullException(nameof(sharedWorkspaceFactory));
+        this.diagnosticProviders = (diagnosticProviders ?? throw new ArgumentNullException(nameof(diagnosticProviders))).ToArray();
         this.costCalculator = costCalculator ?? throw new ArgumentNullException(nameof(costCalculator));
         this.traceWriter = traceWriter ?? throw new ArgumentNullException(nameof(traceWriter));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
@@ -533,7 +537,9 @@ public sealed class ReviewWorker : BackgroundService
             ];
         }
 
-        candidateComments = ApplyVerification(candidateComments, grounding, config, job);
+        candidateComments = await ApplyVerificationAsync(
+                candidateComments, grounding, config, files, sharedWorkspace, metadata, installationToken.Token, job, ct)
+            .ConfigureAwait(false);
         result = ApplyOutputConfig(result, candidateComments, config);
         if (config.Review.Summary)
         {
@@ -2094,18 +2100,25 @@ public sealed class ReviewWorker : BackgroundService
     // compiler independently flags is marked Verified and annotated with the
     // corroborating diagnostic. Purely additive — it never drops a finding — and a
     // no-op unless build grounding produced diagnostics.
-    private IReadOnlyList<InlineComment> ApplyVerification(
+    private async Task<IReadOnlyList<InlineComment>> ApplyVerificationAsync(
         IReadOnlyList<InlineComment> comments,
         GroundingContext grounding,
         ReviewConfig config,
-        ReviewJob job)
+        IReadOnlyList<FileChange> files,
+        ISharedWorkspace sharedWorkspace,
+        PullRequestMetadata metadata,
+        string installationToken,
+        ReviewJob job,
+        CancellationToken ct)
     {
         if (!config.Review.Verification.Enabled || comments.Count == 0)
         {
             return comments;
         }
 
-        var diagnostics = grounding.Build?.Diagnostics ?? [];
+        var diagnostics = await GatherDiagnosticsAsync(
+                grounding, config, files, sharedWorkspace, metadata, installationToken, job, ct)
+            .ConfigureAwait(false);
         if (diagnostics.Count == 0)
         {
             return comments;
@@ -2119,7 +2132,7 @@ public sealed class ReviewWorker : BackgroundService
         }
 
         logger.LogInformation(
-            "Verification: corroborated {VerifiedCount}/{CommentCount} finding(s) against build diagnostics for {Owner}/{Repo}#{PrNumber}",
+            "Verification: corroborated {VerifiedCount}/{CommentCount} finding(s) against diagnostics for {Owner}/{Repo}#{PrNumber}",
             verifiedCount,
             comments.Count,
             job.Owner,
@@ -2131,6 +2144,97 @@ public sealed class ReviewWorker : BackgroundService
                 ? AppendVerificationEvidence(c.Comment, evidence)
                 : c.Comment)
             .ToArray();
+    }
+
+    // Combines build diagnostics (when build grounding ran) with cheap, build-free
+    // diagnostics from language providers (e.g. ruff) run against the existing checkout.
+    private async Task<IReadOnlyList<Diagnostic>> GatherDiagnosticsAsync(
+        GroundingContext grounding,
+        ReviewConfig config,
+        IReadOnlyList<FileChange> files,
+        ISharedWorkspace sharedWorkspace,
+        PullRequestMetadata metadata,
+        string installationToken,
+        ReviewJob job,
+        CancellationToken ct)
+    {
+        var diagnostics = new List<Diagnostic>();
+        if (grounding.Build?.Diagnostics is { Count: > 0 } buildDiagnostics)
+        {
+            diagnostics.AddRange(buildDiagnostics);
+        }
+
+        diagnostics.AddRange(await RunDiagnosticProvidersAsync(
+                grounding, config, files, sharedWorkspace, metadata, installationToken, job, ct)
+            .ConfigureAwait(false));
+        return diagnostics;
+    }
+
+    private async Task<IReadOnlyList<Diagnostic>> RunDiagnosticProvidersAsync(
+        GroundingContext grounding,
+        ReviewConfig config,
+        IReadOnlyList<FileChange> files,
+        ISharedWorkspace sharedWorkspace,
+        PullRequestMetadata metadata,
+        string installationToken,
+        ReviewJob job,
+        CancellationToken ct)
+    {
+        var languageId = grounding.Language?.LanguageId;
+        if (languageId is null || diagnosticProviders.Count == 0)
+        {
+            return [];
+        }
+
+        var providers = diagnosticProviders
+            .Where(p => string.Equals(p.LanguageId, languageId, StringComparison.Ordinal))
+            .ToArray();
+        if (providers.Length == 0)
+        {
+            return [];
+        }
+
+        // Reuse the checkout retrieval indexing or build grounding already made; never
+        // force a clone purely for verification.
+        var cloneExists = config.Retrieval.Enabled || (config.Grounding.Enabled && config.Grounding.Build);
+        if (!cloneExists)
+        {
+            return [];
+        }
+
+        string workspacePath;
+        try
+        {
+            var cloneUrl = string.IsNullOrWhiteSpace(metadata.HeadCloneUrl)
+                ? $"https://github.com/{job.Owner}/{job.Repo}.git"
+                : metadata.HeadCloneUrl;
+            var workspace = await sharedWorkspace
+                .GetOrCreateAsync(new WorkspaceRequest(cloneUrl, metadata.HeadSha, installationToken), ct)
+                .ConfigureAwait(false);
+            workspacePath = workspace.LocalPath;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Verification: workspace unavailable for diagnostic providers; skipping");
+            return [];
+        }
+
+        var changedPaths = files.Select(f => f.Path).ToArray();
+        var results = new List<Diagnostic>();
+        foreach (var provider in providers)
+        {
+            try
+            {
+                using var _ = ReviewBotActivitySource.Instance.StartActivity("reviewbot.verification.diagnostics");
+                results.AddRange(await provider.GetDiagnosticsAsync(workspacePath, changedPaths, ct).ConfigureAwait(false));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Verification: diagnostic provider {Provider} failed; continuing", provider.GetType().Name);
+            }
+        }
+
+        return results;
     }
 
     private static InlineComment AppendVerificationEvidence(InlineComment comment, Diagnostic evidence)

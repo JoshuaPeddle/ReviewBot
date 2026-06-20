@@ -184,11 +184,13 @@ review:
   # Default: true
   self_critique: true
 
-  # Verify findings against ground truth before posting. When build grounding
-  # produces diagnostics, a finding whose line the compiler independently flags
-  # is marked "✓ Verified" and annotated with the corroborating diagnostic.
-  # Purely additive — it never drops a finding — and a no-op unless build
-  # grounding (grounding.build) is enabled. Default: true
+  # Verify findings against ground truth before posting. A finding whose line a
+  # compiler/analyzer independently flags is marked "✓ Verified" and annotated
+  # with the corroborating diagnostic. Purely additive — it never drops a finding.
+  # Diagnostics come from build grounding (grounding.build) when enabled, and from
+  # build-free language providers — currently `ruff` for Python, run only over the
+  # PR's changed files on the checkout retrieval/grounding already made (it never
+  # forces a clone, and degrades to nothing when the tool is absent). Default: true
   verification:
     enabled: true
 
