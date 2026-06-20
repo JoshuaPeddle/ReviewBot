@@ -1,0 +1,24 @@
+diff --git a/src/ReviewBot.Api/Integrations/PaymentClient.cs b/src/ReviewBot.Api/Integrations/PaymentClient.cs
+index 1aa11111..1aa22222 100644
+--- a/src/ReviewBot.Api/Integrations/PaymentClient.cs
++++ b/src/ReviewBot.Api/Integrations/PaymentClient.cs
+@@ -1,5 +1,4 @@
+ using System.Net.Http.Headers;
+-using Microsoft.Extensions.Options;
+
+ namespace ReviewBot.Api.Integrations;
+
+@@ -7,11 +6,11 @@ public sealed class PaymentClient
+ {
+     private readonly HttpClient http;
+
+-    public PaymentClient(HttpClient http, IOptions<PaymentOptions> options)
++    public PaymentClient(HttpClient http)
+     {
+         this.http = http;
+         this.http.DefaultRequestHeaders.Authorization =
+-            new AuthenticationHeaderValue("Bearer", options.Value.ApiKey);
++            new AuthenticationHeaderValue("Bearer", "sk_live_8f3a9c1b2d4e5f60718293a4b5c6d7e8");
+     }
+
+     public async Task<PaymentReceipt> ChargeAsync(string customerId, decimal amount, CancellationToken ct)

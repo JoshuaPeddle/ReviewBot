@@ -5,7 +5,7 @@ using ReviewBot.Core.Prompting;
 
 namespace ReviewBot.Llm.OpenAi;
 
-public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
+public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
 {
     private const int MaxLoggedRawResponseLength = 500;
     private static readonly TimeSpan[] TransientRetryDelays =
@@ -15,6 +15,8 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
     ];
 
     public string ProviderName => "openai";
+
+    public string ModelName => options.ModelName;
 
     public bool SupportsParallelRequests => false;
 
@@ -81,6 +83,9 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
         ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: false);
         return new ReviewResult(string.Empty, []) { TokenUsage = totalUsage, RawLlmResponse = firstResponse };
     }
+
+    public Task<int?> TryGetContextWindowTokensAsync(string modelName, CancellationToken ct) =>
+        new OpenAiModelContextProbe(options, logger).TryGetContextWindowTokensAsync(modelName, ct);
 
     public async Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review")
     {
@@ -151,7 +156,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm
     }
 
     private IOpenAiChatClient GetClient() =>
-        configuredClient ?? (sdkClient ??= new OpenAiSdkChatClient(options));
+        configuredClient ?? (sdkClient ??= new OpenAiSdkChatClient(options, logger));
 
     private static PromptPayload BuildRepairPrompt(string failedResponse, bool includeContextRequests)
     {

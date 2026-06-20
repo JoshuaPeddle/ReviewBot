@@ -1,0 +1,23 @@
+diff --git a/src/ReviewBot.Api/Polling/UpdatePoller.cs b/src/ReviewBot.Api/Polling/UpdatePoller.cs
+index 3b6435a..bfb9519 100644
+--- a/src/ReviewBot.Api/Polling/UpdatePoller.cs
++++ b/src/ReviewBot.Api/Polling/UpdatePoller.cs
+@@ -5,8 +5,6 @@ namespace ReviewBot.Api.Polling;
+ 
+ public sealed class UpdatePoller : IHostedService
+ {
+-    private const int DefaultIntervalSeconds = 30;
+-
+     private readonly PollScheduler scheduler;
+ 
+     public UpdatePoller(PollScheduler scheduler)
+@@ -16,7 +14,8 @@ public sealed class UpdatePoller : IHostedService
+ 
+     public Task StartAsync(CancellationToken cancellationToken)
+     {
+-        scheduler.Start(DefaultIntervalSeconds);
++        // Kick off the first poll right away instead of waiting a full interval.
++        scheduler.Start(0);
+         return Task.CompletedTask;
+     }
+ 

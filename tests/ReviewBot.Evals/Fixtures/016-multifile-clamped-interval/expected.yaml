@@ -1,0 +1,27 @@
+must_flag:
+  - path: src/ReviewBot.Api/Metrics/MetricsStartup.cs
+    line_range: [9, 12]
+    severity_at_least: warning
+    topic: clamped_config
+    must_mention_any:
+      - clamp
+      - minimum
+      - MinimumInterval
+      - five minutes
+      - 5 minutes
+      - FromMinutes(5)
+    additional_locations:
+      - path: src/ReviewBot.Core/Metrics/MetricsFlusher.cs
+        line_range: [16, 21]
+must_not_flag:
+  - path: src/ReviewBot.Core/Metrics/MetricNames.cs
+    reason: Adding a metric name constant is benign churn.
+    severity_above: info
+  - path: src/ReviewBot.Api/Workers/WorkerMetrics.cs
+    reason: Swapping a string literal for the shared constant is benign churn.
+    severity_above: info
+  - path: src/ReviewBot.Api/Metrics/MetricsEndpoint.cs
+    reason: Documentation-only clarification of scrape semantics.
+    severity_above: info
+max_total_comments: 4
+expected_review_state: COMMENT

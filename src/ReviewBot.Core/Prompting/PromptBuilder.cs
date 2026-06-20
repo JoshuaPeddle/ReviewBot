@@ -374,10 +374,14 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
 
     private static string SanitizeFetchedContent(string content)
     {
+        // Break any literal triple-backtick run with a zero-width space so file
+        // content cannot close the surrounding ```...``` fence and inject prompt
+        // instructions to the model.
         return content
             .Replace("\0", string.Empty, StringComparison.Ordinal)
             .Replace("\r\n", "\n", StringComparison.Ordinal)
-            .Replace('\r', '\n');
+            .Replace('\r', '\n')
+            .Replace("```", "``​`", StringComparison.Ordinal);
     }
 
     private static string AnnotateAndTruncatePatch(string patch, int maxPatchLines)

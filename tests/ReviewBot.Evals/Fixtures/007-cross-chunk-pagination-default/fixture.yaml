@@ -1,0 +1,6 @@
+name: Cross-chunk pagination default sends zero page size
+category: cross_chunk_reference
+difficulty: high
+description: |
+  The default page size changes to zero while the fetcher validation now accepts
+  zero and passes it to the GitHub pagination call.

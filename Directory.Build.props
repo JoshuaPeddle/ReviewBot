@@ -12,4 +12,15 @@
     <AssemblyVersion>0.2.0.0</AssemblyVersion>
     <FileVersion>0.2.0.0</FileVersion>
   </PropertyGroup>
+
+  <!--
+    GHSA-2m69-gcr7-jv3q: the bundled SQLite in SQLitePCLRaw.lib.e_sqlite3 (pulled in transitively
+    by Microsoft.EntityFrameworkCore.Sqlite / Microsoft.Data.Sqlite) is flagged high severity.
+    All published versions <= 2.1.11 are affected and there is no patched release yet, so there is
+    nothing to upgrade to. Suppress this single advisory so NuGet audit + TreatWarningsAsErrors stay
+    on for everything else. Remove once a patched SQLitePCLRaw ships.
+  -->
+  <ItemGroup>
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-2m69-gcr7-jv3q" />
+  </ItemGroup>
 </Project>

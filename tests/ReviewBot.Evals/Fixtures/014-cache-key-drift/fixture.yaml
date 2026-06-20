@@ -1,0 +1,23 @@
+name: Tenant-scope cached review sessions
+category: cross_file_body
+difficulty: high
+description: |
+  Users that belong to multiple tenants currently share one cached session
+  entry, which leaks review state across tenants. Include the tenant in the
+  session cache key when storing sessions.
+notes: |
+  Maintainer notes (not shown to the model — the loader ignores this key).
+  Planted bug: only the write path moves to SessionCacheKeys.ForTenantUser;
+  SessionReader.GetAsync (repo-state only) still reads with ForUser, so
+  stored sessions are never found and stale ForUser entries keep serving
+  cross-tenant state — the exact bug the PR claims to fix. Retrieval extracts
+  the type symbol `SessionCacheKeys` from the added line; its usage rows
+  surface the reader's ForUser call, and the ForTenantUser definition body
+  shows the new key shape. Keywords require naming SessionReader or ForUser —
+  ForUser appears in the removed diff line, so a sharp baseline could in
+  principle guess, but it cannot see that any reader still uses it.
+  Calibration (2026-06-12 smoke run): the baseline hedged its way to a match
+  ("If the read path (e.g., SessionReader) still uses ForUser...") at warning
+  severity, while retrieval asserted the mismatch as fact at error severity
+  with the reader's line number. severity_at_least is set to error so hedged
+  speculation does not score; the scorer has no other hedge detector.

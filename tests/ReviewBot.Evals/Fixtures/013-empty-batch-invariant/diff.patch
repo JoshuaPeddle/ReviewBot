@@ -1,0 +1,24 @@
+diff --git a/src/ReviewBot.Persistence/Reviews/ReviewCommentArchiver.cs b/src/ReviewBot.Persistence/Reviews/ReviewCommentArchiver.cs
+index f6ac106..ad49012 100644
+--- a/src/ReviewBot.Persistence/Reviews/ReviewCommentArchiver.cs
++++ b/src/ReviewBot.Persistence/Reviews/ReviewCommentArchiver.cs
+@@ -2,8 +2,6 @@ namespace ReviewBot.Persistence.Reviews;
+ 
+ public sealed class ReviewCommentArchiver
+ {
+-    private const int BatchSize = 100;
+-
+     private readonly CommentBatchWriter writer;
+ 
+     public ReviewCommentArchiver(CommentBatchWriter writer)
+@@ -13,9 +11,6 @@ public sealed class ReviewCommentArchiver
+ 
+     public async Task ArchiveAsync(IReadOnlyList<ArchivedComment> comments, CancellationToken ct)
+     {
+-        foreach (var batch in CommentBatching.Chunk(comments, BatchSize))
+-        {
+-            await writer.WriteBatchAsync(batch, ct).ConfigureAwait(false);
+-        }
++        await writer.WriteBatchAsync(comments, ct).ConfigureAwait(false);
+     }
+ }

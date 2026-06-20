@@ -1,0 +1,12 @@
+{
+  "summary": "The webhook signature requirement is now disabled by default.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Api/Webhooks/WebhookEndpoint.cs",
+      "line": 15,
+      "severity": "error",
+      "confidence": "high",
+      "body": "RequireSignature now defaults to false, so this condition skips signature validation in the default configuration. That allows unauthenticated webhook requests through instead of rejecting invalid signatures."
+    }
+  ]
+}

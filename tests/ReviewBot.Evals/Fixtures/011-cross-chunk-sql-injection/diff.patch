@@ -1,0 +1,32 @@
+diff --git a/src/ReviewBot.Persistence/Users/UserRepository.cs b/src/ReviewBot.Persistence/Users/UserRepository.cs
+index 3aa11111..3aa22222 100644
+--- a/src/ReviewBot.Persistence/Users/UserRepository.cs
++++ b/src/ReviewBot.Persistence/Users/UserRepository.cs
+@@ -8,9 +8,7 @@ public sealed class UserRepository
+     public async Task<User?> FindByNameAsync(string name, CancellationToken ct)
+     {
+         using var conn = connectionFactory.Create();
+-        return await conn.QuerySingleOrDefaultAsync<User>(
+-            "SELECT id, name, email FROM users WHERE name = @name",
+-            new { name });
++        var query = $"SELECT id, name, email FROM users WHERE name = '{name}'";
++        return await conn.QuerySingleOrDefaultAsync<User>(query);
+     }
+ }
+diff --git a/src/ReviewBot.Api/Endpoints/UserSearchEndpoint.cs b/src/ReviewBot.Api/Endpoints/UserSearchEndpoint.cs
+index 3bb11111..3bb22222 100644
+--- a/src/ReviewBot.Api/Endpoints/UserSearchEndpoint.cs
++++ b/src/ReviewBot.Api/Endpoints/UserSearchEndpoint.cs
+@@ -5,8 +5,11 @@ public static class UserSearchEndpoint
+ {
+     public static IEndpointRouteBuilder MapUserSearch(this IEndpointRouteBuilder routes)
+     {
+-        routes.MapGet("/users/search/{name}", async (string name, UserRepository repo, CancellationToken ct) =>
++        routes.MapGet("/users/search", async (
++            [FromQuery] string name,
++            UserRepository repo,
++            CancellationToken ct) =>
+         {
+             var user = await repo.FindByNameAsync(name, ct);
+             return user is null ? Results.NotFound() : Results.Ok(user);
+         });

@@ -1,0 +1,17 @@
+must_flag:
+  # The assignment starts on line 12 and the bearer literal lives on line 13.
+  # Either is a defensible flag location for "hardcoded API secret".
+  - path: src/ReviewBot.Api/Integrations/PaymentClient.cs
+    line_range: [12, 13]
+    severity_at_least: error
+    topic: hardcoded_api_secret
+    must_mention_any:
+      - hardcoded
+      - secret
+      - credential
+      - api key
+      - token
+      - environment
+      - configuration
+max_total_comments: 3
+expected_review_state: REQUEST_CHANGES

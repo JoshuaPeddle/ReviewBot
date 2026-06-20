@@ -1,0 +1,12 @@
+{
+  "summary": "The retry configuration now allows the default zero-attempt setting through validation.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Api/Workers/RetryLoop.cs",
+      "line": 9,
+      "severity": "warning",
+      "confidence": "high",
+      "body": "MaxAttempts now defaults to 0, but this guard only rejects negative values. The default configuration will run zero attempts and silently skip the action."
+    }
+  ]
+}

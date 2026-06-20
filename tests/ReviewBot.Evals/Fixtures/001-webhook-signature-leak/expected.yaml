@@ -1,6 +1,6 @@
 must_flag:
   - path: src/ReviewBot.Api/Webhooks/WebhookSignatureValidator.cs
-    line_range: [21, 21]
+    line_range: [20, 20]
     severity_at_least: warning
     topic: leaks_configuration_state
     must_mention_any: ["leak", "trust boundary", "secret", "configuration", "information disclosure"]

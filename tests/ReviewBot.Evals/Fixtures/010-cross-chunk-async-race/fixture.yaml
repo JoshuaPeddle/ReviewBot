@@ -1,0 +1,9 @@
+name: Async cache loses synchronization while caller fans out concurrent loads
+category: cross_chunk_reference
+difficulty: high
+description: |
+  SessionCache drops the SemaphoreSlim that guarded its underlying Dictionary
+  while SessionService.ResolveManyAsync fans out concurrent GetOrCreateAsync
+  calls through Task.WhenAll. The data race is only visible when the reviewer
+  connects the unsynchronized dictionary mutation in one file with the
+  concurrent invocation pattern in the other.

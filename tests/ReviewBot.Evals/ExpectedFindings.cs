@@ -14,7 +14,10 @@ public sealed record MustFlagExpectation(
     int EndLine,
     Severity SeverityAtLeast,
     string Topic,
-    IReadOnlyList<string> MustMentionAny);
+    IReadOnlyList<string> MustMentionAny,
+    IReadOnlyList<AllowedLocation>? AdditionalLocations = null);
+
+public sealed record AllowedLocation(string Path, int StartLine, int EndLine);
 
 public sealed record MustNotFlagExpectation(
     string Path,

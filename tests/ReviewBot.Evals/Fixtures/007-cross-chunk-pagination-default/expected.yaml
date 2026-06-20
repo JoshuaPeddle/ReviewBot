@@ -1,0 +1,8 @@
+must_flag:
+  - path: src/ReviewBot.GitHub/Pulls/PullRequestFetcher.cs
+    line_range: [23, 23]
+    severity_at_least: warning
+    topic: zero_page_size_accepted
+    must_mention_any: ["zero", "0", "PageSize", "per page", "default"]
+max_total_comments: 3
+expected_review_state: REQUEST_CHANGES

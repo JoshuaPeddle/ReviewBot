@@ -4,3 +4,25 @@ obj/
 riderModule.iml
 /_ReSharper.Caches/
 /runs/
+*.user
+.env
+.env.local
+.env.eval
+.DS_Store
+.idea/
+
+# Private keys and credentials must never be committed.
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime artifacts produced by the ReviewBot worker / retrieval index.
+# These are local-state directories, not source code.
+src/ReviewBot.Api/cache/
+src/ReviewBot.Api/traces/
+src/ReviewBot.Api/reviewbot.db
+src/ReviewBot.Api/reviewbot-dev.db
+
+# Local working roadmap (kept out of the repo per request).
+docs/development-plan.md

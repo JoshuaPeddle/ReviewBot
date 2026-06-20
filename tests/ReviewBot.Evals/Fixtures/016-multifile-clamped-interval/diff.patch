@@ -1,0 +1,54 @@
+diff --git a/src/ReviewBot.Api/Metrics/MetricsEndpoint.cs b/src/ReviewBot.Api/Metrics/MetricsEndpoint.cs
+index 960fa54..ed61f26 100644
+--- a/src/ReviewBot.Api/Metrics/MetricsEndpoint.cs
++++ b/src/ReviewBot.Api/Metrics/MetricsEndpoint.cs
+@@ -2,7 +2,11 @@ namespace ReviewBot.Api.Metrics;
+ 
+ public static class MetricsEndpoint
+ {
+-    /// <summary>Maps the Prometheus scrape endpoint.</summary>
++    /// <summary>
++    /// Maps the Prometheus scrape endpoint. Values reflect the most recent
++    /// flush, so scrape intervals shorter than the flush interval read
++    /// repeated values rather than fresher ones.
++    /// </summary>
+     public static IEndpointRouteBuilder MapMetrics(this IEndpointRouteBuilder routes)
+     {
+         routes.MapPrometheusScrapingEndpoint("/metrics");
+diff --git a/src/ReviewBot.Api/Metrics/MetricsStartup.cs b/src/ReviewBot.Api/Metrics/MetricsStartup.cs
+index 8218c9d..037e719 100644
+--- a/src/ReviewBot.Api/Metrics/MetricsStartup.cs
++++ b/src/ReviewBot.Api/Metrics/MetricsStartup.cs
+@@ -7,7 +7,8 @@ public static class MetricsStartup
+     public static void ConfigureMetrics(this IServiceProvider services)
+     {
+         var flusher = services.GetRequiredService<MetricsFlusher>();
+-        flusher.Configure(TimeSpan.FromMinutes(10));
++        // Refresh dashboards faster now that reviews finish in under a minute.
++        flusher.Configure(TimeSpan.FromSeconds(30));
+         flusher.Start();
+     }
+ }
+diff --git a/src/ReviewBot.Api/Workers/WorkerMetrics.cs b/src/ReviewBot.Api/Workers/WorkerMetrics.cs
+index 80d2e95..8d23da4 100644
+--- a/src/ReviewBot.Api/Workers/WorkerMetrics.cs
++++ b/src/ReviewBot.Api/Workers/WorkerMetrics.cs
+@@ -11,7 +11,7 @@ public sealed class WorkerMetrics
+     public WorkerMetrics(Meter meter, Func<int> queueDepthProvider)
+     {
+         jobsProcessed = meter.CreateCounter<long>(MetricNames.JobsProcessed);
+-        queueDepth = meter.CreateObservableGauge("reviewbot.worker.queue_depth", queueDepthProvider);
++        queueDepth = meter.CreateObservableGauge(MetricNames.QueueDepth, queueDepthProvider);
+     }
+ 
+     public void RecordProcessed() => jobsProcessed.Add(1);
+diff --git a/src/ReviewBot.Core/Metrics/MetricNames.cs b/src/ReviewBot.Core/Metrics/MetricNames.cs
+index 5c15e39..862fae3 100644
+--- a/src/ReviewBot.Core/Metrics/MetricNames.cs
++++ b/src/ReviewBot.Core/Metrics/MetricNames.cs
+@@ -5,4 +5,5 @@ public static class MetricNames
+     public const string JobsProcessed = "reviewbot.jobs.processed";
+     public const string LlmDurationMs = "reviewbot.llm.duration_ms";
+     public const string CommentsPosted = "reviewbot.review.comments_posted";
++    public const string QueueDepth = "reviewbot.worker.queue_depth";
+ }

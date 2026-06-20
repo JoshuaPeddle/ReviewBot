@@ -129,6 +129,44 @@ public class WebhookEndpointTests
     }
 
     [Fact]
+    public async Task ReviewCommentFromBotItselfReturnsNoContent()
+    {
+        using var queue = new CapturingReviewJobQueue();
+        await using var factory = CreateFactory(queue);
+        using var client = factory.CreateClient();
+        var payload = CreateIssueCommentPayload("created", "/review", isPr: true, userLogin: BotSlug);
+        using var request = CreateWebhookRequest(payload, eventName: "issue_comment");
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        queue.Jobs.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task OversizedWebhookBodyReturnsPayloadTooLarge()
+    {
+        using var queue = new CapturingReviewJobQueue();
+        await using var factory = CreateFactory(queue);
+        using var client = factory.CreateClient();
+
+        // 26_214_400 + 1 bytes; the validator never runs because we reject earlier.
+        var oversized = new string('x', 26_214_401);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/webhook")
+        {
+            Content = new StringContent(oversized, Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("X-GitHub-Delivery", "delivery-too-big");
+        request.Headers.Add("X-GitHub-Event", "pull_request");
+        request.Headers.Add("X-Hub-Signature-256", Sign(oversized));
+
+        using var response = await client.SendAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.RequestEntityTooLarge);
+        queue.Jobs.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task ReviewCommentWithWrongCommandReturnsNoContent()
     {
         using var queue = new CapturingReviewJobQueue();
@@ -288,7 +326,11 @@ public class WebhookEndpointTests
             """;
     }
 
-    private static string CreateIssueCommentPayload(string action, string commentBody, bool isPr)
+    private static string CreateIssueCommentPayload(
+        string action,
+        string commentBody,
+        bool isPr,
+        string userLogin = "developer")
     {
         var prJson = isPr
             ? """
@@ -315,7 +357,10 @@ public class WebhookEndpointTests
                 "number": 42{{prJson}}
               },
               "comment": {
-                "body": "{{commentBody}}"
+                "body": "{{commentBody}}",
+                "user": {
+                  "login": "{{userLogin}}"
+                }
               }
             }
             """;

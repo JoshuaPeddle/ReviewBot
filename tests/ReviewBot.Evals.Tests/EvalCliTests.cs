@@ -73,6 +73,104 @@ public sealed class EvalCliTests : IDisposable
         document.RootElement.GetProperty("fixtures")[0].GetProperty("status").GetString().Should().Be("Regressed");
     }
 
+    [Fact]
+    public async Task RunAsyncRejectsLiveRunWithoutApiKeyEnvironmentVariable()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = await global::EvalCli.RunAsync(
+            [
+                "run-live",
+                "--fixtures", rootDirectory,
+                "--results", Path.Combine(rootDirectory, "results"),
+                "--base-url", "http://localhost:1234/v1",
+                "--model", "qwen/qwen3.5-9b",
+                "--api-key-env", "REVIEWBOT_EVAL_TEST_MISSING_KEY"
+            ],
+            output,
+            error);
+
+        exitCode.Should().Be(2);
+        error.ToString().Should().Contain("REVIEWBOT_EVAL_TEST_MISSING_KEY");
+    }
+
+    [Fact]
+    public void EvalDiffParserParsesMultiFilePatch()
+    {
+        var files = EvalDiffParser.ParseFiles("""
+            diff --git a/src/One.cs b/src/One.cs
+            index 1111111..2222222 100644
+            --- a/src/One.cs
+            +++ b/src/One.cs
+            @@ -1,1 +1,1 @@
+            -old
+            +new
+            diff --git a/src/Two.cs b/src/Two.cs
+            index 3333333..4444444 100644
+            --- a/src/Two.cs
+            +++ b/src/Two.cs
+            @@ -10,1 +10,2 @@
+             keep
+            +add
+            """);
+
+        files.Should().HaveCount(2);
+        files[0].Path.Should().Be("src/One.cs");
+        files[0].AdditionsCount.Should().Be(1);
+        files[0].DeletionsCount.Should().Be(1);
+        files[0].CommentableLines.Should().Contain(1);
+        files[1].Path.Should().Be("src/Two.cs");
+        files[1].CommentableLines.Should().Contain([10, 11]);
+    }
+
+    [Fact]
+    public void LiveEvalManifestSerializesRetrievalEvidence()
+    {
+        var manifest = new LiveEvalManifest(
+            StartedAtUtc: DateTimeOffset.Parse("2026-05-28T12:00:00Z"),
+            FinishedAtUtc: DateTimeOffset.Parse("2026-05-28T12:01:00Z"),
+            FixturesDirectory: "fixtures",
+            ResultsDirectory: "results",
+            BaseUrl: "http://localhost:1234/v1",
+            Model: "qwen/qwen3.5-9b",
+            RetrievalEnabled: true,
+            ConfigPath: ".github/review-bot.yml",
+            ContextTokens: 32768,
+            IndexCacheDir: "runs/index",
+            Fixtures:
+            [
+                new LiveEvalFixtureManifest(
+                    FixtureKey: "001-example",
+                    FixtureName: "Example",
+                    Category: "cross_chunk_reference",
+                    ResultPath: "results/001-example.json",
+                    Status: "succeeded",
+                    ElapsedSeconds: 12.3,
+                    CommentCount: 1,
+                    RetrievalSnippetCount: 1,
+                    RetrievalSymbolsQueried: 2,
+                    RetrievalSnippets:
+                    [
+                        new LiveEvalRetrievalSnippet(
+                            Path: "src/App.cs",
+                            StartLine: 7,
+                            EndLine: 9,
+                            EstimatedTokens: 12,
+                            Sha256: "abc123")
+                    ],
+                    TokenUsage: null)
+            ]);
+
+        var json = JsonSerializer.Serialize(manifest, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        using var document = JsonDocument.Parse(json);
+        var fixture = document.RootElement.GetProperty("fixtures")[0];
+        fixture.GetProperty("retrievalSnippetCount").GetInt32().Should().Be(1);
+        fixture.GetProperty("retrievalSymbolsQueried").GetInt32().Should().Be(2);
+        fixture.GetProperty("retrievalSnippets")[0].GetProperty("sha256").GetString().Should().Be("abc123");
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(rootDirectory))

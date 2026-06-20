@@ -18,8 +18,8 @@ model:
   provider: openai
 
   # Model name passed to the provider API.
-  # Default: claude-opus-4-7 (anthropic) / gpt-5.1 (openai)
-  name: qwen/qwen3.5-9b
+  # Omitted on purpose: reviews in this repo use the model configured on the host via
+  # REVIEWBOT__OpenAi__ModelName. Set `name:` here to pin a specific model instead.
 
 review:
   # Post inline comments on individual diff lines.
@@ -67,7 +67,7 @@ retrieval:
     max_bytes: 51200
 
     # Symbol lookup mode: callers, definitions, or both.
-    symbol_lookup_depth: callers
+    symbol_lookup_depth: both
 
     # Embedding retrieval lane.
     embeddings: false

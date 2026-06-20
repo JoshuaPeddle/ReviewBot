@@ -8,9 +8,9 @@ namespace ReviewBot.Retrieval;
 
 public sealed class SqliteRetrievalProvider : IRetrievalProvider
 {
-    private const double RetrievalContentBudgetFraction = 0.3d;
+    private const double RetrievalContentBudgetFraction = 0.2d;
     private const double AverageBytesPerToken = 3d;
-    private const int MaxCallersPerSymbol = 3;
+    private const int MaxCallersPerSymbol = 2;
 
     private readonly IRepoIndexFactory indexFactory;
     private readonly IDiffSymbolExtractor symbolExtractor;
@@ -62,7 +62,12 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
         var remainingRetrievalTokens = tokenLimit;
         foreach (var symbol in lookup.Symbols)
         {
-            var content = symbol.Signature ?? symbol.Name;
+            // Prefer the brace-balanced body for method definitions; fall back to the
+            // signature line for other kinds (types, fields) and usages where no body exists.
+            var hasBody = symbol.Body is not null && symbol.BodyStartLine.HasValue && symbol.BodyEndLine.HasValue;
+            var content = hasBody ? symbol.Body! : (symbol.Signature ?? symbol.Name);
+            var startLine = hasBody ? symbol.BodyStartLine!.Value : symbol.Line;
+            var endLine = hasBody ? symbol.BodyEndLine!.Value : symbol.Line;
             var tokens = tokenEstimator.EstimateTokens(content);
             if (tokens == 0)
             {
@@ -82,8 +87,8 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
 
             snippets.Add(new RepositoryContextSnippet(
                 symbol.Path,
-                symbol.Line,
-                symbol.Line,
+                startLine,
+                endLine,
                 content));
             updated = afterRetrieval;
             remainingRetrievalTokens -= tokens;

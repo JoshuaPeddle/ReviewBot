@@ -1,0 +1,7 @@
+name: Cross-chunk retry default disables work
+category: cross_chunk_reference
+difficulty: high
+description: |
+  The options default changes MaxAttempts to zero while the retry loop now only
+  rejects negative values. The bug is visible when the default and validation are
+  considered together.

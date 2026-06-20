@@ -1,6 +1,6 @@
 must_flag:
   - path: src/ReviewBot.Core/Diff/LineRange.cs
-    line_range: [11, 11]
+    line_range: [12, 12]
     severity_at_least: warning
     topic: excludes_range_boundaries
     must_mention_any: ["boundary", "first", "last", "inclusive", "off-by-one"]

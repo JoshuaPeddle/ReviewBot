@@ -114,6 +114,10 @@ public sealed class EvalFixtureLoader
                 $"Eval fixture field '{path}:{prefix}.line_range' must contain a positive [start, end] range.");
         }
 
+        var additional = (file.AdditionalLocations ?? [])
+            .Select((entry, locationIndex) => ConvertAdditionalLocation(entry, path, $"{prefix}.additional_locations[{locationIndex}]"))
+            .ToArray();
+
         return new MustFlagExpectation(
             RequiredString(file.Path, path, $"{prefix}.path"),
             lineRange[0],
@@ -121,7 +125,23 @@ public sealed class EvalFixtureLoader
             ParseSeverity(file.SeverityAtLeast, Severity.Warning, path, $"{prefix}.severity_at_least"),
             RequiredString(file.Topic, path, $"{prefix}.topic"),
             file.MustMentionAny?.Where(keyword => !string.IsNullOrWhiteSpace(keyword)).Select(keyword => keyword.Trim()).ToArray()
-                ?? []);
+                ?? [],
+            additional.Length == 0 ? null : additional);
+    }
+
+    private static AllowedLocation ConvertAdditionalLocation(AdditionalLocationFile file, string path, string prefix)
+    {
+        var lineRange = file.LineRange;
+        if (lineRange is null || lineRange.Count != 2 || lineRange[0] <= 0 || lineRange[1] < lineRange[0])
+        {
+            throw new InvalidDataException(
+                $"Eval fixture field '{path}:{prefix}.line_range' must contain a positive [start, end] range.");
+        }
+
+        return new AllowedLocation(
+            RequiredString(file.Path, path, $"{prefix}.path"),
+            lineRange[0],
+            lineRange[1]);
     }
 
     private static MustNotFlagExpectation ConvertMustNotFlag(MustNotFlagFile file, string path, int index)
@@ -209,6 +229,15 @@ public sealed class EvalFixtureLoader
         public string? Topic { get; set; }
 
         public List<string>? MustMentionAny { get; set; }
+
+        public List<AdditionalLocationFile>? AdditionalLocations { get; set; }
+    }
+
+    private sealed class AdditionalLocationFile
+    {
+        public string? Path { get; set; }
+
+        public List<int>? LineRange { get; set; }
     }
 
     private sealed class MustNotFlagFile

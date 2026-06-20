@@ -1,0 +1,22 @@
+must_flag:
+  # The unsynchronized Dictionary field (line 5), the method opening brace
+  # (line 8), and the method body itself (9-13) are all valid flag locations
+  # for "this cache mutates a non-thread-safe collection concurrently".
+  - path: src/ReviewBot.Core/Sessions/SessionCache.cs
+    line_range: [5, 13]
+    severity_at_least: error
+    topic: dictionary_race_condition
+    must_mention_any:
+      - thread
+      - concurrent
+      - race
+      - lock
+      - synchroniz
+      - Dictionary
+      - ConcurrentDictionary
+      - SemaphoreSlim
+    additional_locations:
+      - path: src/ReviewBot.Core/Sessions/SessionService.cs
+        line_range: [9, 13]
+max_total_comments: 4
+expected_review_state: REQUEST_CHANGES

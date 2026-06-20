@@ -1,0 +1,23 @@
+diff --git a/src/ReviewBot.Api/Webhooks/WebhookOptions.cs b/src/ReviewBot.Api/Webhooks/WebhookOptions.cs
+index aa11111..aa22222 100644
+--- a/src/ReviewBot.Api/Webhooks/WebhookOptions.cs
++++ b/src/ReviewBot.Api/Webhooks/WebhookOptions.cs
+@@ -3,5 +3,5 @@ namespace ReviewBot.Api.Webhooks;
+ public sealed record WebhookOptions
+ {
+-    public bool RequireSignature { get; init; } = true;
++    public bool RequireSignature { get; init; } = false;
+ }
+diff --git a/src/ReviewBot.Api/Webhooks/WebhookEndpoint.cs b/src/ReviewBot.Api/Webhooks/WebhookEndpoint.cs
+index bb11111..bb22222 100644
+--- a/src/ReviewBot.Api/Webhooks/WebhookEndpoint.cs
++++ b/src/ReviewBot.Api/Webhooks/WebhookEndpoint.cs
+@@ -12,7 +12,7 @@ public static class WebhookEndpoint
+         WebhookSignatureValidator validator,
+         WebhookOptions options)
+     {
+-        if (!validator.IsValid(request))
++        if (options.RequireSignature && !validator.IsValid(request))
+         {
+             return Results.Unauthorized();
+         }

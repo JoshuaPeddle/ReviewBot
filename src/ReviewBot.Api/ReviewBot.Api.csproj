@@ -33,4 +33,8 @@
       <ProjectReference Include="..\ReviewBot.Retrieval\ReviewBot.Retrieval.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+      <Folder Include="cache\reviewbot\index\" />
+    </ItemGroup>
+
 </Project>

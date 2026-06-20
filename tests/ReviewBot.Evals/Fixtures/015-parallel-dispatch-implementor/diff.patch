@@ -1,0 +1,16 @@
+diff --git a/src/ReviewBot.Api/Notifications/NotificationDispatcher.cs b/src/ReviewBot.Api/Notifications/NotificationDispatcher.cs
+index 34ebbe0..377e5af 100644
+--- a/src/ReviewBot.Api/Notifications/NotificationDispatcher.cs
++++ b/src/ReviewBot.Api/Notifications/NotificationDispatcher.cs
+@@ -13,9 +13,7 @@ public sealed class NotificationDispatcher
+ 
+     public async Task DispatchAsync(ReviewNotification notification, CancellationToken ct)
+     {
+-        foreach (var channel in channels)
+-        {
+-            await channel.SendAsync(notification, ct).ConfigureAwait(false);
+-        }
++        var sends = channels.Select(channel => channel.SendAsync(notification, ct));
++        await Task.WhenAll(sends).ConfigureAwait(false);
+     }
+ }

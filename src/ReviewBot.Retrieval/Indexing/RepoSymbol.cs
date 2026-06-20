@@ -32,4 +32,7 @@ public sealed record RepoSymbol(
     RepoSymbolRole Role,
     string Path,
     int Line,
-    string? Signature);
+    string? Signature,
+    string? Body = null,
+    int? BodyStartLine = null,
+    int? BodyEndLine = null);

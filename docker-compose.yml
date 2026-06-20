@@ -1,0 +1,113 @@
+# ReviewBot + Ollama: one-command bring-up for local PR review.
+#
+# Usage:
+#   cp .env.example .env
+#   # edit .env with your GitHub App credentials
+#   docker compose up
+#
+# To swap to Anthropic or hosted OpenAI, comment out the OpenAi__BaseUrl line
+# under reviewbot, the ollama service, the model-puller service, and set the
+# appropriate API key in .env.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: reviewbot-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # Pulls the configured model once on first start, then exits.
+  # The model name should match REVIEWBOT_MODEL_NAME in .env.
+  model-puller:
+    image: ollama/ollama:latest
+    container_name: reviewbot-model-puller
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["sh", "-c"]
+    # The reference model is qwen/qwen3.6-27b. If your Ollama registry can't
+    # resolve that exact tag, set REVIEWBOT_MODEL_NAME in .env to the closest
+    # available Qwen3 ~27-32B tag, or comment out the ollama services and
+    # point REVIEWBOT__OpenAi__BaseUrl at an external LM Studio / vLLM server.
+    command:
+      - "ollama pull ${REVIEWBOT_MODEL_NAME:-qwen/qwen3.6-27b}"
+    restart: "no"
+
+  reviewbot:
+    build:
+      context: .
+      dockerfile: src/ReviewBot.Api/Dockerfile
+    container_name: reviewbot
+    depends_on:
+      ollama:
+        condition: service_healthy
+      model-puller:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    environment:
+      # GitHub App (required)
+      - REVIEWBOT__GitHubApp__AppId=${REVIEWBOT_APP_ID}
+      - REVIEWBOT__GitHubApp__PrivateKeyPem=${REVIEWBOT_PRIVATE_KEY_PEM}
+      - REVIEWBOT__Webhook__Secret=${REVIEWBOT_WEBHOOK_SECRET}
+      - REVIEWBOT__Webhook__BotSlug=${REVIEWBOT_BOT_SLUG:-}
+
+      # Local model via Ollama (OpenAI-compatible endpoint)
+      - REVIEWBOT__OpenAi__ApiKey=ollama
+      - REVIEWBOT__OpenAi__BaseUrl=http://ollama:11434/v1
+      - REVIEWBOT__OpenAi__ModelName=${REVIEWBOT_MODEL_NAME:-qwen/qwen3.6-27b}
+      - REVIEWBOT__OpenAi__ResponseFormat=text
+
+      # Persistence (sqlite on a volume so state survives restarts)
+      - REVIEWBOT__Persistence__ConnectionString=Data Source=/var/lib/reviewbot/reviewbot.db
+
+      # Per-review JSON traces (great for debugging; disable in production if disk-constrained)
+      - REVIEWBOT__Tracing__Enabled=true
+      - REVIEWBOT__Tracing__IncludePrompts=false
+      - REVIEWBOT__Tracing__TracesDir=/var/lib/reviewbot/traces
+      - REVIEWBOT__Tracing__MaxDiskMb=500
+      - REVIEWBOT__Tracing__RetentionDays=14
+
+      # OpenTelemetry: traces shipped to the optional jaeger service below.
+      # Comment out to disable, or point at any OTLP-compatible collector.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=reviewbot
+
+      # ASP.NET Core listens on 8080 inside the container
+      - ASPNETCORE_URLS=http://+:8080
+    volumes:
+      - reviewbot-state:/var/lib/reviewbot
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # Optional: local Jaeger for OTel trace inspection at http://localhost:16686
+  # Comment out if you already have a collector elsewhere.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    container_name: reviewbot-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"  # UI
+      - "4317:4317"    # OTLP gRPC
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
+  reviewbot-state:

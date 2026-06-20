@@ -1,0 +1,17 @@
+name: 'Metrics polish: shared metric names and faster flush'
+category: cross_file_body
+difficulty: high
+description: |
+  Pull metric name literals into MetricNames, clarify the scrape endpoint
+  docs, and flush the sink every 30 seconds so dashboards pick up finished
+  reviews sooner.
+notes: |
+  Maintainer notes (not shown to the model — the loader ignores this key).
+  Planted bug: MetricsFlusher.Configure (repo-state only) clamps intervals to
+  a 5-minute minimum because the sink rate-limits, so the 30-second flush in
+  MetricsStartup.cs silently stays at 5 minutes — the PR's stated goal is
+  quietly unfulfilled. Three other changed files are benign churn (constant
+  extraction, doc comment) that must not be flagged above info. Retrieval
+  extracts `Configure` from the added line and injects the clamping body.
+  This is also the corpus's multi-file noise fixture: the signal file is the
+  smallest change in the PR.

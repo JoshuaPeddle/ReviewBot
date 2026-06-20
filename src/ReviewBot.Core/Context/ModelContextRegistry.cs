@@ -11,6 +11,12 @@ public sealed class ModelContextRegistry : IModelContextRegistry
         new("claude-*", 200_000, IsConfigured: false),
         new("gpt-4*", 128_000, IsConfigured: false),
         new("gpt-5*", 128_000, IsConfigured: false),
+        // Reference local model — exact entries so the longest-literal-prefix
+        // tiebreaker beats the wider qwen patterns below.
+        new("qwen/qwen3.6-27b", 32_768, IsConfigured: false),
+        new("qwen3.6-27b", 32_768, IsConfigured: false),
+        // Wider patterns cover Ollama, LM Studio, and bare model name styles
+        // for the standard Qwen 32K-context variants.
         new("qwen*:*b*", 32_768, IsConfigured: false),
         new("qwen*/*b*", 32_768, IsConfigured: false),
         new("qwen*-*b*", 32_768, IsConfigured: false),

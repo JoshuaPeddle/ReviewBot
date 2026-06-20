@@ -50,6 +50,25 @@ public sealed class EvalRunScorer
             var fixtureName = Path.GetFileName(fixtureDirectory);
             var resultPath = Path.Combine(resultsDirectory, $"{fixtureName}.json");
             var fixture = fixtureLoader.Load(fixtureDirectory);
+
+            // A missing result file means the fixture was added after the run
+            // produced its results, or the runner exited before reaching it.
+            // Score it as a failed fixture (empty review) instead of aborting
+            // the entire aggregate so partial data is still useful.
+            if (!File.Exists(resultPath))
+            {
+                var emptyResult = new ReviewBot.Core.Domain.ReviewResult(
+                    Summary: $"Eval result file missing for fixture '{fixtureName}'.",
+                    Comments: Array.Empty<ReviewBot.Core.Domain.InlineComment>(),
+                    ContextRequests: Array.Empty<ReviewBot.Core.Domain.ContextRequest>());
+                fixtureScores.Add(new EvalFixtureScore(
+                    fixture.Metadata.Name,
+                    fixture.DirectoryPath,
+                    Path.GetFullPath(resultPath),
+                    scorer.Score(fixture, emptyResult)));
+                continue;
+            }
+
             var rawResult = await File.ReadAllTextAsync(resultPath).ConfigureAwait(false);
             var parseResult = LlmResultParser.Parse(rawResult);
             if (!parseResult.Success)

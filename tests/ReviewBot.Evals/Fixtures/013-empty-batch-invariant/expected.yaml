@@ -1,0 +1,25 @@
+must_flag:
+  - path: src/ReviewBot.Persistence/Reviews/ReviewCommentArchiver.cs
+    line_range: [13, 15]
+    severity_at_least: warning
+    topic: callee_precondition
+    must_mention_any:
+      - empty
+      - batch[0]
+      - IndexOutOfRange
+      - ArgumentOutOfRange
+      - out of range
+      - no elements
+      - non-empty
+    additional_locations:
+      - path: src/ReviewBot.Persistence/Reviews/CommentBatchWriter.cs
+        line_range: [14, 18]
+must_not_flag:
+  - path: src/ReviewBot.Persistence/Reviews/ReviewCommentArchiver.cs
+    reason: Warning-level batch-size/database-limit observations are defensible secondary review noise, not the planted bug.
+    severity_above: error
+  - path: src/ReviewBot.Persistence/Reviews/CommentBatchWriter.cs
+    reason: Warning-level parameter-limit observations on the retrieved writer are defensible secondary review noise.
+    severity_above: error
+max_total_comments: 3
+expected_review_state: REQUEST_CHANGES

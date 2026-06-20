@@ -236,6 +236,15 @@ public sealed class ReviewWorker : BackgroundService
             return JobProcessStatus.Skipped;
         }
 
+        // When the repo config omits a model name, resolve the provider's configured model now
+        // (e.g. REVIEWBOT__OpenAi__ModelName) so token budgeting, cost, tracing, and the LLM call all
+        // agree on the concrete model rather than an empty placeholder.
+        if (string.IsNullOrWhiteSpace(config.Model.Name))
+        {
+            config = config with { Model = config.Model with { Name = llmFactory.ResolveModelName(config.Model) } };
+            reviewActivity?.SetTag("review.model", config.Model.Name);
+        }
+
         var repoFullName = $"{job.Owner}/{job.Repo}";
         var lastShaTask = prReviewStateStore
             .GetLastShaAsync(job.InstallationId, repoFullName, job.PrNumber, ct);
@@ -335,7 +344,9 @@ public sealed class ReviewWorker : BackgroundService
         }
 
         var groundingElapsed = groundingSw.Elapsed;
-        var promptBudget = CreatePromptBudget(config, grounding, metadata, job);
+        var llm = llmFactory.Create(config.Model);
+        var contextWindowTokens = await ResolveContextWindowTokensAsync(llm, config, ct).ConfigureAwait(false);
+        var promptBudget = CreatePromptBudget(config, grounding, metadata, job, contextWindowTokens);
         var retrievalSw = Stopwatch.StartNew();
         RetrievalContextResult retrievalContext;
         using (var retrievalActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.retrieval"))
@@ -374,7 +385,6 @@ public sealed class ReviewWorker : BackgroundService
         var fullFileContextElapsed = fullFileContextSw.Elapsed;
         var fullFileContents = fullFileContext.Contents;
         promptBudget = fullFileContext.Budget;
-        var llm = llmFactory.Create(config.Model);
         var reviewChunks = PlanReviewChunks(files, config, promptBudget, job);
         ReviewResult result;
         IReadOnlyList<InlineComment> candidateComments;
@@ -1263,11 +1273,31 @@ public sealed class ReviewWorker : BackgroundService
         !changedPaths.Contains(".github/review-bot.yml") &&
         !changedPaths.Contains(".github/review-bot.yaml");
 
+    /// <summary>
+    /// Resolves the model's context window, preferring a value probed from the
+    /// live provider (e.g. vLLM <c>max_model_len</c>) over the name-based static
+    /// registry. Probing never throws; on any miss we fall back to the registry.
+    /// </summary>
+    private async Task<int> ResolveContextWindowTokensAsync(IReviewLlm llm, ReviewConfig config, CancellationToken ct)
+    {
+        if (llm is IModelContextProbe probe)
+        {
+            var probed = await probe.TryGetContextWindowTokensAsync(config.Model.Name, ct).ConfigureAwait(false);
+            if (probed is > 0)
+            {
+                return probed.Value;
+            }
+        }
+
+        return modelContextRegistry.GetContextWindowTokens(config.Model.Name);
+    }
+
     private PromptBudget CreatePromptBudget(
         ReviewConfig config,
         GroundingContext grounding,
         PullRequestMetadata metadata,
-        ReviewJob job)
+        ReviewJob job,
+        int contextWindowTokens)
     {
         var estimationRequestWithoutGrounding = new ReviewRequest(
             metadata.Title,
@@ -1289,7 +1319,7 @@ public sealed class ReviewWorker : BackgroundService
             EstimateTokens(config, groundedSystemPrompt) - systemPromptTokens);
 
         var budget = PromptBudget.Create(
-            modelContextRegistry.GetContextWindowTokens(config.Model.Name),
+            contextWindowTokens,
             systemPromptTokens,
             groundingTokens,
             config.Review.ResponseReserveTokens);
