@@ -344,6 +344,9 @@ public sealed class ReviewWorker : BackgroundService
         }
 
         var groundingElapsed = groundingSw.Elapsed;
+        // True only for genuine delta reviews, where the file set was restricted to
+        // paths changed since the last review (fallbacks re-review the full list).
+        var isIncrementalUpdate = changedPathsSinceLastReview is not null;
         var llm = llmFactory.Create(config.Model);
         var contextWindowTokens = await ResolveContextWindowTokensAsync(llm, config, ct).ConfigureAwait(false);
         var promptBudget = CreatePromptBudget(config, grounding, metadata, job, contextWindowTokens);
@@ -406,6 +409,8 @@ public sealed class ReviewWorker : BackgroundService
                     fullFileContents,
                     job,
                     installationToken.Token,
+                    promptBudget.ResponseReserveTokens,
+                    isIncrementalUpdate,
                     ct)
                 .ConfigureAwait(false);
             result = ReviewResultMerger.Merge(chunkOutcomes.Select(o => o.Result).ToArray());
@@ -436,7 +441,9 @@ public sealed class ReviewWorker : BackgroundService
                 config,
                 grounding,
                 fullFileContents,
-                repositoryContext);
+                repositoryContext,
+                MaxOutputTokens: promptBudget.ResponseReserveTokens,
+                IsIncrementalUpdate: isIncrementalUpdate);
 
             var prompt = PromptBuilder.Build(request);
             ReviewResult singleChunkResult;
@@ -822,6 +829,8 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyDictionary<string, string>? fullFileContents,
         ReviewJob job,
         string installationToken,
+        int maxOutputTokens,
+        bool isIncrementalUpdate,
         CancellationToken ct)
     {
         if (llm.SupportsParallelRequests)
@@ -836,6 +845,8 @@ public sealed class ReviewWorker : BackgroundService
                     fullFileContents,
                     job,
                     installationToken,
+                    maxOutputTokens,
+                    isIncrementalUpdate,
                     ct)))
                 .ConfigureAwait(false);
         }
@@ -853,6 +864,8 @@ public sealed class ReviewWorker : BackgroundService
                     fullFileContents,
                     job,
                     installationToken,
+                    maxOutputTokens,
+                    isIncrementalUpdate,
                     ct)
                 .ConfigureAwait(false));
         }
@@ -870,6 +883,8 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyDictionary<string, string>? fullFileContents,
         ReviewJob job,
         string installationToken,
+        int maxOutputTokens,
+        bool isIncrementalUpdate,
         CancellationToken ct)
     {
         using var chunkActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.chunk_review");
@@ -887,7 +902,9 @@ public sealed class ReviewWorker : BackgroundService
             FilterFullFileContents(fullFileContents, chunk.Files),
             repositoryContext,
             ChunkIndex: chunk.Index,
-            TotalChunks: chunk.TotalChunks);
+            TotalChunks: chunk.TotalChunks,
+            MaxOutputTokens: maxOutputTokens,
+            IsIncrementalUpdate: isIncrementalUpdate);
 
         var prompt = PromptBuilder.Build(request);
         ReviewResult result;
