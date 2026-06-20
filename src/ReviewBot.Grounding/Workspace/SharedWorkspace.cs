@@ -9,6 +9,7 @@ internal sealed class SharedWorkspace : ISharedWorkspace
     private readonly ILogger logger;
     private readonly object gate = new();
     private readonly Dictionary<(string CloneUrl, string Sha), Task<IWorkspace>> clones = new();
+    private readonly CancellationTokenSource scopeCts = new();
     private bool disposed;
 
     public SharedWorkspace(IWorkspaceFactory factory, ILogger? logger = null)
@@ -28,11 +29,12 @@ internal sealed class SharedWorkspace : ISharedWorkspace
             ObjectDisposedException.ThrowIf(this.disposed, this);
             if (!this.clones.TryGetValue(key, out cloneTask!))
             {
-                // Clone with an independent token, not the caller's: one consumer
-                // cancelling must not tear down a clone other consumers still share.
-                // Per-consumer cancellation is honoured by the WaitAsync below; the
-                // clone itself is reclaimed on DisposeAsync.
-                cloneTask = this.factory.CreateAsync(request, CancellationToken.None);
+                // Bind the clone to the scope's token, not the caller's: one consumer
+                // cancelling must not tear down a clone other consumers still share
+                // (per-consumer cancellation is honoured by the WaitAsync below). The
+                // scope token is cancelled on DisposeAsync so an in-flight clone is
+                // torn down at job end instead of leaking its git process.
+                cloneTask = this.factory.CreateAsync(request, this.scopeCts.Token);
                 this.clones[key] = cloneTask;
             }
         }
@@ -73,6 +75,10 @@ internal sealed class SharedWorkspace : ISharedWorkspace
             this.clones.Clear();
         }
 
+        // Cancel before awaiting so an in-flight clone is torn down (its git process
+        // killed and temp dir cleaned by the factory) rather than blocking disposal.
+        await this.scopeCts.CancelAsync().ConfigureAwait(false);
+
         foreach (var cloneTask in pending)
         {
             try
@@ -82,9 +88,12 @@ internal sealed class SharedWorkspace : ISharedWorkspace
             }
             catch (Exception ex)
             {
-                // The clone failed or was already cleaned up; nothing to dispose.
-                this.logger.LogDebug(ex, "Shared workspace clone disposal skipped a faulted clone task");
+                // The clone was cancelled by scope teardown, failed, or was already
+                // cleaned up by the factory; nothing left to dispose here.
+                this.logger.LogDebug(ex, "Shared workspace clone disposal skipped a cancelled or faulted clone task");
             }
         }
+
+        this.scopeCts.Dispose();
     }
 }

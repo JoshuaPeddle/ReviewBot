@@ -86,6 +86,28 @@ public class SharedWorkspaceTests
     }
 
     [Fact]
+    public async Task DisposeAsyncCancelsTheTokenBoundToInFlightClones()
+    {
+        var capturedToken = CancellationToken.None;
+        var workspace = Substitute.For<IWorkspace>();
+        var factory = Substitute.For<IWorkspaceFactory>();
+        factory.CreateAsync(Arg.Any<WorkspaceRequest>(), Arg.Do<CancellationToken>(t => capturedToken = t))
+            .Returns(workspace);
+
+        var shared = new SharedWorkspace(factory);
+        await shared.GetOrCreateAsync(Request(), CancellationToken.None);
+
+        // The clone is bound to a cancellable scope token, not CancellationToken.None.
+        capturedToken.CanBeCanceled.Should().BeTrue();
+        capturedToken.IsCancellationRequested.Should().BeFalse();
+
+        await shared.DisposeAsync();
+
+        // Disposing the scope cancels in-flight clones so they don't leak past job end.
+        capturedToken.IsCancellationRequested.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task GetOrCreateAsyncEvictsAFailedCloneSoLaterConsumersRetry()
     {
         var workspace = Substitute.For<IWorkspace>();
