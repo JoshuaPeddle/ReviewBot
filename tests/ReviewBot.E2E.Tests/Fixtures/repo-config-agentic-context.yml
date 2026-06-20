@@ -5,6 +5,9 @@ review:
   agentic_context: true
   max_context_requests: 2
   max_context_file_bytes: 50000
+  # Isolate this scenario from self-critique (now default-on), which would
+  # otherwise also scrutinise the second-pass comments.
+  self_critique: false
   trigger:
     on_push: true
 grounding:

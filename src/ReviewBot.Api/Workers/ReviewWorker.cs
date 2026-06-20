@@ -1903,11 +1903,11 @@ public sealed class ReviewWorker : BackgroundService
             return candidateComments;
         }
 
-        var highConfidence = candidateComments
-            .Where(c => c.Confidence == Confidence.High)
+        var retainedWithoutCritique = candidateComments
+            .Where(c => !ShouldCritiqueComment(c))
             .ToArray();
         var critiqueCandidates = candidateComments
-            .Where(c => c.Confidence != Confidence.High)
+            .Where(ShouldCritiqueComment)
             .ToArray();
 
         var critiquePayload = SelfCritiquePromptBuilder.Build(files, critiqueCandidates);
@@ -1942,7 +1942,7 @@ public sealed class ReviewWorker : BackgroundService
                 critiqueCandidates.Length,
                 critique.Rationale);
 
-            return highConfidence.Concat(retained).ToArray();
+            return retainedWithoutCritique.Concat(retained).ToArray();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1967,7 +1967,15 @@ public sealed class ReviewWorker : BackgroundService
 
     private static bool ShouldRunSelfCritique(IReadOnlyList<InlineComment> candidateComments, ReviewConfig config) =>
         config.Review.SelfCritique &&
-        candidateComments.Any(c => c.Confidence != Confidence.High);
+        candidateComments.Any(ShouldCritiqueComment);
+
+    // Self-critique normally exempts high-confidence comments to save a pass. But a
+    // confident, error-severity claim is exactly the hallucination that most erodes
+    // trust (e.g. "this is invalid C# syntax" on code that compiles), and being
+    // high-confidence means it bypasses every other filter — so route those through
+    // critique too. High-confidence warning/info comments stay exempt.
+    private static bool ShouldCritiqueComment(InlineComment comment) =>
+        comment.Confidence != Confidence.High || comment.Severity == Severity.Error;
 
     private static CommentFilterResult FilterCandidateComments(ReviewResult result, ReviewConfig config)
     {
