@@ -221,6 +221,43 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task SynthesizesSummaryFromSurvivingFindingsNotModelProse()
+    {
+        await using var fixture = new WorkerFixture();
+        var files = new[] { CreateFile("src/A.cs") };
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = false }
+        };
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default).ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default, default).ReturnsForAnyArgs(files);
+        // The model's free-text summary asserts a dramatic, unbacked claim; only one
+        // concrete comment survives. The posted summary must reflect the finding, not the prose.
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "This PR has a critical flaw in the disposal logic that leaks processes everywhere.",
+                [new InlineComment("src/A.cs", 2, "RIGHT", "Guard against null input before dereferencing.", Severity.Warning)]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, Arg.Do<ReviewResult>(r => postedResult = r), default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult.Should().NotBeNull();
+        postedResult!.Summary.Should().Contain("Found 1 actionable issue").And.Contain("highest severity: warning");
+        postedResult.Summary.Should().NotContain("critical flaw").And.NotContain("disposal logic");
+    }
+
+    [Fact]
     public async Task DoesNotVerifyFindingsWithoutACorroboratingDiagnostic()
     {
         await using var fixture = new WorkerFixture();
@@ -591,7 +628,9 @@ public class ReviewWorkerTests
 
         capturedRequest!.Files.Select(file => file.Path).Should().Equal("src/Small.cs", "src/Medium.cs");
         postedFiles!.Select(file => file.Path).Should().Equal("src/Small.cs", "src/Medium.cs");
-        postedResult!.Summary.Should().Contain("Reviewed the selected files.");
+        // No findings survived, so the synthesized summary is cleared (quiet on clean),
+        // but the skipped-files note still posts and the model's free-text is discarded.
+        postedResult!.Summary.Should().NotContain("Reviewed the selected files.");
         postedResult.Summary.Should().Contain("files_skipped:");
         postedResult.Summary.Should().Contain("`src/Large.cs`");
     }
@@ -2456,7 +2495,9 @@ public class ReviewWorkerTests
         enrichedPhase.Should().Be("agentic_context");
         enrichedPrompt!.UserPrompt.Should().Contain("public interface IFoo");
         enrichedPrompt.UserPrompt.Should().Contain("Initial comment.");
-        postedResult!.Summary.Should().StartWith("Final summary.");
+        // The summary is synthesized from the final findings, not the model's free-text.
+        postedResult!.Summary.Should().Contain("Found 1 actionable issue").And.Contain("highest severity: error");
+        postedResult.Summary.Should().NotContain("Final summary.");
         postedResult.Comments.Should().ContainSingle()
             .Which.Body.Should().Be("Final context-informed comment.");
     }

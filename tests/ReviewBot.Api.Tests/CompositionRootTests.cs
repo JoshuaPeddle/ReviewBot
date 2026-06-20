@@ -233,7 +233,10 @@ public class CompositionRootTests
 
         response.StatusCode.Should().Be(HttpStatusCode.Accepted);
         var postedResult = await posted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        postedResult.Summary.Should().StartWith(stubResult.Summary);
+        // The summary is synthesized from findings, not the model's free-text; a clean
+        // review posts just the re-review hint.
+        postedResult.Summary.Should().NotContain(stubResult.Summary);
+        postedResult.Summary.Should().Contain("/review");
     }
 
     private static FileChange CreateFile(string path) =>
