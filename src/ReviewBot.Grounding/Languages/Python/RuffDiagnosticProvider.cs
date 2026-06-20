@@ -32,6 +32,7 @@ public sealed class RuffDiagnosticProvider : IDiagnosticProvider
     {
         var pythonFiles = changedPaths
             .Where(p => p.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
+            .Where(IsSafeRelativePath)
             .ToArray();
         if (pythonFiles.Length == 0)
         {
@@ -107,6 +108,23 @@ public sealed class RuffDiagnosticProvider : IDiagnosticProvider
         }
 
         return diagnostics;
+    }
+
+    // Defence in depth: changed paths come from Git (which forbids `..` and absolute
+    // paths in tracked files), but they flow into a subprocess argument, so reject
+    // anything that could escape the workspace before handing it to ruff.
+    private static bool IsSafeRelativePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) ||
+            path.StartsWith('/') ||
+            path.Contains('\\', StringComparison.Ordinal) ||
+            path.StartsWith('-'))
+        {
+            return false;
+        }
+
+        return path.Split('/').All(segment =>
+            !string.IsNullOrEmpty(segment) && segment != "." && segment != "..");
     }
 
     private static string ToRepoRelative(string path, string workspacePath)

@@ -43,6 +43,20 @@ public class RuffDiagnosticProviderTests
     }
 
     [Fact]
+    public async Task GetDiagnosticsAsync_ExcludesUnsafePaths()
+    {
+        var provider = new RuffDiagnosticProvider();
+
+        // All unsafe .py paths — none reach ruff, so no process runs and the result is empty.
+        var diagnostics = await provider.GetDiagnosticsAsync(
+            "/work",
+            ["../../etc/secret.py", "/abs/evil.py", "--output-format.py", @"a\b.py"],
+            CancellationToken.None);
+
+        diagnostics.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task GetDiagnosticsAsync_DegradesGracefullyWhenRuffIsMissing()
     {
         var provider = new RuffDiagnosticProvider();
