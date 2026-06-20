@@ -45,12 +45,13 @@ public sealed class DotNetBuildRunner : IBuildRunner
 
             var warnings = ParseCount(buildOut, "Warning");
             var errors = ParseCount(buildOut, "Error");
+            var diagnostics = ParseDiagnostics(buildOut, workspacePath);
 
             _logger.LogDebug(
                 "dotnet build in {Path}: exit={ExitCode}, warnings={Warnings}, errors={Errors}",
                 workspacePath, buildCode, warnings, errors);
 
-            return new BuildResult(buildCode == 0, warnings, errors, Truncate(buildOut));
+            return new BuildResult(buildCode == 0, warnings, errors, Truncate(buildOut), diagnostics);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -73,12 +74,13 @@ public sealed class DotNetBuildRunner : IBuildRunner
         var (output, exitCode) = await CaptureAsync(workspacePath, command!, ct);
         var warnings = ParseCount(output, "Warning");
         var errors = ParseCount(output, "Error");
+        var diagnostics = ParseDiagnostics(output, workspacePath);
 
         _logger.LogDebug(
             "custom dotnet build command in {Path}: exit={ExitCode}, warnings={Warnings}, errors={Errors}",
             workspacePath, exitCode, warnings, errors);
 
-        return new BuildResult(exitCode == 0, warnings, errors, Truncate(output));
+        return new BuildResult(exitCode == 0, warnings, errors, Truncate(output), diagnostics);
     }
 
     private static async Task<(string Output, int ExitCode)> CaptureAsync(
@@ -116,6 +118,62 @@ public sealed class DotNetBuildRunner : IBuildRunner
         var stderr = await stderrTask;
         var combined = string.IsNullOrWhiteSpace(stderr) ? stdout : $"{stdout}\n{stderr}";
         return (combined.Trim(), process.ExitCode);
+    }
+
+    // Matches an MSBuild/Roslyn diagnostic line, e.g.
+    //   /work/src/Foo.cs(12,34): error CS0103: The name 'x' does not exist [/work/src/Foo.csproj]
+    // The column and the trailing "[project]" annotation are optional.
+    private static readonly Regex DiagnosticLine = new(
+        @"^(?<path>.+?)\((?<line>\d+)(?:,\d+)?\):\s+(?<sev>error|warning)\s+(?<code>[A-Za-z]+\d+):\s+(?<msg>.+?)(?:\s+\[[^\]]*\])?\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Parses per-file diagnostics from build output, de-duplicating the repeats MSBuild
+    // emits across projects and rewriting absolute paths to repo-relative form so they
+    // line up with PR file paths.
+    internal static IReadOnlyList<Diagnostic> ParseDiagnostics(string output, string workspacePath)
+    {
+        if (string.IsNullOrEmpty(output))
+            return Array.Empty<Diagnostic>();
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var diagnostics = new List<Diagnostic>();
+        foreach (var rawLine in output.Split('\n'))
+        {
+            var match = DiagnosticLine.Match(rawLine.Trim());
+            if (!match.Success)
+                continue;
+
+            if (!int.TryParse(match.Groups["line"].Value, out var line))
+                continue;
+
+            var path = ToRepoRelative(match.Groups["path"].Value.Trim(), workspacePath);
+            var severity = match.Groups["sev"].Value.Equals("error", StringComparison.OrdinalIgnoreCase)
+                ? DiagnosticSeverity.Error
+                : DiagnosticSeverity.Warning;
+            var code = match.Groups["code"].Value.ToUpperInvariant();
+            var message = match.Groups["msg"].Value.Trim();
+
+            // One diagnostic code can repeat per referencing project; collapse to one row.
+            if (!seen.Add($"{path}|{line}|{code}|{message}"))
+                continue;
+
+            diagnostics.Add(new Diagnostic(path, line, severity, code, message));
+        }
+
+        return diagnostics;
+    }
+
+    private static string ToRepoRelative(string path, string workspacePath)
+    {
+        var normalizedPath = path.Replace('\\', '/');
+        var normalizedRoot = workspacePath.Replace('\\', '/').TrimEnd('/');
+        if (normalizedRoot.Length > 0 &&
+            normalizedPath.StartsWith(normalizedRoot + "/", StringComparison.Ordinal))
+        {
+            return normalizedPath[(normalizedRoot.Length + 1)..];
+        }
+
+        return normalizedPath;
     }
 
     // Finds the last occurrence of "N Warning(s)" or "N Error(s)" in the MSBuild summary.

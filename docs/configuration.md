@@ -184,6 +184,14 @@ review:
   # Default: true
   self_critique: true
 
+  # Verify findings against ground truth before posting. When build grounding
+  # produces diagnostics, a finding whose line the compiler independently flags
+  # is marked "✓ Verified" and annotated with the corroborating diagnostic.
+  # Purely additive — it never drops a finding — and a no-op unless build
+  # grounding (grounding.build) is enabled. Default: true
+  verification:
+    enabled: true
+
   # Allow the first LLM pass to request a small number of additional repo files.
   # The worker validates paths, applies ignore globs, rejects secret-looking files,
   # fetches text files only, then runs one final LLM pass with the added context.

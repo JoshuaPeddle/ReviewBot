@@ -222,7 +222,10 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
                 owner,
                 repo,
                 sha,
-                path));
+                path))
+        {
+            Verification = MergeVerification(fileConfig.Review?.Verification, defaults.Review.Verification)
+        };
 
         var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
         var retrieval = MergeRetrieval(fileConfig.Retrieval, defaults.Retrieval, owner, repo, sha, path);
@@ -236,6 +239,16 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
             MergeString(fileConfig.Instructions?.Trim(), defaults.Instructions),
             grounding,
             retrieval);
+    }
+
+    private static VerificationConfig MergeVerification(VerificationConfigFile? file, VerificationConfig defaults)
+    {
+        if (file is null)
+        {
+            return defaults;
+        }
+
+        return new VerificationConfig(file.Enabled ?? defaults.Enabled);
     }
 
     private GroundingConfig MergeGrounding(GroundingConfigFile? file, GroundingConfig defaults)
@@ -560,6 +573,17 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public int? MaxChunks { get; set; }
 
         public double? ChunkHeadroom { get; set; }
+
+        public VerificationConfigFile? Verification { get; set; }
+    }
+
+    private sealed class VerificationConfigFile
+    {
+        public VerificationConfigFile()
+        {
+        }
+
+        public bool? Enabled { get; set; }
     }
 
     private sealed class TriggerConfigFile

@@ -408,6 +408,25 @@ public class RepoConfigFetcherTests
     }
 
     [Fact]
+    public async Task FetchAsyncMapsVerificationEnabled()
+    {
+        const string yaml = """
+            review:
+              verification:
+                enabled: false
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Review.Verification.Enabled.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task FetchAsyncMapsAgenticContextLimits()
     {
         const string yaml = """

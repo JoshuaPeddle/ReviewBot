@@ -20,6 +20,46 @@ public class DotNetBuildRunnerTests : IDisposable
     };
 
     [Fact]
+    public void ParseDiagnostics_ParsesErrorsAndWarningsAsRepoRelativePaths()
+    {
+        const string root = "/work/clone";
+        var output = string.Join('\n',
+            "  Determining projects to restore...",
+            "/work/clone/src/Foo.cs(12,34): error CS0103: The name 'x' does not exist [/work/clone/src/App.csproj]",
+            "/work/clone/src/Bar.cs(5,7): warning CS0168: The variable 'y' is declared but never used [/work/clone/src/App.csproj]",
+            "    2 Warning(s)");
+
+        var diagnostics = DotNetBuildRunner.ParseDiagnostics(output, root);
+
+        diagnostics.Should().HaveCount(2);
+        diagnostics[0].Should().Be(new Diagnostic("src/Foo.cs", 12, DiagnosticSeverity.Error, "CS0103", "The name 'x' does not exist"));
+        diagnostics[1].Should().Be(new Diagnostic("src/Bar.cs", 5, DiagnosticSeverity.Warning, "CS0168", "The variable 'y' is declared but never used"));
+    }
+
+    [Fact]
+    public void ParseDiagnostics_DeduplicatesRepeatsAcrossProjects()
+    {
+        const string root = "/work/clone";
+        var line = "/work/clone/src/Foo.cs(12,34): error CS0103: The name 'x' does not exist";
+        var output = string.Join('\n', line + " [/work/clone/a.csproj]", line + " [/work/clone/b.csproj]");
+
+        var diagnostics = DotNetBuildRunner.ParseDiagnostics(output, root);
+
+        diagnostics.Should().ContainSingle();
+    }
+
+    [Fact]
+    public void ParseDiagnostics_IgnoresNonDiagnosticLines()
+    {
+        var output = string.Join('\n',
+            "Build succeeded.",
+            "    0 Warning(s)",
+            "    0 Error(s)");
+
+        DotNetBuildRunner.ParseDiagnostics(output, "/work/clone").Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task RunAsync_ValidProject_ReturnsSuccessTrue()
     {
         var dir = CreateProject(

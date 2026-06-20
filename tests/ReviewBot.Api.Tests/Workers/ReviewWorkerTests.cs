@@ -83,6 +83,90 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task VerifiesFindingsCorroboratedByBuildDiagnostics()
+    {
+        await using var fixture = new WorkerFixture();
+        var files = new[] { CreateFile("src/A.cs") };
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = false }
+        };
+        var comment = new InlineComment("src/A.cs", 2, "RIGHT", "Possible null dereference.", Severity.Error);
+        var grounding = new GroundingContext(
+            new LanguageMetadata("dotnet", "10.0", null, []),
+            new BuildResult(true, 1, 0, "build output",
+                [new Diagnostic("src/A.cs", 2, DiagnosticSeverity.Error, "CS8602", "Dereference of a possibly null reference.")]),
+            null);
+        ReviewResult? capturedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default).ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default, default).ReturnsForAnyArgs(files);
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
+            .Returns(grounding);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("Found one issue.", [comment]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, Arg.Do<ReviewResult>(r => capturedResult = r), default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        capturedResult.Should().NotBeNull();
+        capturedResult!.Comments.Should().ContainSingle();
+        capturedResult.Comments[0].Verification.Should().Be(VerificationStatus.Verified);
+        capturedResult.Comments[0].Body.Should().Contain("✓ **Verified**").And.Contain("CS8602");
+    }
+
+    [Fact]
+    public async Task DoesNotVerifyFindingsWithoutACorroboratingDiagnostic()
+    {
+        await using var fixture = new WorkerFixture();
+        var files = new[] { CreateFile("src/A.cs") };
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = false }
+        };
+        var comment = new InlineComment("src/A.cs", 2, "RIGHT", "Possible null dereference.", Severity.Error);
+        // Build clean (no diagnostics) — nothing to corroborate against.
+        var grounding = new GroundingContext(
+            new LanguageMetadata("dotnet", "10.0", null, []),
+            new BuildResult(true, 0, 0, "build output"),
+            null);
+        ReviewResult? capturedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default).ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default, default).ReturnsForAnyArgs(files);
+        fixture.GroundingProvider.GetContextAsync(Arg.Any<GroundingRequest>(), Arg.Any<CancellationToken>(), Arg.Any<ISharedWorkspace?>())
+            .Returns(grounding);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult("Found one issue.", [comment]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, Arg.Do<ReviewResult>(r => capturedResult = r), default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        capturedResult.Should().NotBeNull();
+        capturedResult!.Comments.Should().ContainSingle();
+        capturedResult.Comments[0].Verification.Should().Be(VerificationStatus.Unverified);
+        capturedResult.Comments[0].Body.Should().NotContain("Verified");
+    }
+
+    [Fact]
     public async Task DisabledConfigShortCircuitsBeforeFetchingFiles()
     {
         await using var fixture = new WorkerFixture();
@@ -1107,7 +1191,7 @@ public class ReviewWorkerTests
         List<DiagActivity> snapshot;
         lock (activities)
         {
-            snapshot = [..activities];
+            snapshot = [.. activities];
         }
 
         var indexActivity = snapshot.Should()
@@ -3574,7 +3658,7 @@ public class ReviewWorkerTests
         await Task.Delay(TimeSpan.FromMilliseconds(100));
 
         List<DiagActivity> snapshot;
-        lock (activities) snapshot = [..activities];
+        lock (activities) snapshot = [.. activities];
 
         var reviewSpan = snapshot.Should().ContainSingle(a => a.OperationName == "reviewbot.review").Subject;
         reviewSpan.GetTagItem("review.owner").Should().Be("octo-org");

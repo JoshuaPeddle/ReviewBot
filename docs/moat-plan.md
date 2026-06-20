@@ -70,7 +70,10 @@ for the findings it can adjudicate. Map onto the existing drop machinery:
 
 - **V0 — build refutes compile claims.** *Already shipped* (`ClaimsCompileFailureContradictedByBuild`,
   `ReviewWorker.cs:2105`). Fold into the verifier as tier 0.
-- **V1 — diagnostics corroborate (first slice).** Run the language's analyzer/type-checker on the head
+- **V1 — diagnostics corroborate (first slice).** *Shipped (corroboration): a finding whose line a
+  build diagnostic independently flags is marked `✓ Verified` with the diagnostic as evidence
+  (`FindingCorroborator`, reusing grounding's build output; no extra build run). Refutation beyond V0
+  is still to come.* Run the language's analyzer/type-checker on the head
   workspace, scoped to changed files: Roslyn analyzers (.NET), `tsc --noEmit` + eslint (TS/JS),
   `mypy`/`ruff` (Python), `go vet` (Go). A real diagnostic at/near the finding's line *corroborates*
   (→ `Verified`); an `error`-claim of a class the analyzer fully covers with no matching diagnostic is

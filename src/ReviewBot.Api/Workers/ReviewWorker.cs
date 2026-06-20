@@ -11,6 +11,7 @@ using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
 using ReviewBot.Core.Otel;
 using ReviewBot.Core.Prompting;
+using ReviewBot.Core.Verification;
 using ReviewBot.Core.Storage;
 using ReviewBot.GitHub.Auth;
 using ReviewBot.GitHub.Config;
@@ -532,6 +533,7 @@ public sealed class ReviewWorker : BackgroundService
             ];
         }
 
+        candidateComments = ApplyVerification(candidateComments, grounding, config, job);
         result = ApplyOutputConfig(result, candidateComments, config);
         if (config.Review.Summary)
         {
@@ -699,7 +701,8 @@ public sealed class ReviewWorker : BackgroundService
             Side = comment.Side,
             Body = comment.Body,
             Severity = comment.Severity.ToString().ToLowerInvariant(),
-            Confidence = comment.Confidence.ToString().ToLowerInvariant()
+            Confidence = comment.Confidence.ToString().ToLowerInvariant(),
+            Verification = comment.Verification == VerificationStatus.Verified ? "verified" : null
         };
 
     private static TraceDroppedComment ToTraceDroppedComment(InlineComment comment, string reason) =>
@@ -2085,6 +2088,59 @@ public sealed class ReviewWorker : BackgroundService
         }
 
         return dropped.ToArray();
+    }
+
+    // Cross-checks findings against ground-truth build diagnostics: a finding the
+    // compiler independently flags is marked Verified and annotated with the
+    // corroborating diagnostic. Purely additive — it never drops a finding — and a
+    // no-op unless build grounding produced diagnostics.
+    private IReadOnlyList<InlineComment> ApplyVerification(
+        IReadOnlyList<InlineComment> comments,
+        GroundingContext grounding,
+        ReviewConfig config,
+        ReviewJob job)
+    {
+        if (!config.Review.Verification.Enabled || comments.Count == 0)
+        {
+            return comments;
+        }
+
+        var diagnostics = grounding.Build?.Diagnostics ?? [];
+        if (diagnostics.Count == 0)
+        {
+            return comments;
+        }
+
+        var corroborated = FindingCorroborator.Corroborate(comments, diagnostics);
+        var verifiedCount = corroborated.Count(c => c.Evidence is not null);
+        if (verifiedCount == 0)
+        {
+            return comments;
+        }
+
+        logger.LogInformation(
+            "Verification: corroborated {VerifiedCount}/{CommentCount} finding(s) against build diagnostics for {Owner}/{Repo}#{PrNumber}",
+            verifiedCount,
+            comments.Count,
+            job.Owner,
+            job.Repo,
+            job.PrNumber);
+
+        return corroborated
+            .Select(c => c.Evidence is { } evidence
+                ? AppendVerificationEvidence(c.Comment, evidence)
+                : c.Comment)
+            .ToArray();
+    }
+
+    private static InlineComment AppendVerificationEvidence(InlineComment comment, Diagnostic evidence)
+    {
+        var severity = evidence.Severity == DiagnosticSeverity.Error ? "error" : "warning";
+        var note = $"> ✓ **Verified** — the build reports `{severity} {evidence.Code}` at line {evidence.Line}: {evidence.Message}";
+        var body = string.IsNullOrWhiteSpace(comment.Body)
+            ? note
+            : $"{comment.Body.TrimEnd()}\n\n{note}";
+        return comment with { Body = body };
     }
 
     private static ReviewResult ApplyOutputConfig(

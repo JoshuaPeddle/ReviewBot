@@ -29,7 +29,17 @@ public sealed record InlineComment(
     string Side,
     string Body,
     Severity Severity,
-    Confidence Confidence = Confidence.High);
+    Confidence Confidence = Confidence.High,
+    VerificationStatus Verification = VerificationStatus.Unverified);
+
+public enum VerificationStatus
+{
+    // No ground truth either way; the finding is posted as-is (current behaviour).
+    Unverified = 0,
+
+    // An independent compiler/analyzer diagnostic corroborates the finding.
+    Verified = 1
+}
 
 public enum Severity
 {
