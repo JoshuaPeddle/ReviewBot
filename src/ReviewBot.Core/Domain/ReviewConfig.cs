@@ -107,7 +107,14 @@ public sealed record ReviewOutputConfig(
     int ResponseReserveTokens = 4_096,
     bool ChunkedReview = true,
     int MaxChunks = 10,
-    double ChunkHeadroom = 0.80);
+    double ChunkHeadroom = 0.80)
+{
+    // Verify findings against ground truth (build diagnostics) before posting.
+    // A no-op unless build grounding produces diagnostics; only upgrades findings.
+    public VerificationConfig Verification { get; init; } = new();
+}
+
+public sealed record VerificationConfig(bool Enabled = true);
 
 public sealed record TriggerConfig(
     bool OnReviewRequest,

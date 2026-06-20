@@ -54,6 +54,9 @@ public sealed class TraceComment
     public required string Body { get; init; }
     public required string Severity { get; init; }
     public required string Confidence { get; init; }
+
+    // "verified" when corroborated by build diagnostics; null otherwise (the common case).
+    public string? Verification { get; init; }
 }
 
 public sealed class TraceDroppedComment
