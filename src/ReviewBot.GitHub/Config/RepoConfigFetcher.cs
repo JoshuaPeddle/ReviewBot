@@ -407,7 +407,7 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
     {
         if (string.IsNullOrWhiteSpace(value))
         {
-            return Confidence.Low;
+            return ReviewConfig.Default.Review.MinConfidence;
         }
 
         return value.Trim().ToLowerInvariant() switch
@@ -422,13 +422,14 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
     private Confidence LogUnknownMinConfidence(string value, string owner, string repo, string sha, string path)
     {
         logger.LogWarning(
-            "Unknown ReviewBot min_confidence value {Value} in {Path} for {Owner}/{Repo} at {Sha}; using default low",
+            "Unknown ReviewBot min_confidence value {Value} in {Path} for {Owner}/{Repo} at {Sha}; using default {Default}",
             value,
             path,
             owner,
             repo,
-            sha);
-        return Confidence.Low;
+            sha,
+            ReviewConfig.Default.Review.MinConfidence);
+        return ReviewConfig.Default.Review.MinConfidence;
     }
 
     private string ParseSymbolLookupDepth(string? value, string owner, string repo, string sha, string path)

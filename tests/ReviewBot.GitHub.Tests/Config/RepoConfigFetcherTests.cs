@@ -372,7 +372,7 @@ public class RepoConfigFetcherTests
     }
 
     [Fact]
-    public async Task FetchAsyncDefaultsMinConfidenceToLowWhenMissing()
+    public async Task FetchAsyncDefaultsMinConfidenceToMediumWhenMissing()
     {
         const string yaml = """
             review:
@@ -386,7 +386,7 @@ public class RepoConfigFetcherTests
 
         var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
 
-        config.Review.MinConfidence.Should().Be(Confidence.Low);
+        config.Review.MinConfidence.Should().Be(Confidence.Medium);
     }
 
     [Fact]
@@ -494,7 +494,7 @@ public class RepoConfigFetcherTests
     }
 
     [Fact]
-    public async Task FetchAsyncLogsWarningAndDefaultsLowOnUnknownMinConfidence()
+    public async Task FetchAsyncLogsWarningAndDefaultsToDefaultOnUnknownMinConfidence()
     {
         const string yaml = """
             review:
@@ -509,7 +509,7 @@ public class RepoConfigFetcherTests
 
         var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
 
-        config.Review.MinConfidence.Should().Be(Confidence.Low);
+        config.Review.MinConfidence.Should().Be(Confidence.Medium);
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning &&
             entry.Message.Contains("Unknown ReviewBot min_confidence value", StringComparison.Ordinal));

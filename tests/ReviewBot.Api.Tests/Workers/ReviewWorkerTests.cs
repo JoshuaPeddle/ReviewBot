@@ -2644,9 +2644,12 @@ public class ReviewWorkerTests
             });
 
         await using var fixture = new WorkerFixture(traceWriter: traceWriter);
+        // Pin MinConfidence=Low so the low-confidence comment survives the confidence
+        // filter and reaches self-critique (the behavior under test); the default is
+        // now Medium, which would drop it earlier.
         var config = ReviewConfig.Default with
         {
-            Review = ReviewConfig.Default.Review with { SelfCritique = true }
+            Review = ReviewConfig.Default.Review with { SelfCritique = true, MinConfidence = Confidence.Low }
         };
         ReviewResult? postedResult = null;
         PromptPayload? critiquePrompt = null;
