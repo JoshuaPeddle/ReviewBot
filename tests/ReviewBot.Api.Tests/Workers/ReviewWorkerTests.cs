@@ -2573,8 +2573,12 @@ public class ReviewWorkerTests
         await using var fixture = new WorkerFixture();
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        // Self-critique now defaults on, so disable it explicitly for this test.
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(ReviewConfig.Default);
+            .ReturnsForAnyArgs(ReviewConfig.Default with
+            {
+                Review = ReviewConfig.Default.Review with { SelfCritique = false }
+            });
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
