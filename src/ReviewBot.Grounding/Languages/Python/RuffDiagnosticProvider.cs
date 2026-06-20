@@ -47,8 +47,12 @@ public sealed class RuffDiagnosticProvider : IDiagnosticProvider
             var args = new List<string> { "check", "--output-format=json", "--quiet" };
             args.AddRange(pythonFiles);
             var output = await CaptureAsync(workspacePath, new ProcessCommand("ruff", args.ToArray()), linkedCts.Token);
-            // ruff ran successfully (it parsed the files), so the analyzed paths are
-            // proven to parse — verification may refute syntax claims against them.
+            // ruff ran, so the files it analyzed are proven to parse — verification may
+            // refute syntax claims against them. AnalyzedPaths is exactly the files we
+            // passed: ruff analyzes explicitly-listed paths (we never pass
+            // --force-exclude, which is the only thing that would make it skip one), so
+            // a passed file with no syntax diagnostic genuinely parsed rather than being
+            // silently skipped. Refutation must keep that invariant if this call changes.
             return new DiagnosticReport(true, ParseRuffJson(output, workspacePath), pythonFiles);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
