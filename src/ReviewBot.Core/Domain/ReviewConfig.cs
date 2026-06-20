@@ -16,7 +16,9 @@ public sealed record ReviewConfig(
         Enabled: true,
         Model: new ModelConfig(
             Provider: "openai",
-            Name: "qwen3.5:9b-q4_K_M",
+            // Last-resort default when a repo omits model.name and the host has no
+            // configured model to fall back to; the documented reference profile.
+            Name: "qwen3.6-27b",
             BaseUrlEnvVar: null),
         Review: new ReviewOutputConfig(
             InlineComments: true,

@@ -58,9 +58,10 @@ review:
     on_push: false
 
 retrieval:
-    # Deterministic repository-context retrieval. The config and prompt lane are
-    # present for Phase 22, but the worker does not fetch retrieval snippets yet.
-    # Default: true
+    # Deterministic repository-context retrieval: a SQLite symbol index built per
+    # head SHA, from which definitions and top callers referenced by the diff are
+    # injected as review context (bounded by the prompt budget).
+    # Default: false
     enabled: true
 
     # Maximum retrieved context bytes to include in a review.
