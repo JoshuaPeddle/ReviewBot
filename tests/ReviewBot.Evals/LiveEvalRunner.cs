@@ -64,7 +64,7 @@ public sealed class LiveEvalRunner
                 BaseUrl = options.BaseUrl,
                 ModelName = options.Model,
                 ResponseFormat = "text",
-                Temperature = 0.2f,
+                Temperature = options.Temperature,
                 MaxTokens = options.MaxTokens,
                 TimeoutSeconds = options.RequestTimeoutSeconds
             },
