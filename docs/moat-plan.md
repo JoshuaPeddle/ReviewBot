@@ -204,6 +204,14 @@ findings against real diagnostics) end to end and is fully gated by the existing
   review-your-own-PR loop in `CLAUDE.md`. New fixtures for verification precision and per-repo
   calibration. Don't widen the funnel — the whole design stays pointed at *precision with proof*.
 
+## Discovered follow-ups (from dogfooding)
+
+- **Subject the summary to actionability + self-critique filtering.** PR #34's
+  self-review showed confidently-wrong reasoning and literal think-out-loud
+  ("Wait, if it's evicted…") reaching the posted *summary*, which today bypasses
+  the `FilterCandidateComments` / self-critique path that inline comments go
+  through. Fold the summary into that discipline (Bet 1 / Bet 4 territory).
+
 ## What we explicitly will NOT do
 
 Chase Copilot on breadth-of-nitpicks or latency. The existing precision controls (`MinConfidence`,
