@@ -28,7 +28,7 @@ public static class EvalCli
                 Usage:
                   dotnet run --project tests/ReviewBot.Evals -- score --fixture <dir> --result <llm-result.json> [--out <score.json>]
                   dotnet run --project tests/ReviewBot.Evals -- score --fixtures <dir> --results <dir> [--out <run.json>]
-                  dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>] [--context-tokens 32768] [--per-fixture-timeout 240] [--request-timeout 180] [--max-tokens 4096] [--index-cache-dir <dir>]
+                  dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>] [--context-tokens 32768] [--per-fixture-timeout 240] [--request-timeout 180] [--max-tokens 4096] [--temperature 0.2] [--index-cache-dir <dir>]
                   dotnet run --project tests/ReviewBot.Evals -- compare <baseline-run.json> <candidate-run.json> [--out <comparison.json>]
                 """).ConfigureAwait(false);
             return 0;
@@ -67,6 +67,7 @@ public static class EvalCli
         var perFixtureTimeoutSeconds = ParseInt(ReadOption(args, "--per-fixture-timeout"), defaultValue: 240);
         var requestTimeoutSeconds = ParseInt(ReadOption(args, "--request-timeout"), defaultValue: 180);
         var maxTokens = ParseInt(ReadOption(args, "--max-tokens"), defaultValue: 4096);
+        var temperature = ParseFloat(ReadOption(args, "--temperature"), defaultValue: 0.2f);
         var indexCacheDir = ReadOption(args, "--index-cache-dir") ??
             Path.Combine(Path.GetTempPath(), "reviewbot-eval-index", Guid.NewGuid().ToString("N"));
 
@@ -111,7 +112,8 @@ public static class EvalCli
                         indexCacheDir,
                         perFixtureTimeoutSeconds,
                         requestTimeoutSeconds,
-                        maxTokens),
+                        maxTokens,
+                        temperature),
                     output)
                 .ConfigureAwait(false);
 
@@ -303,6 +305,13 @@ public static class EvalCli
         string.IsNullOrWhiteSpace(value)
             ? defaultValue
             : int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : defaultValue;
+
+    private static float ParseFloat(string? value, float defaultValue) =>
+        string.IsNullOrWhiteSpace(value)
+            ? defaultValue
+            : float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
                 ? parsed
                 : defaultValue;
 

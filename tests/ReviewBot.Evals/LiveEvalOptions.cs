@@ -13,4 +13,5 @@ public sealed record LiveEvalOptions(
     string IndexCacheDir,
     int PerFixtureTimeoutSeconds = 240,
     int RequestTimeoutSeconds = 180,
-    int MaxTokens = 4096);
+    int MaxTokens = 4096,
+    float Temperature = 0.2f);
