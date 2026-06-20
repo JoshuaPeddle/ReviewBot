@@ -197,11 +197,12 @@ review:
   max_context_file_bytes: 50000
 
   # Fetch and include full file contents for changed, non-deleted files whose
-  # patch is at or below this byte threshold. This can reduce false positives
-  # for small files but increases prompt size; tune it to the model context window.
+  # patch is at or below this byte threshold, giving the model surrounding code
+  # rather than just the diff hunk. Inclusion is bounded by the prompt budget, so
+  # on a small-context model fewer/no files fit even with a large threshold.
   # 0 disables full-file context.
-  # Default: 0
-  full_file_max_bytes: 0
+  # Default: 65536
+  full_file_max_bytes: 65536
 
   # Post REQUEST_CHANGES instead of COMMENT when any surviving inline comment
   # has severity: error. This can block merges on protected branches.
