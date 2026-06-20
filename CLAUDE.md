@@ -44,10 +44,14 @@ scripts/read-review.sh <pr-number>       # bot's summary + inline comments + tra
 
 How it works: `trigger-review.sh` resolves the PR head SHA via `gh`, builds a `pull_request` `opened` payload, signs it with HMAC-SHA256 using the local webhook secret, and POSTs to `/webhook` — no GitHub webhook tunnel needed. Re-running on the same SHA re-reviews the whole PR (the worker only skips a delta with zero changed files). The per-review trace at `src/ReviewBot.Api/traces/<owner>/<repo>/<pr>-<delivery>.json` has candidate-vs-posted comments, drop reasons, token usage, and the prompt budget — that file, not just the posted comments, is how you judge the bot.
 
-Then act on what you read, in **both** directions:
+**Always run this loop on every PR you post — it is not optional.** After opening (or pushing to) a PR, invoke ReviewBot on it and read the result before considering the work done.
 
-1. **Improve your change** — triage the bot's findings; apply the correct ones.
-2. **Improve ReviewBot** — the loop is also an eval. When the bot misbehaves (a 400 that fails the whole review, a hallucinated finding like "`= ;` is invalid C# syntax" when the source is `= "";`, comments on files outside the diff that get dropped, malformed JSON), that is a ReviewBot bug. Fix it (with a unit test) as part of the same effort. Example already landed this way: `OpenAiContextLimitFitter` refits output tokens and retries when a strict server (vLLM) rejects a request whose prompt + output exceeds the model context window.
+Then **sort every finding into exactly two buckets** and handle each:
+
+1. **Actionable** — the finding is correct (a real bug, risk, or worthwhile cleanup in *your* change). **Resolve it**: apply the fix in the same effort, then re-review.
+2. **Incorrect** — the finding is wrong: a hallucination ("`= ;` is invalid C# syntax" when the source is `= "";`), a comment on a file outside the diff, a claim the build/tests contradict, malformed output, a 400 that fails the whole review. For each one, **do not just dismiss it — reason backward to the flaw in ReviewBot that produced it** (prompt rendering, token budgeting, the model/temperature, comment filtering, the provider adapter) and fix that flaw, with a unit test, as part of the same effort. The incorrect bucket *is* the eval signal; every entry in it is a ReviewBot bug. Example landed this way: `OpenAiContextLimitFitter` refits output tokens and retries when a strict server (vLLM) rejects a request whose prompt + output exceeds the model context window.
+
+Record which findings went in which bucket (and the flaw you traced for the incorrect ones) in the PR discussion so the reasoning is visible.
 
 ## Running tests
 
