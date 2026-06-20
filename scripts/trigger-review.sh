@@ -19,7 +19,9 @@ SHA="$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq .head.sha)"
 DELIVERY="local-$(date +%s)-$RANDOM"
 PAYLOAD="$(printf '{"action":"opened","installation":{"id":%s},"repository":{"name":"%s","owner":{"login":"%s"}},"pull_request":{"number":%s,"html_url":"https://github.com/%s/%s/pull/%s","head":{"sha":"%s"},"user":{"login":"%s"}}}' \
   "$REVIEWBOT_INSTALLATION_ID" "$REPO" "$OWNER" "$PR" "$OWNER" "$REPO" "$PR" "$SHA" "$OWNER")"
-SIG="sha256=$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$REVIEWBOT__Webhook__Secret" | awk '{print $NF}')"
+# openssl prints "<algo>(stdin)= <hex>"; strip everything up to the "= " so the
+# extraction is robust to the algo-label differences between openssl versions.
+SIG="sha256=$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$REVIEWBOT__Webhook__Secret" | sed 's/^.*= //')"
 
 curl -fsS -X POST "$URL/webhook" \
   -H "X-GitHub-Event: pull_request" \
