@@ -405,6 +405,7 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyList<InlineComment> candidateComments;
         IReadOnlyList<InlineComment> rawCandidateComments;
         IReadOnlyList<DroppedComment> droppedComments;
+        IReadOnlyList<string> skippedPaths;
         IReadOnlyList<ChunkReviewOutcome>? chunkOutcomes = null;
 
         if (reviewChunks.Count > 1)
@@ -432,8 +433,7 @@ public sealed class ReviewWorker : BackgroundService
                 .ConfigureAwait(false);
             candidateComments = critiquedComments.Comments;
             droppedComments = CombineDroppedComments(filteredComments.DroppedComments, critiquedComments.DroppedComments);
-            result = result with { Summary = BuildChunkedSummary(candidateComments, reviewChunks) };
-            result = AppendFilesSkippedNote(result, GetSkippedChunkPaths(files, reviewChunks, patchBudgetResult.SkippedPaths));
+            skippedPaths = GetSkippedChunkPaths(files, reviewChunks, patchBudgetResult.SkippedPaths);
         }
         else
         {
@@ -503,7 +503,7 @@ public sealed class ReviewWorker : BackgroundService
                 throw;
             }
 
-            result = AppendFilesSkippedNote(result, patchBudgetResult.SkippedPaths);
+            skippedPaths = patchBudgetResult.SkippedPaths;
             if (ReferenceEquals(result, initialResult))
             {
                 var critiqueResult = speculativeSelfCritique is null
@@ -542,9 +542,20 @@ public sealed class ReviewWorker : BackgroundService
             .ConfigureAwait(false);
         candidateComments = verification.Comments;
         droppedComments = CombineDroppedComments(droppedComments, verification.RefutedDrops);
+        if (config.Review.Summary)
+        {
+            // Synthesize the summary from the final, surviving findings so it can never
+            // describe a comment that filtering, self-critique, or refutation dropped,
+            // nor carry a hallucinated claim the model wrote into its free-text prose.
+            result = result with { Summary = BuildFindingsSummary(candidateComments, reviewChunks) };
+        }
+
+        // ApplyOutputConfig may clear a no-issues summary (quiet on clean PRs); append the
+        // skipped-files note and re-review hint afterward so they always survive.
         result = ApplyOutputConfig(result, candidateComments, config);
         if (config.Review.Summary)
         {
+            result = AppendFilesSkippedNote(result, skippedPaths);
             result = AppendRereviewHint(result);
         }
 
@@ -1004,15 +1015,23 @@ public sealed class ReviewWorker : BackgroundService
             .SelectMany(chunk => chunk.Files)
             .ToArray();
 
-    private static string BuildChunkedSummary(
+    // Builds the posted summary from the final surviving findings (not the model's
+    // free-text), so it always matches the comments actually posted. Used for both the
+    // single-chunk and chunked paths; the "across N chunk(s)" phrasing only appears when
+    // the diff was actually split.
+    private static string BuildFindingsSummary(
         IReadOnlyList<InlineComment> comments,
         IReadOnlyList<ReviewChunk> chunks)
     {
         var reviewedFileCount = chunks.Sum(chunk => chunk.Files.Count);
         var chunkCount = chunks.Count;
+        var prefix = chunkCount > 1
+            ? $"Reviewed {reviewedFileCount} file(s) across {chunkCount} chunk(s)."
+            : $"Reviewed {reviewedFileCount} file(s).";
+
         if (comments.Count == 0)
         {
-            return $"Reviewed {reviewedFileCount} file(s) across {chunkCount} chunk(s). No actionable issues were found.";
+            return $"{prefix} No actionable issues were found.";
         }
 
         var highestSeverity = comments.Max(comment => comment.Severity).ToString().ToLowerInvariant();
@@ -1025,8 +1044,10 @@ public sealed class ReviewWorker : BackgroundService
             .Select(path => $"`{path}`")
             .ToArray();
         var pathText = affectedPaths.Length == 0 ? string.Empty : $" Most affected files: {string.Join(", ", affectedPaths)}.";
+        var verifiedCount = comments.Count(comment => comment.Verification == VerificationStatus.Verified);
+        var verifiedText = verifiedCount == 0 ? string.Empty : $" {verifiedCount} corroborated against ground truth.";
 
-        return $"Reviewed {reviewedFileCount} file(s) across {chunkCount} chunk(s). Found {issueText}; highest severity: {highestSeverity}.{pathText}";
+        return $"{prefix} Found {issueText}; highest severity: {highestSeverity}.{pathText}{verifiedText}";
     }
 
     private SelfCritiqueRun? StartSelfCritiqueIfNeeded(
