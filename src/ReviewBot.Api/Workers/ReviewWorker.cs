@@ -2018,9 +2018,27 @@ public sealed class ReviewWorker : BackgroundService
     // confident, error-severity claim is exactly the hallucination that most erodes
     // trust (e.g. "this is invalid C# syntax" on code that compiles), and being
     // high-confidence means it bypasses every other filter — so route those through
-    // critique too. High-confidence warning/info comments stay exempt.
+    // critique too. Also route confirmation-style comments and mechanically-checkable
+    // claims (disposal, leaks, throws, null, range): these are the false positives that
+    // nearby code most often refutes (a `using` declaration, a `Count == 0` guard), and
+    // only the diff-aware critique pass can see that context. High-confidence
+    // warning/info comments that make none of these claims stay exempt.
     private static bool ShouldCritiqueComment(InlineComment comment) =>
-        comment.Confidence != Confidence.High || comment.Severity == Severity.Error;
+        comment.Confidence != Confidence.High
+        || comment.Severity == Severity.Error
+        || MakesCheckableOrConfirmationClaim(comment.Body);
+
+    private static bool MakesCheckableOrConfirmationClaim(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeForTextHeuristics(body);
+        return ContainsAny(normalized, CheckableClaimPhrases) ||
+            ContainsAny(normalized, ConfirmationPhrases);
+    }
 
     private static CommentFilterResult FilterCandidateComments(
         ReviewResult result,
@@ -2071,6 +2089,11 @@ public sealed class ReviewWorker : BackgroundService
         if (IsPraiseOnlyComment(comment.Body))
         {
             return "praise_only";
+        }
+
+        if (IsConfirmationOnlyComment(comment.Body))
+        {
+            return "confirmation_only";
         }
 
         if (IsMetaReviewComment(comment.Body))
@@ -2343,6 +2366,24 @@ public sealed class ReviewWorker : BackgroundService
             !ContainsAny(normalized, ActionableConcernPhrases);
     }
 
+    // Drops comments that only validate the code ("this is the correct approach",
+    // "works correctly") and identify no concern. Distinct from praise-only: it catches
+    // confirmations phrased with incidental suggestion words like "should" that defeat
+    // the praise veto, while staying conservative — any genuine defect or contrast word
+    // ("but", "however", "null", "leak", …) keeps the comment, so a real concern bundled
+    // with a confirmation is never dropped here (it is routed to self-critique instead).
+    private static bool IsConfirmationOnlyComment(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeForTextHeuristics(body);
+        return ContainsAny(normalized, ConfirmationPhrases) &&
+            !ContainsAny(normalized, StrongConcernVetoPhrases);
+    }
+
     private static bool ClaimsCompileFailureContradictedByBuild(string body, GroundingContext? grounding)
     {
         // Only refute when the build actually ran and succeeded; a failed build
@@ -2447,6 +2488,107 @@ public sealed class ReviewWorker : BackgroundService
         " validates that ",
         " well done ",
         " well written "
+    ];
+
+    // Phrases that validate/confirm the code is correct (not phrased as a request).
+    // "is correct" is deliberately excluded — it appears in actionable asks like
+    // "validate that X is correct" — in favour of confirmation-specific wordings.
+    private static readonly string[] ConfirmationPhrases =
+    [
+        " correct approach ",
+        " correct way ",
+        " right approach ",
+        " correctly handles ",
+        " correctly handle ",
+        " correctly handled ",
+        " correctly implements ",
+        " works correctly ",
+        " works as intended ",
+        " working as intended ",
+        " behaves correctly ",
+        " handled correctly ",
+        " this ensures ",
+        " good approach ",
+        " sound approach ",
+        " no issue here ",
+        " no concern here ",
+        " no concerns here ",
+        " is acceptable here ",
+        " is fine here "
+    ];
+
+    // Genuine defect / contrast signals. Tighter than ActionableConcernPhrases: it omits
+    // weak hedges (" should ", " could ", " may ", " consider ") that appear in benign
+    // confirmation prose, so it vetoes confirmation-dropping only on a real concern.
+    private static readonly string[] StrongConcernVetoPhrases =
+    [
+        " but ",
+        " however ",
+        " instead ",
+        " bug ",
+        " wrong ",
+        " incorrect ",
+        " fail ",
+        " fails ",
+        " failure ",
+        " missing ",
+        " leak ",
+        " leaks ",
+        " race ",
+        " deadlock ",
+        " overflow ",
+        " injection ",
+        " vulnerable ",
+        " unsafe ",
+        " null ",
+        " exception ",
+        " crash ",
+        " throw ",
+        " throws ",
+        " regress ",
+        " breaks ",
+        " corrupt ",
+        " dereference ",
+        " does not ",
+        " doesn t ",
+        " not handled "
+    ];
+
+    // Mechanically-checkable correctness claims whose truth a few nearby lines usually
+    // settle (a `using`, a guard, an `await`). High-confidence comments making these are
+    // routed through the diff-aware self-critique that they would otherwise skip.
+    private static readonly string[] CheckableClaimPhrases =
+    [
+        " not disposed ",
+        " isn t disposed ",
+        " never disposed ",
+        " not be disposed ",
+        " dispose ",
+        " disposed ",
+        " leak ",
+        " leaks ",
+        " leaked ",
+        " orphaned ",
+        " resource leak ",
+        " memory leak ",
+        " will throw ",
+        " can throw ",
+        " could throw ",
+        " may throw ",
+        " throws ",
+        " null reference ",
+        " nullreferenceexception ",
+        " null deref ",
+        " dereference ",
+        " out of range ",
+        " index out of ",
+        " empty list ",
+        " empty collection ",
+        " on an empty ",
+        " on empty ",
+        " not awaited ",
+        " not closed ",
+        " never closed "
     ];
 
     private static readonly string[] PositiveSummaryPhrases =
