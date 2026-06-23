@@ -3,42 +3,47 @@ using ReviewBot.Retrieval.Symbols;
 
 namespace ReviewBot.Retrieval.Indexing;
 
-public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
+public sealed partial class CSharpRepoSymbolParser : IRepoSymbolParser
 {
-    private static readonly Regex UsingPattern = new(
+    // Source-generated regexes: compiled at build time (no startup JIT cost, no
+    // interpreter overhead) and matched against every line of every indexed file.
+    // The 100ms timeout is preserved as a ReDoS guard since input is untrusted repo content.
+    private const int RegexTimeoutMs = 100;
+
+    [GeneratedRegex(
         @"^\s*using\s+(?:static\s+)?(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?)(?<name>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*;",
-        RegexOptions.CultureInvariant,
-        TimeSpan.FromMilliseconds(100));
+        RegexOptions.CultureInvariant, RegexTimeoutMs)]
+    private static partial Regex UsingPattern();
 
-    private static readonly Regex TypeDeclarationPattern = new(
+    [GeneratedRegex(
         @"\b(?:class|record|struct|interface|enum|delegate)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\b",
-        RegexOptions.CultureInvariant,
-        TimeSpan.FromMilliseconds(100));
+        RegexOptions.CultureInvariant, RegexTimeoutMs)]
+    private static partial Regex TypeDeclarationPattern();
 
-    private static readonly Regex MethodDeclarationPattern = new(
+    [GeneratedRegex(
         @"^\s*(?:\[[^\]]+\]\s*)*(?:(?:public|private|protected|internal|static|async|virtual|override|sealed|abstract|partial|extern|unsafe|new)\s+)*(?:[A-Za-z_][A-Za-z0-9_<>,\[\]\?\.]*\s+)+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>\r\n]+>)?\s*\(",
-        RegexOptions.CultureInvariant,
-        TimeSpan.FromMilliseconds(100));
+        RegexOptions.CultureInvariant, RegexTimeoutMs)]
+    private static partial Regex MethodDeclarationPattern();
 
-    private static readonly Regex FieldDeclarationPattern = new(
+    [GeneratedRegex(
         @"^\s*(?:(?:public|private|protected|internal|static|readonly|const|required|volatile)\s+)+[A-Za-z_][A-Za-z0-9_<>,\[\]\?\.]*\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:[=;{])",
-        RegexOptions.CultureInvariant,
-        TimeSpan.FromMilliseconds(100));
+        RegexOptions.CultureInvariant, RegexTimeoutMs)]
+    private static partial Regex FieldDeclarationPattern();
 
-    private static readonly Regex MemberAccessPattern = new(
+    [GeneratedRegex(
         @"\.\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?<call>\()?",
-        RegexOptions.CultureInvariant,
-        TimeSpan.FromMilliseconds(100));
+        RegexOptions.CultureInvariant, RegexTimeoutMs)]
+    private static partial Regex MemberAccessPattern();
 
-    private static readonly Regex InvocationPattern = new(
+    [GeneratedRegex(
         @"\b(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>\r\n]+>)?\s*\(",
-        RegexOptions.CultureInvariant,
-        TimeSpan.FromMilliseconds(100));
+        RegexOptions.CultureInvariant, RegexTimeoutMs)]
+    private static partial Regex InvocationPattern();
 
-    private static readonly Regex IdentifierPattern = new(
+    [GeneratedRegex(
         @"\b(?<name>[A-Za-z_][A-Za-z0-9_]*)\b",
-        RegexOptions.CultureInvariant,
-        TimeSpan.FromMilliseconds(100));
+        RegexOptions.CultureInvariant, RegexTimeoutMs)]
+    private static partial Regex IdentifierPattern();
 
     private static readonly HashSet<string> CSharpKeywords = new(StringComparer.Ordinal)
     {
@@ -75,7 +80,7 @@ public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(content);
 
-        var rawLines = SplitLines(content).ToArray();
+        var rawLines = SplitLines(content);
         var sanitized = new string[rawLines.Length];
         var inBlockComment = false;
         var rawStringQuoteCount = 0;
@@ -193,21 +198,21 @@ public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
         var definitionsOnLine = new HashSet<string>(StringComparer.Ordinal);
         var declarationIndex = lineNumber - 1;
 
-        var usingMatch = UsingPattern.Match(code);
+        var usingMatch = UsingPattern().Match(code);
         if (usingMatch.Success)
         {
             AddSymbol(usingMatch.Groups["name"].Value, RepoSymbolKind.Import, RepoSymbolRole.Usage);
             return;
         }
 
-        foreach (Match match in TypeDeclarationPattern.Matches(code))
+        foreach (Match match in TypeDeclarationPattern().Matches(code))
         {
             var name = match.Groups["name"].Value;
             definitionsOnLine.Add(name);
             AddSymbol(name, RepoSymbolKind.Type, RepoSymbolRole.Definition);
         }
 
-        var methodDeclaration = MethodDeclarationPattern.Match(code);
+        var methodDeclaration = MethodDeclarationPattern().Match(code);
         if (methodDeclaration.Success && !NonMemberInvocations.Contains(methodDeclaration.Groups["name"].Value))
         {
             var name = methodDeclaration.Groups["name"].Value;
@@ -216,7 +221,7 @@ public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
             AddSymbol(name, RepoSymbolKind.Method, RepoSymbolRole.Definition, body, bodyStart, bodyEnd);
         }
 
-        var fieldDeclaration = FieldDeclarationPattern.Match(code);
+        var fieldDeclaration = FieldDeclarationPattern().Match(code);
         if (fieldDeclaration.Success)
         {
             var name = fieldDeclaration.Groups["name"].Value;
@@ -224,14 +229,14 @@ public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
             AddSymbol(name, RepoSymbolKind.Field, RepoSymbolRole.Definition);
         }
 
-        foreach (Match match in MemberAccessPattern.Matches(code))
+        foreach (Match match in MemberAccessPattern().Matches(code))
         {
             var name = match.Groups["name"].Value;
             var kind = match.Groups["call"].Success ? RepoSymbolKind.Method : RepoSymbolKind.Field;
             AddSymbol(name, kind, RepoSymbolRole.Usage);
         }
 
-        foreach (Match match in InvocationPattern.Matches(code))
+        foreach (Match match in InvocationPattern().Matches(code))
         {
             var name = match.Groups["name"].Value;
             if (definitionsOnLine.Contains(name) ||
@@ -244,10 +249,19 @@ public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
             AddSymbol(name, RepoSymbolKind.Method, RepoSymbolRole.Usage);
         }
 
-        foreach (Match match in IdentifierPattern.Matches(code))
+        // Zero-allocation enumeration: only an uppercase-initial identifier is a type
+        // usage, and since every C# keyword is lowercase, that single check subsumes the
+        // original `IsKeyword(name) || !LooksLikeTypeIdentifier(name)` filter. The name
+        // string is only materialized for the uppercase minority that survive it.
+        foreach (var match in IdentifierPattern().EnumerateMatches(code))
         {
-            var name = match.Groups["name"].Value;
-            if (definitionsOnLine.Contains(name) || IsKeyword(name) || !LooksLikeTypeIdentifier(name))
+            if (!char.IsUpper(code[match.Index]))
+            {
+                continue;
+            }
+
+            var name = code.Substring(match.Index, match.Length);
+            if (definitionsOnLine.Contains(name))
             {
                 continue;
             }
@@ -286,7 +300,7 @@ public sealed class CSharpRepoSymbolParser : IRepoSymbolParser
                prefix.EndsWith("new?", StringComparison.Ordinal);
     }
 
-    private static IEnumerable<string> SplitLines(string value)
+    private static string[] SplitLines(string value)
     {
         var normalized = value.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
         return normalized.Split('\n');
