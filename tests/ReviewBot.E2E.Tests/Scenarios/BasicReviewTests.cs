@@ -160,7 +160,10 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
             repoConfig: FixtureLoader.ReadText("repo-config-self-critique.yml"),
             prFiles: FixtureLoader.ReadText("pr-files-dotnet.json"),
             primaryReviewJson: FixtureLoader.ReadText("llm-response-self-critique-primary.json"),
-            critiqueJson: """{"retained_indices":[0],"rationale":"second medium comment is style-only"}""");
+            // The high-confidence "leak" comment now also runs through critique (it makes a
+            // checkable claim), so all three comments are critique candidates; keep the first
+            // two and drop the style-only third.
+            critiqueJson: """{"retained_indices":[0,1],"rationale":"third comment is style-only"}""");
         using var client = harness.CreateClient();
         var sender = new WebhookSender(client, ReviewBotHarness.WebhookSecret);
 

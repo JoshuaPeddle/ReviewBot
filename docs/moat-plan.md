@@ -248,6 +248,16 @@ findings against real diagnostics) end to end and is fully gated by the existing
   describe a dropped/refuted finding or carry a hallucinated claim, and it surfaces the corroborated
   ("✓ verified") count — a stronger guarantee than critique, and cheaper. This also fixed a latent
   staleness bug where the chunked summary was built before refutation ran.
+- **Praise-filter coverage + local-context misses.** *Resolved:* two recurring dogfood false-positive
+  classes. (1) Confirmation comments ("…is the correct approach… this ensures…") slipped the praise
+  filter because its veto (`ActionableConcernPhrases`) includes weak hedges like "should" — added a
+  deterministic `IsConfirmationOnlyComment` with a tight defect/contrast veto (`confirmation_only`).
+  (2) High-confidence claims like "`using var` not disposed" or "`.Max()` throws on empty" skipped
+  self-critique entirely and ignored a guard/`using` a few lines away — `ShouldCritiqueComment` now
+  also routes confirmation-style and mechanically-checkable claims (disposal/leak/throws/null/range)
+  through the diff-aware critique pass that can see that context. Deterministic routing is unit-tested;
+  the keep/drop call stays with the existing critique LLM so nuanced "…correct but <real concern>"
+  comments are never dropped by regex.
 
 ## What we explicitly will NOT do
 

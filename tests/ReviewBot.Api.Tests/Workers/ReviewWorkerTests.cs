@@ -3427,6 +3427,96 @@ public class ReviewWorkerTests
     }
 
     [Fact]
+    public async Task DropsConfirmationOnlyCommentsThatEvadeThePraiseFilter()
+    {
+        ReviewTrace? capturedTrace = null;
+        var traceWriter = Substitute.For<IReviewTraceWriter>();
+        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedTrace = call.Arg<ReviewTrace>();
+                return Task.CompletedTask;
+            });
+
+        await using var fixture = new WorkerFixture(traceWriter: traceWriter);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = false }
+        };
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default).ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review.",
+                [
+                    // Confirmation phrased with an incidental "should" — defeats the praise
+                    // veto, but identifies no concern, so confirmation_only catches it.
+                    new InlineComment("src/App.cs", 1, "RIGHT", "Appending the notes here is the correct approach; they should always appear regardless.", Severity.Info, Confidence.High),
+                    // A real concern survives.
+                    new InlineComment("src/App.cs", 2, "RIGHT", "Guard against null input before dereferencing the value.", Severity.Warning, Confidence.High)
+                ]));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+        capturedTrace.Should().NotBeNull();
+        capturedTrace!.DroppedComments.Should().ContainSingle(c =>
+            c.Reason == "confirmation_only" && c.Body.Contains("correct approach"));
+        capturedTrace.FinalComments.Should().ContainSingle()
+            .Which.Body.Should().Contain("Guard against null input");
+    }
+
+    [Fact]
+    public async Task RoutesHighConfidenceCheckableClaimsThroughSelfCritique()
+    {
+        string? critiquePhase = null;
+        await using var fixture = new WorkerFixture();
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default).ReturnsForAnyArgs(ReviewConfig.Default);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
+        // A single high-confidence, non-error comment — normally exempt from critique —
+        // that makes a disposal claim nearby code could refute.
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "Review.",
+                [new InlineComment("src/App.cs", 1, "RIGHT", "The Process is not disposed and may leak.", Severity.Warning, Confidence.High)]));
+        fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
+            .Returns(call =>
+            {
+                critiquePhase = call.ArgAt<string>(2);
+                return """{"retained_indices":[0],"rationale":"kept"}""";
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        // Before this change the comment would skip critique entirely (high-confidence,
+        // non-error); now it is routed through the diff-aware self-critique pass.
+        await fixture.Llm.Received().CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), "self_critique");
+        critiquePhase.Should().Be("self_critique");
+    }
+
+    [Fact]
     public async Task DropsCompileErrorClaimsWhenBuildSucceeded()
     {
         ReviewTrace? capturedTrace = null;
