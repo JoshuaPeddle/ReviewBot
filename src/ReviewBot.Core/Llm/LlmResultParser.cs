@@ -237,7 +237,7 @@ public static class LlmResultParser
         if (TryGetProperty(element, name, out var property) &&
             property.ValueKind == JsonValueKind.Number &&
             property.TryGetInt32(out value) &&
-            value > 0)
+            value >= 0)
         {
             return true;
         }
