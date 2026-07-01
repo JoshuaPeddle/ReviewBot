@@ -28,7 +28,7 @@ public static class EvalCli
                 Usage:
                   dotnet run --project tests/ReviewBot.Evals -- score --fixture <dir> --result <llm-result.json> [--out <score.json>]
                   dotnet run --project tests/ReviewBot.Evals -- score --fixtures <dir> --results <dir> [--out <run.json>]
-                  dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>] [--context-tokens 32768] [--per-fixture-timeout 240] [--request-timeout 180] [--max-tokens 4096] [--temperature 0.2] [--index-cache-dir <dir>]
+                  dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>] [--context-tokens 32768] [--per-fixture-timeout 240] [--request-timeout 180] [--max-tokens 4096] [--temperature 0.2] [--self-critique true|false] [--index-cache-dir <dir>]
                   dotnet run --project tests/ReviewBot.Evals -- compare <baseline-run.json> <candidate-run.json> [--out <comparison.json>]
                 """).ConfigureAwait(false);
             return 0;
@@ -63,6 +63,7 @@ public static class EvalCli
         var configPath = ReadOption(args, "--config");
         var manifestPath = ReadOption(args, "--manifest");
         var retrieval = ParseBool(ReadOption(args, "--retrieval"), defaultValue: false);
+        var selfCritique = ParseBool(ReadOption(args, "--self-critique"), defaultValue: false);
         var contextTokens = ParseInt(ReadOption(args, "--context-tokens"), defaultValue: 32768);
         var perFixtureTimeoutSeconds = ParseInt(ReadOption(args, "--per-fixture-timeout"), defaultValue: 240);
         var requestTimeoutSeconds = ParseInt(ReadOption(args, "--request-timeout"), defaultValue: 180);
@@ -113,7 +114,8 @@ public static class EvalCli
                         perFixtureTimeoutSeconds,
                         requestTimeoutSeconds,
                         maxTokens,
-                        temperature),
+                        temperature,
+                        selfCritique),
                     output)
                 .ConfigureAwait(false);
 
@@ -179,7 +181,8 @@ public static class EvalCli
                 return 1;
             }
 
-            var score = new RuleBasedScorer().Score(fixture, parseResult.Value!);
+            var verified = await new EvalVerifier().VerifyAsync(fixture, parseResult.Value!).ConfigureAwait(false);
+            var score = new RuleBasedScorer().Score(fixture, verified);
             await WriteJsonAsync(score, outputPath, output).ConfigureAwait(false);
             return score.Passed ? 0 : 1;
         }

@@ -1,0 +1,12 @@
+name: Simplify ProfileLoader to a synchronous API
+category: performance
+difficulty: medium
+description: |
+  ProfileLoader.LoadProfileJson returns the profile document directly instead of
+  exposing a Task, simplifying the call sites.
+notes: |
+  Recall fixture (performance / concurrency). The change blocks on an async call
+  via `.Result`, a sync-over-async pattern that risks thread-pool starvation and
+  deadlock under a synchronization context. A good reviewer flags it and
+  recommends async/await. Validated live; the canned result models the ideal
+  finding so eval-quick stays green.

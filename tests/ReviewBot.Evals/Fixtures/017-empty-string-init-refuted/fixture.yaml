@@ -1,0 +1,13 @@
+name: Add optional suffix to Greeter
+category: clean_pr
+difficulty: low
+description: |
+  Greeter gains an optional suffix field that defaults to an empty string.
+  Existing callers are unaffected.
+notes: |
+  Refutation fixture (precision). The head file parses cleanly, so a hallucinated
+  "invalid C# syntax / won't compile" claim on the `= ""` initializer must be
+  dropped by verification: RoslynDiagnosticProvider proves the file parses and
+  FindingRefuter removes the compile-failure claim. The canned result models
+  exactly that misread ("= ;"); scored clean, nothing should survive to post.
+  If verification ever regresses, this fixture fails.

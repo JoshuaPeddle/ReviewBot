@@ -126,7 +126,8 @@ public sealed class EvalFixtureLoader
             RequiredString(file.Topic, path, $"{prefix}.topic"),
             file.MustMentionAny?.Where(keyword => !string.IsNullOrWhiteSpace(keyword)).Select(keyword => keyword.Trim()).ToArray()
                 ?? [],
-            additional.Length == 0 ? null : additional);
+            additional.Length == 0 ? null : additional,
+            file.MustBeVerified ?? false);
     }
 
     private static AllowedLocation ConvertAdditionalLocation(AdditionalLocationFile file, string path, string prefix)
@@ -231,6 +232,8 @@ public sealed class EvalFixtureLoader
         public List<string>? MustMentionAny { get; set; }
 
         public List<AdditionalLocationFile>? AdditionalLocations { get; set; }
+
+        public bool? MustBeVerified { get; set; }
     }
 
     private sealed class AdditionalLocationFile

@@ -108,6 +108,13 @@ public sealed class RuleBasedScorer
             return false;
         }
 
+        // When a fixture asserts must_be_verified, the finding only counts if the
+        // deterministic verifier corroborated it against a real analyzer diagnostic.
+        if (expectation.MustBeVerified && comment.Verification != VerificationStatus.Verified)
+        {
+            return false;
+        }
+
         if (MatchesLocation(expectation.Path, expectation.StartLine, expectation.EndLine, comment))
         {
             return true;

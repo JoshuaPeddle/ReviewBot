@@ -1,0 +1,9 @@
+must_not_flag:
+  - path: src/Demo/JsonTemplates.cs
+    reason: >
+      A C#11 raw string literal is valid syntax; a "won't compile" claim on the
+      triple-quote delimiter must be refuted by verification (Preview parsing
+      accepts it).
+    severity_above: info
+max_total_comments: 0
+expected_review_state: APPROVE

@@ -1,0 +1,12 @@
+{
+  "summary": "Reviewed the new suffix field on Greeter.",
+  "comments": [
+    {
+      "path": "src/Demo/Greeter.cs",
+      "line": 6,
+      "severity": "error",
+      "confidence": "high",
+      "body": "`private string suffix = ;` on line 6 is invalid C# syntax - you cannot assign an empty statement to a field, so this will not compile. Assign a real value or remove the initializer."
+    }
+  ]
+}
