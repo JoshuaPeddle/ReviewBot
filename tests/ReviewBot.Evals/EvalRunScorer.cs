@@ -45,6 +45,7 @@ public sealed class EvalRunScorer
         }
 
         var fixtureScores = new List<EvalFixtureScore>();
+        var verifier = new EvalVerifier();
         foreach (var fixtureDirectory in fixtureDirectories)
         {
             var fixtureName = Path.GetFileName(fixtureDirectory);
@@ -76,11 +77,14 @@ public sealed class EvalRunScorer
                 throw new InvalidDataException($"Eval result '{resultPath}' could not be parsed: {parseResult.Error}");
             }
 
+            // Mirror the worker's post-LLM verification stage so the corpus measures the
+            // shipped pipeline (deterministic refute/corroborate), not raw model output.
+            var verified = await verifier.VerifyAsync(fixture, parseResult.Value!).ConfigureAwait(false);
             fixtureScores.Add(new EvalFixtureScore(
                 fixture.Metadata.Name,
                 fixture.DirectoryPath,
                 Path.GetFullPath(resultPath),
-                scorer.Score(fixture, parseResult.Value!)));
+                scorer.Score(fixture, verified)));
         }
 
         return Aggregate(fixtureScores);

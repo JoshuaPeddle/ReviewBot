@@ -14,4 +14,5 @@ public sealed record LiveEvalOptions(
     int PerFixtureTimeoutSeconds = 240,
     int RequestTimeoutSeconds = 180,
     int MaxTokens = 4096,
-    float Temperature = 0.2f);
+    float Temperature = 0.2f,
+    bool SelfCritique = false);

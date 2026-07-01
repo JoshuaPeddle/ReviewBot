@@ -4,7 +4,11 @@ namespace ReviewBot.Evals.Tests;
 
 public sealed class EvalQuickFixtureTests
 {
-    private const int ExpectedQuickFixtureCount = 16;
+    // A floor, not an exact count: the corpus grows continuously, so adding fixtures
+    // must never break this test. Each fixture must still carry a canned result and a
+    // repo-state directory and score cleanly; the floor only guards against the corpus
+    // silently shrinking or vanishing.
+    private const int MinimumQuickFixtureCount = 21;
 
     [Fact]
     public async Task QuickFixtureCorpusScoresCleanly()
@@ -16,8 +20,8 @@ public sealed class EvalQuickFixtureTests
         var runScore = await new EvalRunScorer().ScoreAsync(fixturesDirectory, resultsDirectory);
 
         runScore.Passed.Should().BeTrue();
-        runScore.TotalFixtures.Should().Be(ExpectedQuickFixtureCount);
-        runScore.PassedFixtures.Should().Be(ExpectedQuickFixtureCount);
+        runScore.TotalFixtures.Should().BeGreaterThanOrEqualTo(MinimumQuickFixtureCount);
+        runScore.PassedFixtures.Should().Be(runScore.TotalFixtures);
         runScore.Precision.Should().Be(1);
         runScore.Recall.Should().Be(1);
         runScore.F1.Should().Be(1);
@@ -34,7 +38,7 @@ public sealed class EvalQuickFixtureTests
             .Where(directory => File.Exists(Path.Combine(directory, "fixture.yaml")))
             .ToArray();
 
-        fixtureDirectories.Should().HaveCount(ExpectedQuickFixtureCount);
+        fixtureDirectories.Should().HaveCountGreaterThanOrEqualTo(MinimumQuickFixtureCount);
         fixtureDirectories.Should().OnlyContain(directory =>
             Directory.Exists(Path.Combine(directory, "repo-state")));
     }

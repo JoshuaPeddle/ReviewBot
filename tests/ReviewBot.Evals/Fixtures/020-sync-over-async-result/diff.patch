@@ -1,0 +1,13 @@
+diff --git a/src/Demo/ProfileLoader.cs b/src/Demo/ProfileLoader.cs
+index 5555555..6666666 100644
+--- a/src/Demo/ProfileLoader.cs
++++ b/src/Demo/ProfileLoader.cs
+@@ -14,6 +14,6 @@ public sealed class ProfileLoader
+
+-    public async Task<string> LoadProfileJsonAsync(string url)
++    public string LoadProfileJson(string url)
+     {
+-        return await this.httpClient.GetStringAsync(url);
++        return this.httpClient.GetStringAsync(url).Result;
+     }
+ }

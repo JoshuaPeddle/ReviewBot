@@ -1,0 +1,12 @@
+name: Add a prime lookup table to PrimeTable
+category: clean_pr
+difficulty: low
+description: |
+  PrimeTable gains a static array of small primes. No behavior change elsewhere.
+notes: |
+  Refutation fixture (precision) guarding C#12 collection-expression parsing. The
+  head parses cleanly under LanguageVersion.Preview, so a hallucinated "not valid
+  C# / won't compile" claim on `[2, 3, 5, 7, 11]` (modeled by the canned result)
+  must be dropped by verification. If the parser's language version regressed
+  below C#12 the provider would emit a false syntax error, the file would not be
+  cleanly parsed, the hallucination would survive, and this fixture would fail.

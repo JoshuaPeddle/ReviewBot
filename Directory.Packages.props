@@ -1,10 +1,22 @@
 <Project>
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <!-- Let a PackageVersion entry pin a patched version of a vulnerable *transitive*
+         dependency (no direct reference needed), so NuGet audit + TreatWarningsAsErrors
+         stay on for everything else. -->
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
   <!-- Third-party -->
   <ItemGroup>
     <PackageVersion Include="Anthropic.SDK" Version="5.10.0" />
+    <!-- Pinned to the Roslyn that ships with the .NET 10 SDK; must match the version
+         Microsoft.EntityFrameworkCore.Design pulls transitively (Workspaces) to avoid
+         a Microsoft.CodeAnalysis.Common version conflict. -->
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" />
+    <!-- Security: patched version of a transitive dep flagged by NuGet audit as high
+         severity (GHSA-v5pm-xwqc-g5wc); pulled in via Microsoft.AspNetCore.OpenApi.
+         Transitive pinning (above) applies it without a direct reference. -->
+    <PackageVersion Include="Microsoft.OpenApi" Version="2.7.5" />
     <PackageVersion Include="Octokit" Version="14.0.0" />
     <PackageVersion Include="OpenAI" Version="2.10.0" />
     <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />

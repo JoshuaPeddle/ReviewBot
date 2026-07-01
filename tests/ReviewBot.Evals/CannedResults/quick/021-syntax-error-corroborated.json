@@ -1,0 +1,12 @@
+{
+  "summary": "Zero() has a broken initializer.",
+  "comments": [
+    {
+      "path": "src/Demo/Calc.cs",
+      "line": 7,
+      "severity": "error",
+      "confidence": "high",
+      "body": "`int x = ;` is a syntax error - the initializer is missing its expression, so this will not compile. Assign a value such as `int x = 0;`."
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+must_not_flag:
+  - path: src/Demo/PrimeTable.cs
+    reason: >
+      A C#12 collection expression is valid syntax; a "won't compile" claim on it
+      must be refuted by verification (Preview parsing accepts it).
+    severity_above: info
+max_total_comments: 0
+expected_review_state: APPROVE

@@ -1,0 +1,13 @@
+diff --git a/src/Demo/Calc.cs b/src/Demo/Calc.cs
+index 7777777..8888888 100644
+--- a/src/Demo/Calc.cs
++++ b/src/Demo/Calc.cs
+@@ -4,7 +4,7 @@ public static class Calc
+ {
+     public static int Zero()
+     {
+-        int x = 0;
++        int x = ;
+         return x;
+     }
+ }
