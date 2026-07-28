@@ -1,0 +1,11 @@
+diff --git a/src/Demo/PrimeTable.cs b/src/Demo/PrimeTable.cs
+index 1111111..2222222 100644
+--- a/src/Demo/PrimeTable.cs
++++ b/src/Demo/PrimeTable.cs
+@@ -1,5 +1,6 @@
+ namespace Demo;
+
+ public static class PrimeTable
+ {
++    public static readonly int[] Primes = [2, 3, 5, 7, 11];
+ }

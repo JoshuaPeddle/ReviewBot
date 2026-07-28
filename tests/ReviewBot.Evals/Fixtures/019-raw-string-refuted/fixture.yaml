@@ -1,0 +1,10 @@
+name: Add an empty JSON template constant
+category: clean_pr
+difficulty: low
+description: |
+  JsonTemplates gains a constant holding an empty JSON document.
+notes: |
+  Refutation fixture (precision) guarding C#11 raw-string-literal parsing. The
+  head parses cleanly under LanguageVersion.Preview, so a hallucinated "not valid
+  C# / won't compile" claim on the triple-quote delimiter (modeled by the canned
+  result) must be dropped by verification.

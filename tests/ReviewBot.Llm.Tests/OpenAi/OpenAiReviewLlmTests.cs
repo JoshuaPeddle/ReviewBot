@@ -1,4 +1,6 @@
 using FluentAssertions;
+using OpenAI.Chat;
+using System.ClientModel.Primitives;
 using System.Diagnostics.Metrics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -387,6 +389,82 @@ public sealed class OpenAiReviewLlmTests
         var format = OpenAiSdkChatClient.CreateResponseFormat(responseFormat, includeContextRequests: true);
 
         (format is not null).Should().Be(expectedSdkFormat);
+    }
+
+    [Fact]
+    public void ApplySamplingWritesEveryKnobIntoTheRequestBody()
+    {
+        var options = new ChatCompletionOptions { Temperature = 0.6f };
+
+        OpenAiSdkChatClient.ApplySampling(
+            options,
+            new OpenAiSamplingOptions
+            {
+                TopP = 0.95f,
+                TopK = 20,
+                MinP = 0.0f,
+                PresencePenalty = 0.0f,
+                RepetitionPenalty = 1.0f,
+                Seed = 12345L
+            });
+
+        // top_k, min_p and repetition_penalty are outside the OpenAI schema, so the only
+        // way to prove they reach the server is to inspect the serialized body.
+        var body = ModelReaderWriter.Write(options).ToString();
+
+        body.Should().Contain("\"temperature\":0.6");
+        body.Should().Contain("\"top_p\":0.95");
+        body.Should().Contain("\"top_k\":20");
+        body.Should().Contain("\"min_p\":0");
+        body.Should().Contain("\"presence_penalty\":0");
+        body.Should().Contain("\"repetition_penalty\":1");
+        body.Should().Contain("\"seed\":12345");
+    }
+
+    [Fact]
+    public void ApplySamplingLeavesRequestUntouchedWhenUnset()
+    {
+        var options = new ChatCompletionOptions { Temperature = 0.2f };
+
+        OpenAiSdkChatClient.ApplySampling(options, sampling: null);
+        OpenAiSdkChatClient.ApplySampling(options, new OpenAiSamplingOptions());
+
+        var body = ModelReaderWriter.Write(options).ToString();
+
+        options.TopP.Should().BeNull();
+        options.PresencePenalty.Should().BeNull();
+#pragma warning disable OPENAI001
+        options.Seed.Should().BeNull();
+#pragma warning restore OPENAI001
+        body.Should().NotContain("seed");
+        body.Should().NotContain("top_p");
+        body.Should().NotContain("top_k");
+        body.Should().NotContain("min_p");
+        body.Should().NotContain("presence_penalty");
+        body.Should().NotContain("repetition_penalty");
+    }
+
+    [Fact]
+    public void ApplySamplingWritesOnlyTheKnobsThatAreSet()
+    {
+        var options = new ChatCompletionOptions();
+
+        OpenAiSdkChatClient.ApplySampling(options, new OpenAiSamplingOptions { TopK = 20 });
+
+        var body = ModelReaderWriter.Write(options).ToString();
+
+        body.Should().Contain("\"top_k\":20");
+        body.Should().NotContain("min_p");
+        body.Should().NotContain("repetition_penalty");
+    }
+
+    [Fact]
+    public void SamplingOptionsReportWhetherAnyKnobIsSet()
+    {
+        new OpenAiSamplingOptions().HasAnyValue.Should().BeFalse();
+        new OpenAiSamplingOptions { MinP = 0.0f }.HasAnyValue.Should().BeTrue();
+        new OpenAiSamplingOptions { RepetitionPenalty = 1.0f }.HasAnyValue.Should().BeTrue();
+        new OpenAiSamplingOptions { Seed = 0L }.HasAnyValue.Should().BeTrue();
     }
 
     [Theory]

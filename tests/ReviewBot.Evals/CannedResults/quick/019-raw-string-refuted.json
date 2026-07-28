@@ -1,0 +1,12 @@
+{
+  "summary": "Reviewed the new JSON template constant.",
+  "comments": [
+    {
+      "path": "src/Demo/JsonTemplates.cs",
+      "line": 5,
+      "severity": "error",
+      "confidence": "high",
+      "body": "The `\"\"\"` triple-quote delimiter is not valid C# string syntax and will not compile. Use a regular string literal with escaped quotes instead."
+    }
+  ]
+}

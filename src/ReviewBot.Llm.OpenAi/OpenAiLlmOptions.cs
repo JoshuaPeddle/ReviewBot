@@ -14,6 +14,12 @@ public sealed record OpenAiLlmOptions
 
     public float Temperature { get; set; } = 0.2f;
 
+    /// <summary>
+    /// Optional sampling knobs beyond temperature. Null (the default) sends none of
+    /// them and leaves the server's defaults in place.
+    /// </summary>
+    public OpenAiSamplingOptions? Sampling { get; set; }
+
     private string responseFormat = OpenAiResponseFormats.Text;
 
     public string ResponseFormat

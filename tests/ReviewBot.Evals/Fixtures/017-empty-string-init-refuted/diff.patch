@@ -1,0 +1,18 @@
+diff --git a/src/Demo/Greeter.cs b/src/Demo/Greeter.cs
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/Demo/Greeter.cs
++++ b/src/Demo/Greeter.cs
+@@ -3,11 +3,12 @@
+ public sealed class Greeter
+ {
+     private readonly string prefix;
++    private string suffix = "";
+
+     public Greeter(string prefix)
+     {
+         this.prefix = prefix;
+     }
+
+-    public string Greet(string name) => $"{this.prefix}{name}";
++    public string Greet(string name) => $"{this.prefix}{name}{this.suffix}";
+ }

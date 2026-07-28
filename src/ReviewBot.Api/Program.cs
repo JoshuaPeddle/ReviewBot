@@ -98,6 +98,7 @@ builder.Services.AddGrounding()
     .AddBuildRunner<PythonBuildRunner>()
     .AddTestRunner<DotNetTestRunner>()
     .AddTestRunner<PythonTestRunner>()
+    .AddDiagnosticProvider<RoslynDiagnosticProvider>()
     .AddDiagnosticProvider<RuffDiagnosticProvider>();
 builder.Services.AddReviewTracing();
 builder.Services.AddOptions<CostRateOptions>()

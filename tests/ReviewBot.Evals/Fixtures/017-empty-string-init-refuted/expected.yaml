@@ -1,0 +1,9 @@
+must_not_flag:
+  - path: src/Demo/Greeter.cs
+    reason: >
+      The head file parses cleanly; a hallucinated "invalid syntax / won't
+      compile" claim on the empty-string initializer must be refuted by
+      verification, not posted.
+    severity_above: info
+max_total_comments: 0
+expected_review_state: APPROVE

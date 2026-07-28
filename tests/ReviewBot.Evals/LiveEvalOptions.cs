@@ -1,3 +1,5 @@
+using ReviewBot.Llm.OpenAi;
+
 namespace ReviewBot.Evals;
 
 public sealed record LiveEvalOptions(
@@ -14,4 +16,6 @@ public sealed record LiveEvalOptions(
     int PerFixtureTimeoutSeconds = 240,
     int RequestTimeoutSeconds = 180,
     int MaxTokens = 4096,
-    float Temperature = 0.2f);
+    float Temperature = 0.2f,
+    bool SelfCritique = false,
+    OpenAiSamplingOptions? Sampling = null);

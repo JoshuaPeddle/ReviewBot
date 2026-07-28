@@ -21,6 +21,28 @@ REVIEWBOT_EVAL_REQUEST_TIMEOUT ?= 180
 # within tight local context windows (e.g. the 32K reference model); 4096 is
 # ample for the structured JSON review response.
 REVIEWBOT_EVAL_MAX_TOKENS ?= 4096
+# Sampling knobs. Empty means "don't send it" — the server's own default applies.
+# Qwen3.6 recommends temperature=0.6, top_p=0.95, top_k=20 for thinking mode; the
+# remaining three are identity values kept explicit so a run is fully reproducible.
+REVIEWBOT_EVAL_TEMPERATURE ?=
+REVIEWBOT_EVAL_TOP_P ?=
+REVIEWBOT_EVAL_TOP_K ?=
+REVIEWBOT_EVAL_MIN_P ?=
+REVIEWBOT_EVAL_PRESENCE_PENALTY ?=
+REVIEWBOT_EVAL_REPETITION_PENALTY ?=
+# Fixing the seed pairs an A/B: both arms draw the same randomness, so a delta is
+# attributable to the change under test rather than to sampling luck.
+REVIEWBOT_EVAL_SEED ?=
+
+# Expand to CLI flags only for the knobs that were actually set.
+EVAL_SAMPLING_ARGS := \
+	$(if $(REVIEWBOT_EVAL_TEMPERATURE),--temperature $(REVIEWBOT_EVAL_TEMPERATURE)) \
+	$(if $(REVIEWBOT_EVAL_TOP_P),--top-p $(REVIEWBOT_EVAL_TOP_P)) \
+	$(if $(REVIEWBOT_EVAL_TOP_K),--top-k $(REVIEWBOT_EVAL_TOP_K)) \
+	$(if $(REVIEWBOT_EVAL_MIN_P),--min-p $(REVIEWBOT_EVAL_MIN_P)) \
+	$(if $(REVIEWBOT_EVAL_PRESENCE_PENALTY),--presence-penalty $(REVIEWBOT_EVAL_PRESENCE_PENALTY)) \
+	$(if $(REVIEWBOT_EVAL_REPETITION_PENALTY),--repetition-penalty $(REVIEWBOT_EVAL_REPETITION_PENALTY)) \
+	$(if $(REVIEWBOT_EVAL_SEED),--seed $(REVIEWBOT_EVAL_SEED))
 
 # Single timestamp per `make` invocation. Used so baseline + retrieval + comparison
 # files from one run share a prefix.
@@ -65,6 +87,7 @@ eval-live-baseline: eval-probe
 		--per-fixture-timeout $(REVIEWBOT_EVAL_PER_FIXTURE_TIMEOUT) \
 		--request-timeout $(REVIEWBOT_EVAL_REQUEST_TIMEOUT) \
 		--max-tokens $(REVIEWBOT_EVAL_MAX_TOKENS) \
+		$(EVAL_SAMPLING_ARGS) \
 		--manifest runs/eval-$(EVAL_RUN_LABEL)-baseline-manifest.json
 	-dotnet run --project tests/ReviewBot.Evals -- score \
 		--fixtures $(REVIEWBOT_EVAL_FIXTURES) \
@@ -88,6 +111,7 @@ eval-live-retrieval: eval-probe
 		--per-fixture-timeout $(REVIEWBOT_EVAL_PER_FIXTURE_TIMEOUT) \
 		--request-timeout $(REVIEWBOT_EVAL_REQUEST_TIMEOUT) \
 		--max-tokens $(REVIEWBOT_EVAL_MAX_TOKENS) \
+		$(EVAL_SAMPLING_ARGS) \
 		--manifest runs/eval-$(EVAL_RUN_LABEL)-retrieval-manifest.json
 	-dotnet run --project tests/ReviewBot.Evals -- score \
 		--fixtures $(REVIEWBOT_EVAL_FIXTURES) \

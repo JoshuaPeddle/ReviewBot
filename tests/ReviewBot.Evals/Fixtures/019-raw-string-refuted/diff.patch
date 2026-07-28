@@ -1,0 +1,15 @@
+diff --git a/src/Demo/JsonTemplates.cs b/src/Demo/JsonTemplates.cs
+index 3333333..4444444 100644
+--- a/src/Demo/JsonTemplates.cs
++++ b/src/Demo/JsonTemplates.cs
+@@ -1,5 +1,10 @@
+ namespace Demo;
+
+ public static class JsonTemplates
+ {
++    public const string Empty = """
++        {
++          "items": []
++        }
++        """;
+ }

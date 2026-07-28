@@ -1,0 +1,15 @@
+must_flag:
+  - path: src/Demo/ProfileLoader.cs
+    line_range: [15, 17]
+    severity_at_least: warning
+    topic: sync_over_async
+    must_mention_any:
+      - Result
+      - deadlock
+      - block
+      - blocking
+      - async
+      - await
+      - GetAwaiter
+max_total_comments: 3
+expected_review_state: COMMENT

@@ -1,0 +1,12 @@
+{
+  "summary": "LoadProfileJson now blocks on an async call.",
+  "comments": [
+    {
+      "path": "src/Demo/ProfileLoader.cs",
+      "line": 17,
+      "severity": "warning",
+      "confidence": "high",
+      "body": "Calling `.Result` on `GetStringAsync` blocks the calling thread and can deadlock under a synchronization context. Make the method async and `await` the call instead of blocking on the Task."
+    }
+  ]
+}

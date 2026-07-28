@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using ReviewBot.Core.Llm;
 using ReviewBot.Evals;
+using ReviewBot.Llm.OpenAi;
 
 return await EvalCli.RunAsync(args, Console.Out, Console.Error).ConfigureAwait(false);
 
@@ -28,7 +29,7 @@ public static class EvalCli
                 Usage:
                   dotnet run --project tests/ReviewBot.Evals -- score --fixture <dir> --result <llm-result.json> [--out <score.json>]
                   dotnet run --project tests/ReviewBot.Evals -- score --fixtures <dir> --results <dir> [--out <run.json>]
-                  dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>] [--context-tokens 32768] [--per-fixture-timeout 240] [--request-timeout 180] [--max-tokens 4096] [--temperature 0.2] [--index-cache-dir <dir>]
+                  dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>] [--context-tokens 32768] [--per-fixture-timeout 240] [--request-timeout 180] [--max-tokens 4096] [--temperature 0.2] [--top-p 0.95] [--top-k 20] [--min-p 0.0] [--presence-penalty 0.0] [--repetition-penalty 1.0] [--seed 1] [--self-critique true|false] [--index-cache-dir <dir>]
                   dotnet run --project tests/ReviewBot.Evals -- compare <baseline-run.json> <candidate-run.json> [--out <comparison.json>]
                 """).ConfigureAwait(false);
             return 0;
@@ -63,6 +64,7 @@ public static class EvalCli
         var configPath = ReadOption(args, "--config");
         var manifestPath = ReadOption(args, "--manifest");
         var retrieval = ParseBool(ReadOption(args, "--retrieval"), defaultValue: false);
+        var selfCritique = ParseBool(ReadOption(args, "--self-critique"), defaultValue: false);
         var contextTokens = ParseInt(ReadOption(args, "--context-tokens"), defaultValue: 32768);
         var perFixtureTimeoutSeconds = ParseInt(ReadOption(args, "--per-fixture-timeout"), defaultValue: 240);
         var requestTimeoutSeconds = ParseInt(ReadOption(args, "--request-timeout"), defaultValue: 180);
@@ -70,6 +72,30 @@ public static class EvalCli
         var temperature = ParseFloat(ReadOption(args, "--temperature"), defaultValue: 0.2f);
         var indexCacheDir = ReadOption(args, "--index-cache-dir") ??
             Path.Combine(Path.GetTempPath(), "reviewbot-eval-index", Guid.NewGuid().ToString("N"));
+
+        // Optional sampling knobs. Each one left unset is omitted from the request so
+        // the server's own default applies — an eval run that passes none of these is
+        // byte-identical to one from before these flags existed.
+        var invalidSamplingOptions = new List<string>();
+        var sampling = new OpenAiSamplingOptions
+        {
+            TopP = ParseOptionalFloat(args, "--top-p", invalidSamplingOptions),
+            TopK = ParseOptionalInt(args, "--top-k", invalidSamplingOptions),
+            MinP = ParseOptionalFloat(args, "--min-p", invalidSamplingOptions),
+            PresencePenalty = ParseOptionalFloat(args, "--presence-penalty", invalidSamplingOptions),
+            RepetitionPenalty = ParseOptionalFloat(args, "--repetition-penalty", invalidSamplingOptions),
+            Seed = ParseOptionalLong(args, "--seed", invalidSamplingOptions),
+        };
+
+        if (invalidSamplingOptions.Count > 0)
+        {
+            // Falling back to a default here would silently run the eval with sampling
+            // the caller didn't ask for, so refuse instead.
+            await error.WriteLineAsync(
+                $"Non-numeric value for {string.Join(", ", invalidSamplingOptions)}.")
+                .ConfigureAwait(false);
+            return 2;
+        }
 
         if (fixturesPath is null || resultsPath is null || baseUrl is null || model is null)
         {
@@ -113,7 +139,9 @@ public static class EvalCli
                         perFixtureTimeoutSeconds,
                         requestTimeoutSeconds,
                         maxTokens,
-                        temperature),
+                        temperature,
+                        selfCritique,
+                        sampling.HasAnyValue ? sampling : null),
                     output)
                 .ConfigureAwait(false);
 
@@ -179,7 +207,8 @@ public static class EvalCli
                 return 1;
             }
 
-            var score = new RuleBasedScorer().Score(fixture, parseResult.Value!);
+            var verified = await new EvalVerifier().VerifyAsync(fixture, parseResult.Value!).ConfigureAwait(false);
+            var score = new RuleBasedScorer().Score(fixture, verified);
             await WriteJsonAsync(score, outputPath, output).ConfigureAwait(false);
             return score.Passed ? 0 : 1;
         }
@@ -314,6 +343,62 @@ public static class EvalCli
             : float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
                 ? parsed
                 : defaultValue;
+
+    /// <summary>
+    /// Reads an optional numeric flag. Absent returns null (send nothing); a value that
+    /// isn't a number records the flag name in <paramref name="invalidOptions"/> so the
+    /// caller can reject it rather than quietly substituting a default.
+    /// </summary>
+    private static float? ParseOptionalFloat(string[] args, string name, List<string> invalidOptions)
+    {
+        var raw = ReadOption(args, name);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        if (!float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+        {
+            invalidOptions.Add(name);
+            return null;
+        }
+
+        return parsed;
+    }
+
+    private static long? ParseOptionalLong(string[] args, string name, List<string> invalidOptions)
+    {
+        var raw = ReadOption(args, name);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        if (!long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+        {
+            invalidOptions.Add(name);
+            return null;
+        }
+
+        return parsed;
+    }
+
+    private static int? ParseOptionalInt(string[] args, string name, List<string> invalidOptions)
+    {
+        var raw = ReadOption(args, name);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        if (!int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+        {
+            invalidOptions.Add(name);
+            return null;
+        }
+
+        return parsed;
+    }
 
     private static string[] ReadPositionals(string[] args)
     {

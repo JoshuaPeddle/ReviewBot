@@ -59,6 +59,7 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
                 Temperature = request.Temperature,
                 ResponseFormat = CreateResponseFormat(request.ResponseFormat, request.IncludeContextRequestsInJsonSchema),
             };
+            ApplySampling(options, request.Sampling);
 
             try
             {
@@ -95,6 +96,60 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
                 throw new OpenAiChatRequestException(ex.Status, body, ex);
             }
         }
+    }
+
+    /// <summary>
+    /// Copies the configured sampling knobs onto the outgoing request. Knobs the OpenAI
+    /// chat schema models get a typed property; the rest are written straight into the
+    /// request body, which is how local servers (vLLM, SGLang, Ollama) accept them.
+    /// </summary>
+    internal static void ApplySampling(ChatCompletionOptions options, OpenAiSamplingOptions? sampling)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (sampling is null)
+        {
+            return;
+        }
+
+        if (sampling.TopP is { } topP)
+        {
+            options.TopP = topP;
+        }
+
+        if (sampling.PresencePenalty is { } presencePenalty)
+        {
+            options.PresencePenalty = presencePenalty;
+        }
+
+        // Seed is still an evaluation-only surface in the SDK; scope the suppression to
+        // the one line that touches it.
+#pragma warning disable OPENAI001
+        if (sampling.Seed is { } seed)
+        {
+            options.Seed = seed;
+        }
+#pragma warning restore OPENAI001
+
+        // JsonPatch is the SDK's supported escape hatch for fields outside the OpenAI
+        // schema. It is marked experimental, so the suppression is scoped to these three
+        // lines: if the API changes, the build fails here and nowhere else.
+#pragma warning disable SCME0001
+        if (sampling.TopK is { } topK)
+        {
+            options.Patch.Set("$.top_k"u8, topK);
+        }
+
+        if (sampling.MinP is { } minP)
+        {
+            options.Patch.Set("$.min_p"u8, minP);
+        }
+
+        if (sampling.RepetitionPenalty is { } repetitionPenalty)
+        {
+            options.Patch.Set("$.repetition_penalty"u8, repetitionPenalty);
+        }
+#pragma warning restore SCME0001
     }
 
     private static string? TryReadResponseBody(ClientResultException ex)

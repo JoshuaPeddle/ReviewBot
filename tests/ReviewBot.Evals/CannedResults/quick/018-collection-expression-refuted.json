@@ -1,0 +1,12 @@
+{
+  "summary": "Reviewed the new Primes table.",
+  "comments": [
+    {
+      "path": "src/Demo/PrimeTable.cs",
+      "line": 5,
+      "severity": "error",
+      "confidence": "high",
+      "body": "`[2, 3, 5, 7, 11]` is not valid C# for initializing an array; C# requires `new int[] { ... }`. As written this will not compile."
+    }
+  ]
+}

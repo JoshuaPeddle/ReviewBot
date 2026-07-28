@@ -1,0 +1,17 @@
+must_flag:
+  - path: src/Demo/Calc.cs
+    line_range: [7, 7]
+    severity_at_least: error
+    topic: syntax_error
+    must_be_verified: true
+    # "compile" is not a substring of "compilation", and the model legitimately
+    # phrases this either way (a live run said "compilation error … initializer").
+    # Keep this list phrasing-robust so a correct, corroborated finding still counts.
+    must_mention_any:
+      - syntax
+      - compile
+      - compilation
+      - expression
+      - initializer
+max_total_comments: 3
+expected_review_state: REQUEST_CHANGES

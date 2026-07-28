@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ReviewBot.Core\ReviewBot.Core.csproj" />
+    <ProjectReference Include="..\..\src\ReviewBot.Grounding\ReviewBot.Grounding.csproj" />
     <ProjectReference Include="..\..\src\ReviewBot.Llm.OpenAi\ReviewBot.Llm.OpenAi.csproj" />
     <ProjectReference Include="..\..\src\ReviewBot.Retrieval\ReviewBot.Retrieval.csproj" />
   </ItemGroup>
