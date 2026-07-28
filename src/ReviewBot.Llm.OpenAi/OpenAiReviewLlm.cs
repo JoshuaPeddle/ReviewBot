@@ -8,6 +8,16 @@ namespace ReviewBot.Llm.OpenAi;
 public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
 {
     private const int MaxLoggedRawResponseLength = 500;
+
+    // How many times we may double the output allowance when a reasoning model spends
+    // the whole thing thinking and returns nothing. Two doublings take the 100K-context
+    // default from 12.5K to 50K, which leaves room for a ~30K prompt in the window.
+    private const int MaxEmptyResponseExpansions = 2;
+
+    // Providers do not always report completion tokens exactly equal to the allowance
+    // when they truncate, so treat "near the ceiling" as having hit it.
+    private const double OutputAllowanceExhaustedFraction = 0.9;
+
     private static readonly TimeSpan[] TransientRetryDelays =
     [
         TimeSpan.FromMilliseconds(100),
@@ -56,8 +66,8 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
         // Prefer the budget-derived output allowance so prompt + output fits the
         // model context window; fall back to the host default when unset.
         var maxOutputTokens = request.MaxOutputTokens is > 0 ? request.MaxOutputTokens.Value : options.MaxTokens;
-        var (firstResponse, firstUsage) = await SendAsync(prompt, [prompt.UserPrompt], responseFormat, includeContextRequests, "review", maxOutputTokens, ct);
-        EmptyLlmResponse.ThrowIfUnusable(firstResponse, ProviderName, firstUsage?.CompletionTokens, maxOutputTokens);
+        var (firstResponse, firstUsage) = await SendWithOutputExpansionAsync(
+            prompt, responseFormat, includeContextRequests, "review", maxOutputTokens, ct);
         var firstParse = LlmResultParser.Parse(firstResponse, logger);
         if (firstParse is { Success: true, Value: not null })
         {
@@ -113,6 +123,63 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
             logger,
             configuredClient ?? sdkClient,
             delayAsync);
+    }
+
+    /// <summary>
+    /// Sends a prompt, growing the output allowance when the model spends all of it
+    /// reasoning and returns no content.
+    /// </summary>
+    /// <remarks>
+    /// A reasoning model streams chain-of-thought before it answers, so an allowance
+    /// that is merely small produces an empty body rather than a truncated one. Retrying
+    /// at the same size would fail identically, and no fixed default is right for every
+    /// diff — a large review legitimately needs more thinking room than a one-line one.
+    /// Observed on Qwen3.6-27B, which exhausted 4096 and then 12500 tokens on the same PR.
+    ///
+    /// If a doubled allowance no longer fits the context window the server rejects the
+    /// request and <see cref="OpenAiContextLimitFitter"/> refits it, so this cannot wedge
+    /// the two mechanisms against each other.
+    /// </remarks>
+    private async Task<(string Content, LlmTokenUsage? Usage)> SendWithOutputExpansionAsync(
+        PromptPayload prompt,
+        string responseFormat,
+        bool includeContextRequestsInJsonSchema,
+        string phase,
+        int maxOutputTokens,
+        CancellationToken ct)
+    {
+        var allowance = maxOutputTokens;
+        LlmTokenUsage? cumulativeUsage = null;
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var (content, usage) = await SendAsync(
+                prompt, [prompt.UserPrompt], responseFormat, includeContextRequestsInJsonSchema, phase, allowance, ct)
+                .ConfigureAwait(false);
+            cumulativeUsage = cumulativeUsage?.Add(usage) ?? usage;
+
+            if (!string.IsNullOrWhiteSpace(content))
+            {
+                return (content, cumulativeUsage);
+            }
+
+            var consumed = usage?.CompletionTokens ?? 0;
+            var exhaustedAllowance = consumed >= allowance * OutputAllowanceExhaustedFraction;
+            if (attempt >= MaxEmptyResponseExpansions || !exhaustedAllowance)
+            {
+                // Either we have grown the allowance as far as we are willing to, or the
+                // model stopped early for some other reason and more room would not help.
+                EmptyLlmResponse.ThrowIfUnusable(content, ProviderName, consumed, allowance);
+            }
+
+            logger.LogWarning(
+                "{Provider} consumed its entire {Allowance}-token output allowance without emitting content "
+                + "(reasoning model out of room); retrying with {NewAllowance}",
+                ProviderName,
+                allowance,
+                allowance * 2);
+            allowance *= 2;
+        }
     }
 
     private async Task<(string Content, LlmTokenUsage? Usage)> SendAsync(

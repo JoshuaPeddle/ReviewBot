@@ -89,20 +89,57 @@ public sealed class OpenAiReviewLlmTests
     }
 
     [Fact]
-    public async Task ReviewAsyncThrowsWithBudgetHintWhenResponseIsEmptyButTokensWereConsumed()
+    public async Task ReviewAsyncGrowsTheOutputAllowanceWhenReasoningExhaustsIt()
     {
-        // A reasoning model that burns its whole output allowance on chain-of-thought
-        // reports completion tokens and returns no content. Observed on Qwen3.6-27B.
-        var client = new FakeOpenAiChatClient(new OpenAiChatResult(
-            string.Empty,
-            new LlmTokenUsage(PromptTokens: 29970, CompletionTokens: 4606)));
+        // A reasoning model that burns its whole allowance on chain-of-thought reports
+        // completion tokens and returns no content. Observed on Qwen3.6-27B, which did
+        // this at 4096 and again at 12500 on the same PR.
+        var client = new FakeOpenAiChatClient(
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 4096)),
+            new OpenAiChatResult(
+                """{"summary": "Done.", "comments": []}""",
+                new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 5000)));
         var llm = CreateLlm(client);
 
-        await llm.Invoking(l => l.ReviewAsync(CreateRequest(), CancellationToken.None))
-            .Should().ThrowAsync<LlmResponseUnusableException>()
-            .WithMessage("*4606 completion tokens*response_reserve_tokens*");
+        var result = await llm.ReviewAsync(CreateRequest(maxOutputTokens: 4096), CancellationToken.None);
 
-        // No repair round-trip: there is nothing to repair in an empty string.
+        result.Summary.Should().Be("Done.");
+        client.Requests.Should().HaveCount(2);
+        client.Requests[0].MaxTokens.Should().Be(4096);
+        client.Requests[1].MaxTokens.Should().Be(8192);
+        // Usage is cumulative across the expansion so cost reporting stays honest.
+        result.TokenUsage!.CompletionTokens.Should().Be(9096);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncThrowsAfterExhaustingTheAllowanceExpansions()
+    {
+        var client = new FakeOpenAiChatClient(
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 4096)),
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 8192)),
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 16384)));
+        var llm = CreateLlm(client);
+
+        await llm.Invoking(l => l.ReviewAsync(CreateRequest(maxOutputTokens: 4096), CancellationToken.None))
+            .Should().ThrowAsync<LlmResponseUnusableException>()
+            .WithMessage("*16384 completion tokens*response_reserve_tokens*");
+
+        client.Requests.Should().HaveCount(3);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncDoesNotGrowTheAllowanceWhenTheModelStoppedEarly()
+    {
+        // Few tokens consumed means the model gave up for some other reason; more room
+        // would not help, so fail immediately rather than burn two more requests.
+        var client = new FakeOpenAiChatClient(new OpenAiChatResult(
+            string.Empty,
+            new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 12)));
+        var llm = CreateLlm(client);
+
+        await llm.Invoking(l => l.ReviewAsync(CreateRequest(maxOutputTokens: 4096), CancellationToken.None))
+            .Should().ThrowAsync<LlmResponseUnusableException>();
+
         client.Requests.Should().HaveCount(1);
     }
 
@@ -638,7 +675,7 @@ public sealed class OpenAiReviewLlmTests
             client,
             (delay, _) => delayAsync(delay));
 
-    private static ReviewRequest CreateRequest(bool agenticContext = false) =>
+    private static ReviewRequest CreateRequest(bool agenticContext = false, int? maxOutputTokens = null) =>
         new(
             PrTitle: "Test PR",
             PrBody: "Adds a widget.",
@@ -661,7 +698,8 @@ public sealed class OpenAiReviewLlmTests
             Config: ReviewConfig.Default with
             {
                 Review = ReviewConfig.Default.Review with { AgenticContext = agenticContext }
-            });
+            },
+            MaxOutputTokens: maxOutputTokens);
 
     private sealed class FakeOpenAiChatClient(params object[] outcomes) : IOpenAiChatClient
     {
