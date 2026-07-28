@@ -259,13 +259,22 @@ public sealed class LiveEvalRunner
             Files: files,
             Config: config);
 
-        if (!options.RetrievalEnabled)
+        var repoState = Path.Combine(fixture.DirectoryPath, "repo-state");
+        var hasRepoState = Directory.Exists(repoState);
+
+        // Full-file context is the largest section of a real review prompt, so a corpus
+        // that omits it measures a prompt the product never sends. repo-state is the head
+        // state of the fixture repo, which is exactly what production fetches from GitHub.
+        if (hasRepoState)
         {
-            return new LiveEvalRequestContext(request, [], 0);
+            var fullFileContents = ReadFullFileContents(files, repoState, config);
+            if (fullFileContents.Count > 0)
+            {
+                request = request with { FullFileContents = fullFileContents };
+            }
         }
 
-        var repoState = Path.Combine(fixture.DirectoryPath, "repo-state");
-        if (!Directory.Exists(repoState))
+        if (!options.RetrievalEnabled || !hasRepoState)
         {
             return new LiveEvalRequestContext(request, [], 0);
         }
@@ -296,6 +305,33 @@ public sealed class LiveEvalRunner
             request with { RepositoryContext = retrieval.Snippets },
             snippets,
             retrieval.SymbolsQueried);
+    }
+
+    /// <summary>
+    /// Reads the head content of changed files that qualify for full-file context.
+    /// </summary>
+    /// <remarks>
+    /// Uses <see cref="FullFileContextSelector"/> — the same predicates the worker applies —
+    /// so the corpus exercises the shipped selection rather than a lookalike. Files absent
+    /// from repo-state are skipped, which mirrors production treating a failed fetch as
+    /// "continue with the diff alone".
+    /// </remarks>
+    private static IReadOnlyDictionary<string, string> ReadFullFileContents(
+        IReadOnlyList<FileChange> files,
+        string repoStateDirectory,
+        ReviewConfig config)
+    {
+        var contents = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var file in FullFileContextSelector.SelectCandidates(files, config.Review.FullFileMaxBytes))
+        {
+            var path = Path.Combine(repoStateDirectory, file.Path.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(path))
+            {
+                contents[file.Path] = File.ReadAllText(path);
+            }
+        }
+
+        return contents;
     }
 
     private static string HashContent(string content)

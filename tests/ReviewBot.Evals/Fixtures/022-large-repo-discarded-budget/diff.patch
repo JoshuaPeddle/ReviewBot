@@ -1,0 +1,100 @@
+diff --git a/src/ReviewBot.Core/Context/ContextBudget.cs b/src/ReviewBot.Core/Context/ContextBudget.cs
+index f7f19ca..4b667b0 100644
+--- a/src/ReviewBot.Core/Context/ContextBudget.cs
++++ b/src/ReviewBot.Core/Context/ContextBudget.cs
+@@ -6,7 +6,8 @@ namespace ReviewBot.Core.Context;
+ /// </summary>
+ public static class ContextBudget
+ {
+-    // A reserve below this can't hold a useful structured review reply.
++    // Floor for the reserve: below this the model cannot fit a structured review
++    // reply, so the request is wasted however much prompt room it buys.
+     public const int MinViableReserveTokens = 512;
+ 
+     // The response reserve may not exceed this fraction of the context window:
+diff --git a/src/ReviewBot.Core/Context/HeuristicTokenEstimator.cs b/src/ReviewBot.Core/Context/HeuristicTokenEstimator.cs
+index 896f2af..a452bc4 100644
+--- a/src/ReviewBot.Core/Context/HeuristicTokenEstimator.cs
++++ b/src/ReviewBot.Core/Context/HeuristicTokenEstimator.cs
+@@ -2,7 +2,7 @@ namespace ReviewBot.Core.Context;
+ 
+ public sealed class HeuristicTokenEstimator : IPromptTokenEstimator
+ {
+-    private const double CharactersPerToken = 2.5d;
++    private const double AverageCharactersPerToken = 2.5d;
+ 
+     public int EstimateTokens(string? text)
+     {
+@@ -11,6 +11,6 @@ public sealed class HeuristicTokenEstimator : IPromptTokenEstimator
+             return 0;
+         }
+ 
+-        return (int)Math.Ceiling(text.Length / CharactersPerToken);
++        return (int)Math.Ceiling(text.Length / AverageCharactersPerToken);
+     }
+ }
+diff --git a/src/ReviewBot.Core/Context/PromptBudgetSection.cs b/src/ReviewBot.Core/Context/PromptBudgetSection.cs
+index 26ee10e..be33db8 100644
+--- a/src/ReviewBot.Core/Context/PromptBudgetSection.cs
++++ b/src/ReviewBot.Core/Context/PromptBudgetSection.cs
+@@ -1,3 +1,7 @@
+ namespace ReviewBot.Core.Context;
+ 
++/// <summary>
++/// One named slice of the content budget that a prompt section consumed.
++/// Tokens is the estimated cost that was charged, not a limit.
++/// </summary>
+ public sealed record PromptBudgetSection(string Name, int Tokens);
+diff --git a/src/ReviewBot.Core/Context/ReviewChunkPlanner.cs b/src/ReviewBot.Core/Context/ReviewChunkPlanner.cs
+index 90f9889..7b8947b 100644
+--- a/src/ReviewBot.Core/Context/ReviewChunkPlanner.cs
++++ b/src/ReviewBot.Core/Context/ReviewChunkPlanner.cs
+@@ -4,6 +4,8 @@ namespace ReviewBot.Core.Context;
+ 
+ public sealed class ReviewChunkPlanner
+ {
++    private const string RetrievalReserveSection = "retrieval_reserve";
++
+     private readonly Func<string?, int> estimateTokens;
+ 
+     public ReviewChunkPlanner(IPromptTokenEstimator tokenEstimator)
+@@ -20,13 +22,35 @@ public sealed class ReviewChunkPlanner
+     {
+         ArgumentNullException.ThrowIfNull(files);
+ 
+-        var tokens = 0;
+-        foreach (var file in files)
++        return files.Sum(file => EstimateFileTokens(file, maxPatchLines));
++    }
++
++    /// <summary>
++    /// Plans chunks after setting aside room for the retrieval snippets that will be
++    /// injected alongside the diff, so a chunk plus its context still fits the window.
++    /// </summary>
++    public IReadOnlyList<ReviewChunk> PlanChunksWithRetrievalReserve(
++        IReadOnlyList<FileChange> files,
++        PromptBudget budget,
++        int retrievalReserveTokens,
++        double headroom,
++        int maxChunks,
++        int maxPatchLines)
++    {
++        ArgumentNullException.ThrowIfNull(files);
++        ArgumentNullException.ThrowIfNull(budget);
++
++        if (retrievalReserveTokens > 0)
+         {
+-            tokens += EstimateFileTokens(file, maxPatchLines);
++            budget.TryConsume(RetrievalReserveSection, retrievalReserveTokens, out var reserved);
+         }
+ 
+-        return tokens;
++        return PlanChunks(
++            files,
++            budget.RemainingContentTokens,
++            headroom,
++            maxChunks,
++            maxPatchLines);
+     }
+ 
+     public IReadOnlyList<ReviewChunk> PlanChunks(

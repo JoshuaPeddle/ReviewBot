@@ -1,0 +1,44 @@
+must_flag:
+  - path: src/ReviewBot.Core/Context/ReviewChunkPlanner.cs
+    line_range: [43, 51]
+    severity_at_least: warning
+    topic: discarded_immutable_budget
+    must_mention_any:
+      - discard
+      - ignored
+      - never used
+      - unused
+      - out parameter
+      - reserved
+      - immutable
+      - has no effect
+      - no effect
+may_flag:
+  - path: src/ReviewBot.Core/Context/ReviewChunkPlanner.cs
+    line_range: [43, 47]
+    topic: unchecked_tryconsume_result
+    reason: >
+      The same call also discards TryConsume's bool, so a reserve larger than the
+      remaining budget fails silently instead of being handled. That is a true
+      observation about a second facet of the same line. It is arguably the same
+      defect as the target finding — one corrected call site fixes both — so a model
+      that consolidates them into one comment is also right. Credited neither way.
+    must_mention_any:
+      - returns false
+      - return value
+      - bool
+      - boolean
+      - exceeds
+      - ignored
+must_not_flag:
+  - path: src/ReviewBot.Core/Context/PromptBudgetSection.cs
+    reason: Adding an XML doc comment to a record is benign churn.
+    severity_above: info
+  - path: src/ReviewBot.Core/Context/HeuristicTokenEstimator.cs
+    reason: Renaming a private constant and its single use changes no behaviour.
+    severity_above: info
+  - path: src/ReviewBot.Core/Context/ContextBudget.cs
+    reason: A comment describing where the context window value comes from.
+    severity_above: info
+max_total_comments: 4
+expected_review_state: COMMENT
