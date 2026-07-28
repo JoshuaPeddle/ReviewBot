@@ -5,5 +5,21 @@ must_not_flag:
       compile" claim on the empty-string initializer must be refuted by
       verification, not posted.
     severity_above: info
+may_flag:
+  - path: src/Demo/Greeter.cs
+    topic: unreachable_private_field
+    reason: >
+      `suffix` is private with no setter, property or constructor parameter, so it
+      keeps its empty value for the lifetime of the object and the interpolation
+      that reads it is a no-op. That is a true observation about the diff, just not
+      the hallucinated syntax error this fixture hunts. It was the single most
+      repeated uncredited finding in the corpus — three of three sampled runs.
+    must_mention_any:
+      - no setter
+      - constructor
+      - never
+      - always
+      - no-op
+      - configurable
 max_total_comments: 0
 expected_review_state: APPROVE

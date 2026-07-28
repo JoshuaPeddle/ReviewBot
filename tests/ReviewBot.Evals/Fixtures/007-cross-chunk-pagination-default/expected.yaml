@@ -4,5 +4,13 @@ must_flag:
     severity_at_least: warning
     topic: zero_page_size_accepted
     must_mention_any: ["zero", "0", "PageSize", "per page", "default"]
+    # The bug spans both files, and flagging the zero default at its declaration is
+    # an equally valid cause-site flag for the same root cause — 006 already grants
+    # this for RetryOptions.cs and the omission here was an inconsistency. Measured
+    # over three control runs, the model located this bug at the default and was
+    # scored as both a miss and a false positive for the same correct finding.
+    additional_locations:
+      - path: src/ReviewBot.Core/Options/PaginationOptions.cs
+        line_range: [5, 5]
 max_total_comments: 3
 expected_review_state: REQUEST_CHANGES
