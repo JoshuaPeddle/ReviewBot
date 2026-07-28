@@ -126,7 +126,8 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
             MaxTokens: maxOutputTokens,
             Temperature: options.Temperature,
             ResponseFormat: responseFormat,
-            IncludeContextRequestsInJsonSchema: includeContextRequestsInJsonSchema);
+            IncludeContextRequestsInJsonSchema: includeContextRequestsInJsonSchema,
+            Sampling: options.Sampling);
 
         for (var retryAttempt = 0; ; retryAttempt++)
         {

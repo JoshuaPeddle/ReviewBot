@@ -7,4 +7,5 @@ internal sealed record OpenAiChatRequest(
     int MaxTokens,
     float Temperature,
     string ResponseFormat,
-    bool IncludeContextRequestsInJsonSchema);
+    bool IncludeContextRequestsInJsonSchema,
+    OpenAiSamplingOptions? Sampling = null);
