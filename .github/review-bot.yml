@@ -86,6 +86,12 @@ ignore:
   - "migrations/**"
   - "*.lock"
   - "docs/**"
+  # Eval fixture repo-state is a frozen snapshot of some other codebase, kept so the
+  # corpus can be scored — it is not this repository's source. Since ignore globs feed
+  # the retrieval index as well as file selection, leaving these in meant reviewing
+  # ReviewBot indexed 148 fixture files against 266 real ones, and could serve a stale
+  # copy of a live symbol back as "repository context".
+  - "tests/ReviewBot.Evals/Fixtures/**/repo-state/**"
 
 # Areas the LLM is asked to focus on. Included verbatim in the system prompt.
 # Default: [correctness, security, concurrency, error_handling]
