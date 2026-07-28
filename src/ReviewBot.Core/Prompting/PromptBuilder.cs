@@ -149,6 +149,7 @@ Schema:
 
         prompt.Append("""
 }
+Before you emit, consolidate. Group your candidate comments by root cause and keep exactly one per distinct cause, at the single best line: if one edit would resolve two comments, they are one comment. Restating the same defect in different words, or at a second location it also affects, counts as a duplicate.
 Omit a comment entirely rather than pick a guessed line or provide positive feedback. Aim for the 3 to 7 highest-impact issues; never exceed 15. When in doubt, omit.
 """);
 
