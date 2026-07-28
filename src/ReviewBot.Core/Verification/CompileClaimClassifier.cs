@@ -54,12 +54,21 @@ public static class CompileClaimClassifier
         " cannot compile ",
         " can t compile ",
         " fails to compile ",
+        // Infinitive form, which every modal verb takes: "will fail to compile",
+        // "would/may/could/might fail to compile". Only the third-person "fails to
+        // compile" was listed, so a hallucinated compile claim phrased with a modal was
+        // never classified, never refuted, and posted at error severity. Found by
+        // dogfooding PR #48, where the model wrongly claimed
+        // string.Contains(char, StringComparison) does not exist.
+        " fail to compile ",
+        " failing to compile ",
         " compilation error ",
         " compile error ",
         " compiler error ",
         " will not build ",
         " won t build ",
         " fails to build ",
+        " fail to build ",
         " build error ",
         " will not parse ",
         " fails to parse ",
