@@ -67,7 +67,8 @@ public sealed record RetrievalConfig(
     int MaxBytes,
     string SymbolLookupDepth,
     bool Embeddings,
-    string IndexCacheDir)
+    string IndexCacheDir,
+    int MaxHops = 1)
 {
     public const string DefinitionsDepth = "definitions";
     public const string CallersDepth = "callers";
@@ -82,7 +83,12 @@ public sealed record RetrievalConfig(
         // usage rows and silently bypasses body extraction.
         SymbolLookupDepth: BothDepth,
         Embeddings: false,
-        IndexCacheDir: "/var/cache/reviewbot/index");
+        IndexCacheDir: "/var/cache/reviewbot/index",
+        // How many times to follow symbol references outward from the diff. 1 fetches the
+        // definitions of symbols the diff names. 2 additionally fetches what those bodies
+        // themselves refer to, which is where an invariant lives when the direct callee
+        // only delegates — a case the one-hop default cannot see at all.
+        MaxHops: 2);
 }
 
 public sealed record ModelConfig(

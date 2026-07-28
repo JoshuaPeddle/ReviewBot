@@ -114,9 +114,22 @@ public sealed partial class CSharpRepoSymbolParser : IRepoSymbolParser
         string[] sanitized,
         int declarationIndex)
     {
-        // Expression-bodied method: `public int X() => 42;` — body is the declaration line.
+        // Expression-bodied method: `public int X() => 42;`. The expression frequently sits
+        // on the following line when the signature is long, so read on to the statement's
+        // terminating ';' rather than stopping at the declaration. Stopping short indexed a
+        // dangling "... =>" with the call missing, which made the body useless to a reader
+        // and invisible to the transitive hop that follows what a body references.
         if (sanitized[declarationIndex].Contains("=>", StringComparison.Ordinal))
         {
+            var lastIndex = Math.Min(declarationIndex + MaxBodyLines - 1, rawLines.Length - 1);
+            for (var i = declarationIndex; i <= lastIndex; i++)
+            {
+                if (sanitized[i].Contains(';', StringComparison.Ordinal))
+                {
+                    return (JoinLines(rawLines, declarationIndex, i), declarationIndex + 1, i + 1);
+                }
+            }
+
             return (rawLines[declarationIndex], declarationIndex + 1, declarationIndex + 1);
         }
 

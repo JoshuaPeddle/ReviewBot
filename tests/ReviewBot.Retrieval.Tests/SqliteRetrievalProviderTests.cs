@@ -158,6 +158,195 @@ public sealed class SqliteRetrievalProviderTests
             [new FileChange("src/App.cs", patch, new HashSet<int> { 2 }, 1, 0, FileChangeStatus.Modified)],
             config);
 
+    [Fact]
+    public async Task GetContextAsyncFollowsSymbolsNamedInsideARetrievedBody()
+    {
+        // The diff names Build; Build's body names Canonicalize, which the diff never
+        // mentions. At one hop the invariant inside Canonicalize is unreachable.
+        var index = new FakeRepoIndex();
+        index.Results[("Build", RepoSymbolKind.Method)] =
+        [
+            new RepoSymbol(
+                "Build", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/KeyBuilder.cs", 8,
+                "public static string Build(string a, string b)",
+                Body: "public static string Build(string a, string b)\n{\n    return DeliveryKeyCanonicalizer.Canonicalize(a, b);\n}",
+                BodyStartLine: 8,
+                BodyEndLine: 11)
+        ];
+        index.Results[("Canonicalize", RepoSymbolKind.Method)] =
+        [
+            new RepoSymbol(
+                "Canonicalize", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/Canonicalizer.cs", 5,
+                "public static string Canonicalize(string a, string b)",
+                Body: "public static string Canonicalize(string a, string b)\n{\n    return Truncate(a + b, 64);\n}",
+                BodyStartLine: 5,
+                BodyEndLine: 8)
+        ];
+        var provider = new SqliteRetrievalProvider(
+            new FakeRepoIndexFactory(index),
+            new CSharpDiffSymbolExtractor(),
+            new HeuristicTokenEstimator());
+        var request = CreateRequest(
+            """
+            @@ -1,2 +1,3 @@
+             public string Make(string a, string b)
+            +    => DeliveryKeyBuilder.Build(a, b);
+            """,
+            WithHops(2));
+        var budget = PromptBudget.Create(10_000, 10, 0, 100);
+
+        var result = await provider.GetContextAsync("octo", "reviewbot", request, budget);
+
+        result.Snippets.Select(snippet => snippet.Path)
+            .Should().Contain("src/Canonicalizer.cs", "the second hop must reach what the first hop's body referenced");
+    }
+
+    [Fact]
+    public async Task GetContextAsyncStopsAtOneHopWhenConfigured()
+    {
+        var index = BuildTwoHopIndex();
+        var provider = new SqliteRetrievalProvider(
+            new FakeRepoIndexFactory(index),
+            new CSharpDiffSymbolExtractor(),
+            new HeuristicTokenEstimator());
+        var request = CreateRequest(
+            """
+            @@ -1,2 +1,3 @@
+             public string Make(string a, string b)
+            +    => DeliveryKeyBuilder.Build(a, b);
+            """,
+            WithHops(1));
+        var budget = PromptBudget.Create(10_000, 10, 0, 100);
+
+        var result = await provider.GetContextAsync("octo", "reviewbot", request, budget);
+
+        result.Snippets.Select(snippet => snippet.Path).Should().Contain("src/KeyBuilder.cs");
+        result.Snippets.Select(snippet => snippet.Path).Should().NotContain("src/Canonicalizer.cs");
+    }
+
+    [Fact]
+    public async Task GetContextAsyncRanksFirstHopAheadOfSecond()
+    {
+        // Rank decides who reaches the token budget first, so what the diff named directly
+        // is always offered before anything reached transitively. Snippets are consumed in
+        // this order, meaning a second-hop snippet can only take budget the first hop left.
+        var index = BuildTwoHopIndex();
+        var provider = new SqliteRetrievalProvider(
+            new FakeRepoIndexFactory(index),
+            new CSharpDiffSymbolExtractor(),
+            new HeuristicTokenEstimator());
+        var request = CreateRequest(
+            """
+            @@ -1,2 +1,3 @@
+             public string Make(string a, string b)
+            +    => DeliveryKeyBuilder.Build(a, b);
+            """,
+            WithHops(2));
+        var budget = PromptBudget.Create(10_000, 10, 0, 100);
+
+        var result = await provider.GetContextAsync("octo", "reviewbot", request, budget);
+
+        result.Snippets.Select(snippet => snippet.Path)
+            .Should().Equal("src/KeyBuilder.cs", "src/Canonicalizer.cs");
+    }
+
+    [Fact]
+    public async Task GetContextAsyncDropsSecondHopWhenTheBudgetIsExhausted()
+    {
+        var index = BuildTwoHopIndex();
+        var provider = new SqliteRetrievalProvider(
+            new FakeRepoIndexFactory(index),
+            new CSharpDiffSymbolExtractor(),
+            new HeuristicTokenEstimator());
+        var request = CreateRequest(
+            """
+            @@ -1,2 +1,3 @@
+             public string Make(string a, string b)
+            +    => DeliveryKeyBuilder.Build(a, b);
+            """,
+            WithHops(2));
+        // Retrieval gets 20% of the content budget; size it so the first-hop definition
+        // consumes essentially all of it.
+        var budget = PromptBudget.Create(220, 10, 0, 0);
+
+        var result = await provider.GetContextAsync("octo", "reviewbot", request, budget);
+
+        result.Snippets.Should().NotBeEmpty();
+        result.Snippets[0].Path.Should().Be("src/KeyBuilder.cs");
+        result.Snippets.Sum(snippet => snippet.Content.Length)
+            .Should().BeLessThan(300, "the transitive hop must not push retrieval past its share of the budget");
+    }
+
+    [Fact]
+    public async Task GetContextAsyncTerminatesWhenTwoDefinitionsReferenceEachOther()
+    {
+        // Mutual recursion would loop forever without the shared seen-set across hops.
+        var index = new FakeRepoIndex();
+        index.Results[("Ping", RepoSymbolKind.Method)] =
+        [
+            new RepoSymbol(
+                "Ping", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/A.cs", 3, "void Ping()",
+                Body: "void Ping()\n{\n    Pong();\n}", BodyStartLine: 3, BodyEndLine: 6)
+        ];
+        index.Results[("Pong", RepoSymbolKind.Method)] =
+        [
+            new RepoSymbol(
+                "Pong", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/B.cs", 3, "void Pong()",
+                Body: "void Pong()\n{\n    Ping();\n}", BodyStartLine: 3, BodyEndLine: 6)
+        ];
+        var provider = new SqliteRetrievalProvider(
+            new FakeRepoIndexFactory(index),
+            new CSharpDiffSymbolExtractor(),
+            new HeuristicTokenEstimator());
+        var request = CreateRequest(
+            """
+            @@ -1,2 +1,3 @@
+             public void Run()
+            +    => Ping();
+            """,
+            WithHops(8));
+        var budget = PromptBudget.Create(10_000, 10, 0, 100);
+
+        var result = await provider.GetContextAsync("octo", "reviewbot", request, budget);
+
+        result.Snippets.Select(snippet => snippet.Path).Should().BeEquivalentTo(["src/A.cs", "src/B.cs"]);
+    }
+
+    private static ReviewConfig WithHops(int maxHops) =>
+        ReviewConfig.Default with
+        {
+            Retrieval = ReviewConfig.Default.Retrieval with
+            {
+                Enabled = true,
+                SymbolLookupDepth = RetrievalConfig.DefinitionsDepth,
+                MaxHops = maxHops
+            }
+        };
+
+    private static FakeRepoIndex BuildTwoHopIndex()
+    {
+        var index = new FakeRepoIndex();
+        index.Results[("Build", RepoSymbolKind.Method)] =
+        [
+            new RepoSymbol(
+                "Build", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/KeyBuilder.cs", 8,
+                "public static string Build(string a, string b)",
+                Body: "public static string Build(string a, string b)\n{\n    return DeliveryKeyCanonicalizer.Canonicalize(a, b);\n}",
+                BodyStartLine: 8,
+                BodyEndLine: 11)
+        ];
+        index.Results[("Canonicalize", RepoSymbolKind.Method)] =
+        [
+            new RepoSymbol(
+                "Canonicalize", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/Canonicalizer.cs", 5,
+                "public static string Canonicalize(string a, string b)",
+                Body: "public static string Canonicalize(string a, string b)\n{\n    return Truncate(a + b, 64);\n}",
+                BodyStartLine: 5,
+                BodyEndLine: 8)
+        ];
+        return index;
+    }
+
     private sealed class FakeRepoIndexFactory(IRepoIndex index) : IRepoIndexFactory
     {
         public IRepoIndex Create(string indexCacheDir) => index;

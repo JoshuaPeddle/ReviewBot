@@ -65,6 +65,37 @@ public sealed class SqliteRepoIndexTests : IDisposable
     }
 
     [Fact]
+    public async Task IndexAsyncCapturesAWrappedExpressionBodyIncludingTheExpression()
+    {
+        // A long signature pushes the expression onto the next line. Indexing only the
+        // declaration stored a dangling "... =>" with the call missing, which is useless
+        // to a reader and invisible to the transitive retrieval hop that reads bodies.
+        var repoRoot = CreateDirectory("expression-body-repo");
+        WriteFile(
+            repoRoot,
+            "src/Keys/DeliveryKeyBuilder.cs",
+            """
+            namespace Demo.Keys;
+
+            internal static class DeliveryKeyBuilder
+            {
+                public static string Build(string owner, string repo, string deliveryId) =>
+                    DeliveryKeyCanonicalizer.Canonicalize(owner, repo, deliveryId);
+            }
+            """);
+
+        var index = CreateIndex();
+        var key = new RepoIndexKey("octo", "reviewbot", "expr123");
+
+        await index.IndexAsync(new RepoIndexRequest(key.Owner, key.Repo, key.Sha, repoRoot));
+
+        var build = await index.FindAsync(key, "Build", RepoSymbolKind.Method);
+        var definition = build.Should().ContainSingle(symbol => symbol.Role == RepoSymbolRole.Definition).Subject;
+        definition.Body.Should().NotBeNull();
+        definition.Body!.Should().Contain("DeliveryKeyCanonicalizer.Canonicalize");
+    }
+
+    [Fact]
     public async Task IndexAsyncSkipsIgnoredPathsAndDefaultBuildDirectories()
     {
         var repoRoot = CreateDirectory("ignored-repo");
