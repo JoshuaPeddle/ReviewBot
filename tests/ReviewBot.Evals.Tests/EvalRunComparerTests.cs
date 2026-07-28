@@ -95,5 +95,6 @@ public sealed class EvalRunComparerTests
                 F1: f1,
                 MustFlagResults: [],
                 MustNotFlagResults: [],
-                FalsePositiveComments: []));
+                FalsePositiveComments: [],
+                AllowedFindingComments: []));
 }

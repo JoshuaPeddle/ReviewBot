@@ -41,13 +41,25 @@ public sealed class RuleBasedScorer
         }
 
         var mustNotFlagResults = fixture.Expected.MustNotFlag
-            .Select(expectation => ScoreMustNotFlag(expectation, comments))
+            .Select(expectation => ScoreMustNotFlag(expectation, comments, fixture.Expected.MayFlag))
             .ToArray();
 
-        var falsePositiveComments = comments
+        var unmatched = comments
             .Select((comment, index) => new { comment, index })
             .Where(entry => !matchedCommentIndexes.Contains(entry.index))
             .Where(entry => !IsAllowedByMustNotFlag(entry.comment, fixture.Expected.MustNotFlag))
+            .ToArray();
+
+        // Correct-but-uncredited findings are neither rewarded nor punished. They stay in
+        // the score object so a reader can audit what was waved through — an allowed
+        // finding is a claim that the model was right, and claims should be inspectable.
+        var allowedFindingComments = unmatched
+            .Where(entry => MatchesAnyMayFlag(entry.comment, fixture.Expected.MayFlag))
+            .Select(entry => entry.comment)
+            .ToArray();
+
+        var falsePositiveComments = unmatched
+            .Where(entry => !MatchesAnyMayFlag(entry.comment, fixture.Expected.MayFlag))
             .Select(entry => entry.comment)
             .ToArray();
 
@@ -57,8 +69,12 @@ public sealed class RuleBasedScorer
         var precision = Divide(truePositives, truePositives + falsePositives);
         var recall = Divide(truePositives, fixture.Expected.MustFlag.Count);
         var f1 = precision + recall == 0 ? 0 : 2 * precision * recall / (precision + recall);
+
+        // max_total_comments caps noise, and a sanctioned finding is not noise, so it does
+        // not count against the cap either.
+        var countedComments = comments.Count - allowedFindingComments.Length;
         var withinMaxComments = fixture.Expected.MaxTotalComments is null ||
-            comments.Count <= fixture.Expected.MaxTotalComments.Value;
+            countedComments <= fixture.Expected.MaxTotalComments.Value;
         var passed = falseNegatives == 0 &&
             falsePositives == 0 &&
             mustNotFlagResults.All(result => result.Passed) &&
@@ -76,7 +92,8 @@ public sealed class RuleBasedScorer
             f1,
             mustFlagResults,
             mustNotFlagResults,
-            falsePositiveComments);
+            falsePositiveComments,
+            allowedFindingComments);
     }
 
     private static int? FindMustFlagMatch(
@@ -147,11 +164,16 @@ public sealed class RuleBasedScorer
 
     private static MustNotFlagScore ScoreMustNotFlag(
         MustNotFlagExpectation expectation,
-        IReadOnlyList<InlineComment> comments)
+        IReadOnlyList<InlineComment> comments,
+        IReadOnlyList<MayFlagExpectation> mayFlag)
     {
         var violatingComments = comments
             .Where(comment => string.Equals(comment.Path, expectation.Path, StringComparison.Ordinal))
             .Where(comment => comment.Severity > expectation.SeverityAbove)
+            // A finding the fixture has explicitly sanctioned is not a violation, even on
+            // a must_not_flag path — must_not_flag bans a specific wrong claim about the
+            // file, not every possible true statement about it.
+            .Where(comment => !MatchesAnyMayFlag(comment, mayFlag))
             .ToArray();
 
         return new MustNotFlagScore(
@@ -161,6 +183,18 @@ public sealed class RuleBasedScorer
             Passed: violatingComments.Length == 0,
             violatingComments);
     }
+
+    private static bool MatchesAnyMayFlag(InlineComment comment, IReadOnlyList<MayFlagExpectation> expectations)
+    {
+        return expectations.Any(expectation =>
+            string.Equals(comment.Path, expectation.Path, StringComparison.Ordinal) &&
+            WithinOptionalRange(comment.Line, expectation.StartLine, expectation.EndLine) &&
+            MentionsAnyKeyword(comment.Body, expectation.MustMentionAny));
+    }
+
+    private static bool WithinOptionalRange(int line, int? startLine, int? endLine) =>
+        (startLine is null || line >= startLine.Value) &&
+        (endLine is null || line <= endLine.Value);
 
     private static bool IsAllowedByMustNotFlag(
         InlineComment comment,
