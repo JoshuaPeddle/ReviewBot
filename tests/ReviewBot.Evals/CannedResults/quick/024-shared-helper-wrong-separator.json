@@ -1,0 +1,12 @@
+{
+  "summary": "The shared path helper trims the platform separator rather than the forward slash that repository-relative paths actually use.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Grounding/Workspace/RepoPathNormalizer.cs",
+      "line": 15,
+      "severity": "warning",
+      "confidence": "high",
+      "body": "Repository-relative paths always use '/', but Path.DirectorySeparatorChar is '\\' on Windows, so a leading '/' survives this TrimStart. Path.Combine then treats the value as rooted and drops the workspace root, resolving the file from the filesystem root instead of the checkout. Trim both separators, e.g. path.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)."
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+diff --git a/src/ReviewBot.GitHub/Pulls/PullRequestFetcher.cs b/src/ReviewBot.GitHub/Pulls/PullRequestFetcher.cs
+index d2b7cf2..61ff391 100644
+--- a/src/ReviewBot.GitHub/Pulls/PullRequestFetcher.cs
++++ b/src/ReviewBot.GitHub/Pulls/PullRequestFetcher.cs
+@@ -31,7 +31,9 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
+         TimeProvider? clock = null,
+         ILogger<PullRequestFetcher>? logger = null)
+     {
+-        this.clientFactory = clientFactory ?? throw new ArgumentNullException(nameof(clientFactory));
++        ArgumentNullException.ThrowIfNull(clientFactory);
++
++        this.clientFactory = clientFactory;
+         this.maxFiles = maxFiles > 0
+             ? maxFiles
+             : throw new ArgumentOutOfRangeException(nameof(maxFiles), maxFiles, "Max files must be positive.");
+diff --git a/src/ReviewBot.GitHub/Pulls/ReviewPoster.cs b/src/ReviewBot.GitHub/Pulls/ReviewPoster.cs
+index 98738f2..e60fa2d 100644
+--- a/src/ReviewBot.GitHub/Pulls/ReviewPoster.cs
++++ b/src/ReviewBot.GitHub/Pulls/ReviewPoster.cs
+@@ -7,6 +7,7 @@ namespace ReviewBot.GitHub.Pulls;
+ public sealed class ReviewPoster : IReviewPoster
+ {
+     private const string DefaultBody = "Automated review by ReviewBot.";
++    // Octokit does not expose this constant, so it lives here rather than at each call site.
+     private const string GitHubJsonMediaType = "application/vnd.github+json";
+ 
+     private readonly IGitHubClientFactory clientFactory;
+@@ -18,8 +19,11 @@ public sealed class ReviewPoster : IReviewPoster
+         ILogger<ReviewPoster> logger,
+         TimeProvider? clock = null)
+     {
+-        this.clientFactory = clientFactory ?? throw new ArgumentNullException(nameof(clientFactory));
+-        this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
++        ArgumentNullException.ThrowIfNull(clientFactory);
++        ArgumentNullException.ThrowIfNull(logger);
++
++        this.clientFactory = clientFactory;
++        this.logger = logger;
+         this.clock = clock ?? TimeProvider.System;
+     }
+ 

@@ -1,0 +1,69 @@
+diff --git a/src/ReviewBot.Grounding/Languages/DotNet/RoslynDiagnosticProvider.cs b/src/ReviewBot.Grounding/Languages/DotNet/RoslynDiagnosticProvider.cs
+index 8462eb8..db6e06f 100644
+--- a/src/ReviewBot.Grounding/Languages/DotNet/RoslynDiagnosticProvider.cs
++++ b/src/ReviewBot.Grounding/Languages/DotNet/RoslynDiagnosticProvider.cs
+@@ -7,6 +7,8 @@ using ReviewBot.Grounding.Diagnostics;
+ using DomainDiagnostic = ReviewBot.Core.Domain.Diagnostic;
+ using DomainSeverity = ReviewBot.Core.Domain.DiagnosticSeverity;
+ 
++using ReviewBot.Grounding.Workspace;
++
+ namespace ReviewBot.Grounding.Languages.DotNet;
+ 
+ /// <summary>
+@@ -67,7 +69,9 @@ public sealed class RoslynDiagnosticProvider : IDiagnosticProvider
+                 // A changed path may be a deletion or otherwise absent from the head
+                 // checkout; skip it rather than treat it as analyzed (proven to parse).
+                 text = await File
+-                    .ReadAllTextAsync(Path.Combine(workspacePath, relativePath), ct)
++                    .ReadAllTextAsync(
++                        Path.Combine(workspacePath, RepoPathNormalizer.StripLeadingSeparator(relativePath)),
++                        ct)
+                     .ConfigureAwait(false);
+             }
+             catch (Exception ex) when (ex is not OperationCanceledException)
+diff --git a/src/ReviewBot.Grounding/Languages/Python/RuffDiagnosticProvider.cs b/src/ReviewBot.Grounding/Languages/Python/RuffDiagnosticProvider.cs
+index cfb8f2c..cd8e210 100644
+--- a/src/ReviewBot.Grounding/Languages/Python/RuffDiagnosticProvider.cs
++++ b/src/ReviewBot.Grounding/Languages/Python/RuffDiagnosticProvider.cs
+@@ -6,6 +6,8 @@ using ReviewBot.Core.Domain;
+ using ReviewBot.Grounding.Build;
+ using ReviewBot.Grounding.Diagnostics;
+ 
++using ReviewBot.Grounding.Workspace;
++
+ namespace ReviewBot.Grounding.Languages.Python;
+ 
+ /// <summary>
+@@ -135,7 +137,7 @@ public sealed class RuffDiagnosticProvider : IDiagnosticProvider
+ 
+     private static string ToRepoRelative(string path, string workspacePath)
+     {
+-        var normalizedPath = path.Replace('\\', '/');
++        var normalizedPath = RepoPathNormalizer.StripLeadingSeparator(path).Replace('\\', '/');
+         var normalizedRoot = workspacePath.Replace('\\', '/').TrimEnd('/');
+         if (normalizedRoot.Length > 0 &&
+             normalizedPath.StartsWith(normalizedRoot + "/", StringComparison.Ordinal))
+diff --git a/head/src/ReviewBot.Grounding/Workspace/RepoPathNormalizer.cs b/src/ReviewBot.Grounding/Workspace/RepoPathNormalizer.cs
+new file mode 100644
+index 0000000..4e74e8e
+--- /dev/null
++++ b/src/ReviewBot.Grounding/Workspace/RepoPathNormalizer.cs
+@@ -0,0 +1,17 @@
++namespace ReviewBot.Grounding.Workspace;
++
++/// <summary>
++/// Normalises repository-relative paths before they are joined onto a workspace root.
++/// </summary>
++public static class RepoPathNormalizer
++{
++    /// <summary>
++    /// Strips a leading separator so the path joins onto a root instead of replacing it.
++    /// </summary>
++    public static string StripLeadingSeparator(string path)
++    {
++        ArgumentNullException.ThrowIfNull(path);
++
++        return path.TrimStart(Path.DirectorySeparatorChar);
++    }
++}

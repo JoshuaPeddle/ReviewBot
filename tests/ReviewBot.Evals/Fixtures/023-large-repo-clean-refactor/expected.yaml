@@ -1,0 +1,14 @@
+must_not_flag:
+  - path: src/ReviewBot.GitHub/Pulls/ReviewPoster.cs
+    reason: >
+      ArgumentNullException.ThrowIfNull throws the same exception with the same
+      parameter name under the same condition as the idiom it replaces. The added
+      comment above the existing const changes nothing.
+    severity_above: info
+  - path: src/ReviewBot.GitHub/Pulls/PullRequestFetcher.cs
+    reason: >
+      The same behaviour-preserving substitution. The remaining guards in this
+      constructor are untouched.
+    severity_above: info
+max_total_comments: 0
+expected_review_state: APPROVE
