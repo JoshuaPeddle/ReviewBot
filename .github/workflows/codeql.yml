@@ -63,10 +63,29 @@ jobs:
 
       - name: List vulnerable packages
         run: |
-          set -e
+          set -euo pipefail
+          # Advisories we have consciously accepted are declared once, as
+          # <NuGetAuditSuppress/> in Directory.Build.props (each needs a comment saying
+          # why). `dotnet list package --vulnerable` does not honour those suppressions,
+          # so apply them here too — otherwise an advisory with no upstream fix pins this
+          # job red forever and it stops meaning anything.
+          suppressed=$(grep -oE 'GHSA-[a-zA-Z0-9-]+' Directory.Build.props | sort -u || true)
+          if [ -n "$suppressed" ]; then
+            echo "Suppressed advisories (see Directory.Build.props):"
+            echo "$suppressed" | sed 's/^/  /'
+          fi
+
           output=$(dotnet list package --vulnerable --include-transitive 2>&1)
           echo "$output"
-          if echo "$output" | grep -E "has the following vulnerable packages"; then
-            echo "::error::Vulnerable NuGet packages detected."
+
+          remaining=$(echo "$output" | grep -E '^[[:space:]]+>' || true)
+          for advisory in $suppressed; do
+            remaining=$(echo "$remaining" | grep -v "$advisory" || true)
+          done
+
+          if [ -n "$(echo "$remaining" | tr -d '[:space:]')" ]; then
+            echo "::error::Vulnerable NuGet packages detected (excluding suppressed advisories)."
+            echo "$remaining"
             exit 1
           fi
+          echo "No unsuppressed vulnerable packages."
