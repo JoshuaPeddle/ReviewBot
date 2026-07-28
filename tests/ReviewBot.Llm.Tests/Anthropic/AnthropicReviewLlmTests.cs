@@ -73,15 +73,34 @@ public sealed class AnthropicReviewLlmTests
     }
 
     [Fact]
-    public async Task ReviewAsyncReturnsEmptyResultWhenRepairIsMalformed()
+    public async Task ReviewAsyncThrowsWhenRepairIsMalformed()
     {
         var client = new FakeAnthropicClient("not json", "still not json");
         var llm = CreateLlm(client);
 
-        var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+        // Returning an empty result here would be posted as a clean review, telling the
+        // author nothing is wrong with a PR that was never successfully reviewed.
+        await llm.Invoking(l => l.ReviewAsync(CreateRequest(), CancellationToken.None))
+            .Should().ThrowAsync<LlmResponseUnusableException>()
+            .WithMessage("*could not be parsed as review JSON*");
 
-        result.Should().BeEquivalentTo(new ReviewResult(string.Empty, []) { RawLlmResponse = "not json" });
         client.Requests.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncThrowsWithBudgetHintWhenResponseIsEmptyButTokensWereConsumed()
+    {
+        var client = new FakeAnthropicClient(new AnthropicMessageResult(
+            string.Empty,
+            new LlmTokenUsage(PromptTokens: 2000, CompletionTokens: 4096)));
+        var llm = CreateLlm(client);
+
+        await llm.Invoking(l => l.ReviewAsync(CreateRequest(), CancellationToken.None))
+            .Should().ThrowAsync<LlmResponseUnusableException>()
+            .WithMessage("*4096 completion tokens*response_reserve_tokens*");
+
+        // No repair round-trip: there is nothing to repair in an empty string.
+        client.Requests.Should().HaveCount(1);
     }
 
     [Fact]

@@ -57,6 +57,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
         // model context window; fall back to the host default when unset.
         var maxOutputTokens = request.MaxOutputTokens is > 0 ? request.MaxOutputTokens.Value : options.MaxTokens;
         var (firstResponse, firstUsage) = await SendAsync(prompt, [prompt.UserPrompt], responseFormat, includeContextRequests, "review", maxOutputTokens, ct);
+        EmptyLlmResponse.ThrowIfUnusable(firstResponse, ProviderName, firstUsage?.CompletionTokens, maxOutputTokens);
         var firstParse = LlmResultParser.Parse(firstResponse, logger);
         if (firstParse is { Success: true, Value: not null })
         {
@@ -80,11 +81,15 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
         }
 
         logger.LogWarning(
-            "OpenAI-compatible response repair failed; returning empty review result. Error: {Error}; RawResponse: {RawResponse}",
+            "OpenAI-compatible response repair failed. Error: {Error}; RawResponse: {RawResponse}",
             repairParse.Error,
             Truncate(repairResponse, MaxLoggedRawResponseLength));
         ReviewBotLlmMetrics.RecordParseFailure(ProviderName, repaired: false);
-        return new ReviewResult(string.Empty, []) { TokenUsage = totalUsage, RawLlmResponse = firstResponse };
+        // Deliberately fail rather than return an empty result: an empty result is posted
+        // as a clean review, which reads as "no issues found" on a PR nothing reviewed.
+        throw new LlmResponseUnusableException(
+            $"{ProviderName} response could not be parsed as review JSON, and the repair pass "
+            + $"failed as well. Last parse error: {repairParse.Error}");
     }
 
     public Task<int?> TryGetContextWindowTokensAsync(string modelName, CancellationToken ct) =>

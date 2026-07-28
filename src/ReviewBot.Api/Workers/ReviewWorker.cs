@@ -862,9 +862,10 @@ public sealed class ReviewWorker : BackgroundService
         bool isIncrementalUpdate,
         CancellationToken ct)
     {
+        ChunkReviewOutcome?[] outcomes;
         if (llm.SupportsParallelRequests)
         {
-            return await Task.WhenAll(chunks.Select(chunk => ReviewChunkAsync(
+            outcomes = await Task.WhenAll(chunks.Select(chunk => TryReviewChunkAsync(
                     llm,
                     chunk,
                     metadata,
@@ -879,11 +880,81 @@ public sealed class ReviewWorker : BackgroundService
                     ct)))
                 .ConfigureAwait(false);
         }
-
-        var sequentialResults = new List<ChunkReviewOutcome>(chunks.Count);
-        foreach (var chunk in chunks)
+        else
         {
-            sequentialResults.Add(await ReviewChunkAsync(
+            var sequentialResults = new List<ChunkReviewOutcome?>(chunks.Count);
+            foreach (var chunk in chunks)
+            {
+                sequentialResults.Add(await TryReviewChunkAsync(
+                        llm,
+                        chunk,
+                        metadata,
+                        config,
+                        grounding,
+                        repositoryContext,
+                        fullFileContents,
+                        job,
+                        installationToken,
+                        maxOutputTokens,
+                        isIncrementalUpdate,
+                        ct)
+                    .ConfigureAwait(false));
+            }
+
+            outcomes = [.. sequentialResults];
+        }
+
+        var succeeded = outcomes.OfType<ChunkReviewOutcome>().ToArray();
+        if (succeeded.Length == 0)
+        {
+            // Every chunk came back unusable, so there is no review to post. Fail loudly
+            // rather than posting an empty one that reads as "no issues found".
+            throw new LlmResponseUnusableException(
+                $"All {chunks.Count} review chunk(s) returned an unusable response.");
+        }
+
+        if (succeeded.Length < outcomes.Length)
+        {
+            logger.LogWarning(
+                "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} lost {FailedChunks} of {TotalChunks} "
+                + "chunk(s) to unusable responses; posting the findings from the {SucceededChunks} that worked",
+                job.DeliveryId,
+                job.Owner,
+                job.Repo,
+                job.PrNumber,
+                outcomes.Length - succeeded.Length,
+                outcomes.Length,
+                succeeded.Length);
+        }
+
+        return succeeded;
+    }
+
+    /// <summary>
+    /// Runs one chunk, returning null when the provider gave us nothing usable.
+    /// </summary>
+    /// <remarks>
+    /// A single bad chunk should not cost the whole review: the other chunks' findings
+    /// are still real and worth posting. Only a total wipeout fails the job, which
+    /// <see cref="ReviewChunksAsync"/> checks for.
+    /// </remarks>
+    private async Task<ChunkReviewOutcome?> TryReviewChunkAsync(
+        IReviewLlm llm,
+        ReviewChunk chunk,
+        PullRequestMetadata metadata,
+        ReviewConfig config,
+        GroundingContext grounding,
+        IReadOnlyList<RepositoryContextSnippet>? repositoryContext,
+        IReadOnlyDictionary<string, string>? fullFileContents,
+        ReviewJob job,
+        string installationToken,
+        int maxOutputTokens,
+        bool isIncrementalUpdate,
+        CancellationToken ct)
+    {
+        try
+        {
+            return await ReviewChunkAsync(
                     llm,
                     chunk,
                     metadata,
@@ -896,10 +967,19 @@ public sealed class ReviewWorker : BackgroundService
                     maxOutputTokens,
                     isIncrementalUpdate,
                     ct)
-                .ConfigureAwait(false));
+                .ConfigureAwait(false);
         }
-
-        return sequentialResults;
+        catch (LlmResponseUnusableException ex)
+        {
+            logger.LogWarning(
+                ex,
+                "Review chunk {ChunkIndex}/{TotalChunks} for {DeliveryId} returned an unusable response; "
+                + "continuing with the remaining chunks",
+                chunk.Index,
+                chunk.TotalChunks,
+                job.DeliveryId);
+            return null;
+        }
     }
 
     private async Task<ChunkReviewOutcome> ReviewChunkAsync(
