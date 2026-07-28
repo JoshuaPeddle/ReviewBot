@@ -1,0 +1,14 @@
+must_flag:
+  - path: src/ReviewBot.Retrieval/Indexing/IncrementalSymbolIndexer.cs
+    line_range: [28, 34]
+    severity_at_least: warning
+    topic: empty_batch_two_hops_out
+    must_mention_any:
+      - EnsureNotEmpty
+      - empty
+      - no rows
+      - zero rows
+      - ArgumentException
+      - throws
+max_total_comments: 3
+expected_review_state: COMMENT

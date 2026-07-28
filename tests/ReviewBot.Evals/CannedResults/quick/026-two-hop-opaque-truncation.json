@@ -1,0 +1,12 @@
+{
+  "summary": "The signature is appended to a key that has already been cut to the storage column's limit, so the new distinction is lost where it matters.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Persistence/SignedDeliveryRecorder.cs",
+      "line": 18,
+      "severity": "warning",
+      "confidence": "high",
+      "body": "DeliveryKeyCanonicalizer already trims the delivery key to the deliveries table's 64-character column, so appending \":{signatureHex}\" here pushes the value past that limit. The signature distinction this method exists to add is lost at the storage layer. Build the combined value first and canonicalize once, or widen the column."
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+must_flag:
+  - path: src/ReviewBot.Persistence/SignedDeliveryRecorder.cs
+    line_range: [14, 21]
+    severity_at_least: warning
+    topic: opaque_truncation_two_hops_out
+    must_mention_any:
+      - 64
+      - truncat
+      - MaxKeyLength
+      - column
+      - varchar
+      - length limit
+max_total_comments: 3
+expected_review_state: COMMENT

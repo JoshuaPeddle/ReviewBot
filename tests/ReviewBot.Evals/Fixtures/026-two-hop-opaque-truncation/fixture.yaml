@@ -1,0 +1,57 @@
+name: Record the signature a delivery arrived with
+category: cross_file_body
+difficulty: high
+description: |
+  Build the idempotency key from the delivery and the HMAC signature it carried, so
+  a replay of the same delivery id under a different signature can be told apart
+  from a genuine retry.
+notes: |
+  Maintainer notes (not shown to the model — the loader ignores this key).
+
+  The hard sibling of 025. Both plant the invariant two hops from the diff, but 025
+  is solvable by reading a NAME: the hop-2 method is called EnsureNotEmpty, and the
+  model passed it by inferring the constraint from that name without ever seeing
+  the body. This fixture removes that affordance.
+
+  The chain:
+    hop 0  SignedDeliveryRecorder.BuildSignedKey  (added by this diff)
+    hop 1  DeliveryKeyBuilder.Build               (named in the diff, retrievable)
+    hop 2  DeliveryKeyCanonicalizer.Canonicalize  (NOT named in the diff)
+
+  Hop 2 silently truncates the key to 64 characters because the deliveries table
+  column is varchar(64). "Canonicalize" implies normalisation, not truncation, so
+  name inference gives the WRONG answer here — the model has to read the body, and
+  one-hop retrieval never fetches it.
+
+  The bug: BuildSignedKey appends ":{signatureHex}" to a value that has already
+  been cut to the column limit. The combined key overflows the very column the
+  truncation exists to respect, so the signature distinction this PR is adding is
+  lost at the storage layer — the feature silently does nothing.
+
+  Verified structurally: the diff contains "DeliveryKeyBuilder.Build" and contains
+  none of "Canonicalize", "MaxKeyLength", or "truncat".
+
+  MEASURED 2026-07-28 (Qwen3.6-27B-FP8, greedy, retrieval on): the model FAILS
+  this fixture — TP=0 FP=3 FN=1. This is the first live miss in the corpus and the
+  first fixture that actually marks headroom rather than guarding a behaviour the
+  model already has.
+
+  Two things the miss shows, both actionable:
+
+  1. Retrieval's one-hop limit bites once the name stops carrying the meaning.
+     Compare 025, which the model passes purely by reading "EnsureNotEmpty". Here
+     the hop-2 body is the only place the constraint exists, and retrieval never
+     fetches it. That is the concrete argument for transitive retrieval: follow
+     symbols named inside retrieved bodies, one further hop.
+
+  2. All three false positives are speculation about a referenced method's
+     contract — "If DeliveryKeyBuilder.Build does not validate it...", "If the
+     delivery key format is guaranteed to never include ':'". The system prompt
+     already forbids exactly this ("Do not speculate about a referenced method's
+     return type, async behavior, side effects, or contract"), so the rule is not
+     holding under uncertainty. Starved of the context it needs, the model fills
+     the gap with hedged guesses instead of staying silent — which is the failure
+     mode that rule exists to prevent.
+
+  Keep this fixture failing until one of those is addressed; it is the corpus's
+  discriminator, and a corpus where everything passes cannot tell you anything.
