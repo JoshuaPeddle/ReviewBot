@@ -1,0 +1,4 @@
+{
+  "summary": "Both constructors keep the same null-guard behaviour; nothing here changes what the code does.",
+  "comments": []
+}

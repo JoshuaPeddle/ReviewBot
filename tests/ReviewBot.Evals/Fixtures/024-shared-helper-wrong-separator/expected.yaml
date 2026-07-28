@@ -1,0 +1,20 @@
+must_flag:
+  - path: src/ReviewBot.Grounding/Workspace/RepoPathNormalizer.cs
+    line_range: [11, 16]
+    severity_at_least: warning
+    topic: platform_separator_mismatch
+    must_mention_any:
+      - DirectorySeparatorChar
+      - forward slash
+      - '''/'''
+      - Windows
+      - AltDirectorySeparatorChar
+      - rooted
+      - absolute
+    additional_locations:
+      - path: src/ReviewBot.Grounding/Languages/DotNet/RoslynDiagnosticProvider.cs
+        line_range: [70, 76]
+      - path: src/ReviewBot.Grounding/Languages/Python/RuffDiagnosticProvider.cs
+        line_range: [138, 142]
+max_total_comments: 2
+expected_review_state: COMMENT

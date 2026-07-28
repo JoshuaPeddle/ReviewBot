@@ -1,0 +1,32 @@
+name: Normalise repository-relative paths through a shared helper
+category: cross_file_body
+difficulty: high
+description: |
+  Route the two places that join a repository-relative path onto a workspace
+  root through a single RepoPathNormalizer helper instead of handling the
+  leading separator ad hoc.
+notes: |
+  Maintainer notes (not shown to the model — the loader ignores this key).
+
+  The corpus's consolidation-at-scale fixture, added because #45 showed the
+  consolidation instruction (merged in #44) weakening on a realistic-size diff:
+  it reliably collapsed same-root-cause duplicates on the toy fixtures, then
+  emitted a same-line duplicate on fixture 022.
+
+  Planted bug, ONE root cause: RepoPathNormalizer.StripLeadingSeparator trims
+  Path.DirectorySeparatorChar. Repository-relative paths always use '/', but on
+  Windows that constant is '\\', so a leading '/' survives. Path.Combine treats
+  the result as rooted and discards the workspace root, returning an absolute
+  path — the changed file is read from the filesystem root instead of the
+  checkout, which is both a correctness and a path-traversal problem. On Linux
+  the constant happens to be '/' and the bug is invisible, which is what makes it
+  a good fixture: it cannot be found by running the code, only by reading it.
+
+  It surfaces at two call sites, in two different providers, from one helper. The
+  fix is one line in the helper. So the correct review is ONE comment, and
+  max_total_comments is 2 — enough room to name the helper and at most one call
+  site, but not to file the same defect once per provider.
+
+  The helper is a new file (>90% additions) so it gets no full-file context; both
+  call sites are modifications and do. The model therefore sees the callers in
+  full and must follow them back to the helper.

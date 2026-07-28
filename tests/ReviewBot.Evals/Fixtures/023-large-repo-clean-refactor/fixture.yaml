@@ -1,0 +1,28 @@
+name: Use ArgumentNullException.ThrowIfNull in the GitHub client constructors
+category: precision
+difficulty: high
+description: |
+  Replace the null-coalescing throw idiom in two constructors with
+  ArgumentNullException.ThrowIfNull, and note why the GitHub JSON media type is
+  declared locally.
+notes: |
+  Maintainer notes (not shown to the model — the loader ignores this key).
+
+  The corpus's precision-at-scale fixture. Every earlier clean fixture (003) is a
+  single tiny file, so nothing measured whether a large, realistic context tempts
+  the model into inventing findings. Here repo-state is a real 22-file / ~66KB
+  project and the diff is genuinely behaviour-preserving:
+
+    - `x = y ?? throw new ArgumentNullException(nameof(y))` becomes
+      `ArgumentNullException.ThrowIfNull(y); x = y;` in two constructors. Same
+      exception type, same parameter name, same throwing condition.
+    - One comment added above an existing private const.
+
+  There is nothing to find. max_total_comments is 0, so ANY comment above info
+  fails the fixture. This is the counterweight to the bug-hunting fixtures: recall
+  fixtures punish silence, and this one punishes noise, which is the failure mode
+  the model actually exhibits at scale.
+
+  Both changed files replace lines rather than only appending, so both receive
+  full-file context (>90%-additions files are skipped) — meaning the model sees
+  each file in full and still must not manufacture a concern.
