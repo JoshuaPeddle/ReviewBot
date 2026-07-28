@@ -13,6 +13,9 @@
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <!-- Direct reference only to lift WireMock.Net's vulnerable transitive Scriban.Signed
+         to a patched version; see the note in Directory.Packages.props. -->
+    <PackageReference Include="Scriban.Signed" />
     <PackageReference Include="WireMock.Net" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio">
