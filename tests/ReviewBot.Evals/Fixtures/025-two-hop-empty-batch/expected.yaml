@@ -10,5 +10,18 @@ must_flag:
       - zero rows
       - ArgumentException
       - throws
+may_flag:
+  - path: src/ReviewBot.Retrieval/Indexing/IncrementalSymbolIndexer.cs
+    topic: missing_sha_guard
+    reason: >
+      `sha` is the one parameter without an ArgumentNullException.ThrowIfNull guard
+      while `parsedRows` and `changedPaths` both have one. That inconsistency is
+      real, if minor. It is a different observation from the empty-batch invariant
+      this fixture targets, so it earns no credit and costs nothing.
+    must_mention_any:
+      - ThrowIfNull
+      - null
+      - guard
+      - consistency
 max_total_comments: 3
 expected_review_state: COMMENT

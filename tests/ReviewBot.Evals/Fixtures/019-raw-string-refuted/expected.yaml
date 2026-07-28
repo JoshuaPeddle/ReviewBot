@@ -5,5 +5,19 @@ must_not_flag:
       triple-quote delimiter must be refuted by verification (Preview parsing
       accepts it).
     severity_above: info
+may_flag:
+  - path: src/Demo/JsonTemplates.cs
+    topic: constant_name_versus_content
+    reason: >
+      The constant is named `Empty` but holds an object with an empty `items` array
+      rather than an empty document. Verified against the diff — the observation is
+      factually correct. A naming nit, not the "won't compile" claim this fixture
+      exists to refute.
+    must_mention_any:
+      - name
+      - named
+      - rename
+      - Empty
+      - accurately
 max_total_comments: 0
 expected_review_state: APPROVE

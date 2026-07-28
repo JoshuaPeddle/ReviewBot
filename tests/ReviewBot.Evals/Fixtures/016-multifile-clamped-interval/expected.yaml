@@ -13,6 +13,10 @@ must_flag:
     additional_locations:
       - path: src/ReviewBot.Core/Metrics/MetricsFlusher.cs
         line_range: [16, 21]
+      # The MinimumInterval constant itself. Naming the clamp's source is the same
+      # finding as naming the method that applies it.
+      - path: src/ReviewBot.Core/Metrics/MetricsFlusher.cs
+        line_range: [5, 5]
 must_not_flag:
   - path: src/ReviewBot.Core/Metrics/MetricNames.cs
     reason: Adding a metric name constant is benign churn.
