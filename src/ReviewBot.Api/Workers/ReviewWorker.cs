@@ -27,7 +27,6 @@ namespace ReviewBot.Api.Workers;
 public sealed class ReviewWorker : BackgroundService
 {
     private const string SynchronizeReason = "synchronize";
-    private const double MostlyNewFileAdditionRatioThreshold = 0.9;
 
     private readonly IReviewJobQueue queue;
     private readonly IInstallationTokenProvider tokenProvider;
@@ -1573,11 +1572,7 @@ public sealed class ReviewWorker : BackgroundService
             return new FullFileContextResult(null, budget);
         }
 
-        var candidates = files
-            .Where(file => file.Status != FileChangeStatus.Removed)
-            .Where(file => !IsMostlyNewFile(file))
-            .Where(file => EstimatePatchBytes(file) <= config.Review.FullFileMaxBytes)
-            .ToArray();
+        var candidates = FullFileContextSelector.SelectCandidates(files, config.Review.FullFileMaxBytes);
 
         var selectedRequests = new List<ContextRequest>();
         var selectionBudget = budget;
@@ -1708,19 +1703,6 @@ public sealed class ReviewWorker : BackgroundService
             .Replace('\r', '\n')
             .Split('\n')
             .Take(maxPatchLines));
-    }
-
-    private static int EstimatePatchBytes(FileChange file) => Encoding.UTF8.GetByteCount(file.Patch);
-
-    private static bool IsMostlyNewFile(FileChange file)
-    {
-        var changedLines = file.AdditionsCount + file.DeletionsCount;
-        if (changedLines <= 0)
-        {
-            return false;
-        }
-
-        return (double)file.AdditionsCount / changedLines > MostlyNewFileAdditionRatioThreshold;
     }
 
     private static PullRequestReviewEvent DetermineReviewEvent(

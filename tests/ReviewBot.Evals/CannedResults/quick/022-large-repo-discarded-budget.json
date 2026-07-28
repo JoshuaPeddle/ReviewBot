@@ -1,0 +1,12 @@
+{
+  "summary": "The new retrieval reserve is never actually applied, so chunks are still planned against the full content budget.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Core/Context/ReviewChunkPlanner.cs",
+      "line": 45,
+      "severity": "warning",
+      "confidence": "high",
+      "body": "PromptBudget is an immutable record: TryConsume hands the updated budget back through the out parameter rather than mutating in place. `reserved` is discarded here, so `budget` still holds the full budget and the RemainingContentTokens read below is unreserved. The reserve has no effect and chunks are planned as though retrieval were free. Assign the out value back before using it."
+    }
+  ]
+}

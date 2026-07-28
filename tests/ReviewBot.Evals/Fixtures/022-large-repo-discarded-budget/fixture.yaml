@@ -1,0 +1,39 @@
+name: Reserve prompt room for retrieval before planning chunks
+category: cross_file_body
+difficulty: high
+description: |
+  Chunk planning can now set aside part of the content budget for the retrieval
+  snippets that get injected next to the diff, plus documentation and naming
+  tidy-ups around the budget types.
+notes: |
+  Maintainer notes (not shown to the model — the loader ignores this key).
+
+  This is the corpus's first realistic-scale fixture. repo-state is a 50-file,
+  ~92KB snapshot of a real C# project rather than the 1-5 toy files the earlier
+  fixtures use, so retrieval has a genuine symbol graph to work against and the
+  prompt is composed the way a production review's is. Two of the four changed
+  files are ordinary edits to existing files, which means the harness also
+  populates full-file context here — the largest section of a real prompt and one
+  the corpus previously never exercised at all.
+
+  Planted bug: PlanChunksWithRetrievalReserve calls budget.TryConsume(...) and
+  then throws the result away. PromptBudget is an immutable record whose
+  TryConsume hands back the updated budget through an out parameter; discarding it
+  leaves `budget` unchanged, so budget.RemainingContentTokens on the next line is
+  the FULL budget. The reserve silently does nothing and chunks are planned as
+  though retrieval were free, which is exactly the overrun the method was added to
+  prevent. The `reserved` variable is assigned and never read.
+
+  The contract that makes this a bug lives in Context/PromptBudget.cs, which this
+  PR does not touch — so the finding requires retrieval (or full-file context) to
+  surface the callee, not just the diff. That is the point of the fixture.
+
+  The other three changed files are benign: an XML doc on PromptBudgetSection, a
+  private constant rename in the estimator, and a reworded comment on ContextBudget.
+  None may be flagged above info.
+
+  The diffs deliberately replace lines rather than only appending. Full-file context
+  skips any file that is >90% additions, on the grounds that its diff already shows
+  the whole thing — so a fixture built purely from added lines would silently fail to
+  exercise full-file context at all. Three of the four files here, including the one
+  holding the bug, come in under that ratio and do get full-file context.

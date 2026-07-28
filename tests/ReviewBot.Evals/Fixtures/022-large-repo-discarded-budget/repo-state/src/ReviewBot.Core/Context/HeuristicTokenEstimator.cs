@@ -1,0 +1,16 @@
+namespace ReviewBot.Core.Context;
+
+public sealed class HeuristicTokenEstimator : IPromptTokenEstimator
+{
+    private const double AverageCharactersPerToken = 2.5d;
+
+    public int EstimateTokens(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+
+        return (int)Math.Ceiling(text.Length / AverageCharactersPerToken);
+    }
+}
