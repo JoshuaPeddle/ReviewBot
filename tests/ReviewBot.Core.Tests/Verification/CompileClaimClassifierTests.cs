@@ -11,6 +11,16 @@ public class CompileClaimClassifierTests
     [InlineData("Syntax error: missing semicolon.")]
     [InlineData("This fails to build.")]
     [InlineData("The file does not parse.")]
+    // Modal + infinitive. Only the third-person "fails to compile" was listed, so these
+    // went unclassified and therefore unrefuted. The first is verbatim from a review the
+    // bot posted on PR #48, wrongly claiming string.Contains(char, StringComparison)
+    // does not exist — an error-severity hallucination that ground truth could have
+    // killed outright.
+    [InlineData("`string.Contains(char)` does not accept a `StringComparison` argument, so this line will fail to compile.")]
+    [InlineData("Without the cast this would fail to compile.")]
+    [InlineData("That overload may fail to compile on older targets.")]
+    [InlineData("The project will fail to build after this rename.")]
+    [InlineData("This ends up failing to compile.")]
     public void IsCompileFailureClaim_TrueForCompileAndSyntaxClaims(string body)
     {
         CompileClaimClassifier.IsCompileFailureClaim(body).Should().BeTrue();

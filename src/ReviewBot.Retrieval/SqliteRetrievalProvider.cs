@@ -135,17 +135,32 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
             extractActivity?.SetTag("retrieval.symbols_extracted", queries.Count);
         }
 
+        var symbolsQueried = 0;
         using (var lookupActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.retrieval.lookup"))
         {
-            foreach (var diffSymbol in queries)
+            var depth = request.Config.Retrieval.SymbolLookupDepth;
+            IReadOnlyList<DiffSymbol> pending = queries;
+            var maxHops = Math.Max(1, request.Config.Retrieval.MaxHops);
+
+            for (var hop = 1; hop <= maxHops && pending.Count > 0; hop++)
             {
-                var kind = MapKind(diffSymbol.Kind);
-                var matches = await index.FindAsync(key, diffSymbol.Name, kind, ct).ConfigureAwait(false);
-                AddMatches(results, matches, request.Config.Retrieval.SymbolLookupDepth);
+                var hopStart = results.Count;
+                foreach (var diffSymbol in pending)
+                {
+                    var matches = await index.FindAsync(key, diffSymbol.Name, MapKind(diffSymbol.Kind), ct)
+                        .ConfigureAwait(false);
+                    AddMatches(results, matches, depth, hop);
+                }
+
+                symbolsQueried += pending.Count;
+                pending = hop < maxHops
+                    ? NextHopQueries(results, hopStart, seen)
+                    : [];
             }
 
-            lookupActivity?.SetTag("retrieval.symbols_queried", queries.Count);
+            lookupActivity?.SetTag("retrieval.symbols_queried", symbolsQueried);
             lookupActivity?.SetTag("retrieval.matches_returned", results.Count);
+            lookupActivity?.SetTag("retrieval.max_hops", maxHops);
         }
 
         var symbols = results
@@ -157,19 +172,61 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
             .Select(item => item.Symbol)
             .ToArray();
 
-        return new RankedSymbolLookup(symbols, queries.Count);
+        return new RankedSymbolLookup(symbols, symbolsQueried);
+    }
+
+    /// <summary>
+    /// The symbols that the definitions found on this hop themselves refer to.
+    /// </summary>
+    /// <remarks>
+    /// Only definition bodies are followed. A usage match is a single source line with no
+    /// body, so following it would mostly re-query the enclosing file's noise. Anything
+    /// already queried on an earlier hop is skipped via the shared <paramref name="seen"/>
+    /// set, which also stops two mutually recursive methods looping.
+    /// </remarks>
+    private IReadOnlyList<DiffSymbol> NextHopQueries(
+        List<RankedRepoSymbol> results,
+        int fromIndex,
+        HashSet<(string Name, DiffSymbolKind Kind)> seen)
+    {
+        var next = new List<DiffSymbol>();
+        for (var i = fromIndex; i < results.Count; i++)
+        {
+            var symbol = results[i].Symbol;
+            if (symbol.Role != RepoSymbolRole.Definition || string.IsNullOrWhiteSpace(symbol.Body))
+            {
+                continue;
+            }
+
+            foreach (var referenced in symbolExtractor.ExtractFromSource(symbol.Body!))
+            {
+                if (seen.Add((referenced.Name, referenced.Kind)))
+                {
+                    next.Add(referenced);
+                }
+            }
+        }
+
+        return next;
     }
 
     private static void AddMatches(
         List<RankedRepoSymbol> results,
         IReadOnlyList<RepoSymbol> matches,
-        string depth)
+        string depth,
+        int hop)
     {
+        // Rank orders what survives the token budget. Later hops rank strictly worse than
+        // anything the diff named directly, so a second-hop snippet can only ever consume
+        // budget that a first-hop one did not want.
+        var definitionRank = (hop - 1) * 2;
+        var usageRank = definitionRank + 1;
+
         if (depth is RetrievalConfig.DefinitionsDepth or RetrievalConfig.BothDepth)
         {
             results.AddRange(matches
                 .Where(symbol => symbol.Role == RepoSymbolRole.Definition)
-                .Select(symbol => new RankedRepoSymbol(symbol, 0)));
+                .Select(symbol => new RankedRepoSymbol(symbol, definitionRank)));
         }
 
         if (depth is RetrievalConfig.CallersDepth or RetrievalConfig.BothDepth)
@@ -177,7 +234,7 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
             results.AddRange(matches
                 .Where(symbol => symbol.Role == RepoSymbolRole.Usage)
                 .Take(MaxCallersPerSymbol)
-                .Select(symbol => new RankedRepoSymbol(symbol, 1)));
+                .Select(symbol => new RankedRepoSymbol(symbol, usageRank)));
         }
     }
 

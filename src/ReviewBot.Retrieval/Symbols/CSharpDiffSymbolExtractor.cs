@@ -80,6 +80,45 @@ public sealed class CSharpDiffSymbolExtractor : IDiffSymbolExtractor
         return results;
     }
 
+    /// <summary>
+    /// Extracts symbols from plain C# source rather than a diff.
+    /// </summary>
+    /// <remarks>
+    /// Used for the second retrieval hop: the symbols a retrieved definition body itself
+    /// refers to. It deliberately runs the same per-line logic as the diff path — the same
+    /// sanitizer, the same patterns, the same keyword filter — so a hop-2 symbol means
+    /// exactly what a hop-1 symbol means and the two cannot drift apart.
+    /// </remarks>
+    public IReadOnlyList<DiffSymbol> ExtractFromSource(string source)
+    {
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            return [];
+        }
+
+        var symbols = new List<DiffSymbol>();
+        var seen = new HashSet<(string Name, DiffSymbolKind Kind)>();
+        var inBlockComment = false;
+        var rawStringQuoteCount = 0;
+        var lineNumber = 1;
+
+        foreach (var rawLine in SplitLines(source))
+        {
+            var code = CSharpLexicalSanitizer.StripCommentsAndStrings(
+                rawLine,
+                ref inBlockComment,
+                ref rawStringQuoteCount);
+            if (!string.IsNullOrWhiteSpace(code))
+            {
+                AddSymbolsFromLine(code, lineNumber, symbols, seen);
+            }
+
+            lineNumber++;
+        }
+
+        return symbols;
+    }
+
     private static bool IsCSharpPath(string path) =>
         path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ||
         path.EndsWith(".csx", StringComparison.OrdinalIgnoreCase);
