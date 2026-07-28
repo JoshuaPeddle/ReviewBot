@@ -33,6 +33,37 @@ public sealed class ContextBudgetTests
             .Should().Be(ContextBudget.MinViableReserveTokens);
     }
 
+    [Fact]
+    public void RaisesReserveForLargeContextModels()
+    {
+        // A 100K reasoning model needs far more than the fixed 4096 default: it spends
+        // its output allowance thinking before it answers, and too small a reserve comes
+        // back as an empty response. Observed on Qwen3.6-27B at 100K.
+        ContextBudget.ResolveResponseReserveTokens(4096, 100_000).Should().Be(12_500);
+    }
+
+    [Fact]
+    public void KeepsAnExplicitlyLargerReserveOnALargeWindow()
+    {
+        // The floor only lifts a too-small reserve; a bigger explicit ask still stands.
+        ContextBudget.ResolveResponseReserveTokens(20_000, 100_000).Should().Be(20_000);
+    }
+
+    [Fact]
+    public void StillCapsTheReserveOnALargeWindow()
+    {
+        ContextBudget.ResolveResponseReserveTokens(90_000, 100_000).Should().Be(25_000);
+    }
+
+    [Fact]
+    public void LeavesTheReferenceProfileUntouchedAtThirtyTwoK()
+    {
+        // The 32K floor works out to exactly the 4096 default, so nothing changes for
+        // the models the fixed reserve was originally tuned against.
+        ContextBudget.ResolveResponseReserveTokens(4096, 32_768).Should().Be(4096);
+        ContextBudget.ResolveResponseReserveTokens(4096, 16_384).Should().Be(4096);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
