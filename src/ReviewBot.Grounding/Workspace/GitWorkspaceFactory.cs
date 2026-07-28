@@ -8,15 +8,23 @@ namespace ReviewBot.Grounding.Workspace;
 public sealed class GitWorkspaceFactory : IWorkspaceFactory
 {
     private readonly ILogger<GitWorkspaceFactory> logger;
+    private readonly string tempRoot;
 
-    public GitWorkspaceFactory(ILogger<GitWorkspaceFactory>? logger = null)
+    /// <param name="tempRoot">
+    /// Directory to create workspaces under. Defaults to the system temp directory;
+    /// a test can point this at a private directory so an assertion about leftover
+    /// workspaces is about its own, rather than about whatever else on the machine
+    /// happens to be holding one at that moment.
+    /// </param>
+    public GitWorkspaceFactory(ILogger<GitWorkspaceFactory>? logger = null, string? tempRoot = null)
     {
         this.logger = logger ?? NullLogger<GitWorkspaceFactory>.Instance;
+        this.tempRoot = tempRoot ?? Path.GetTempPath();
     }
 
     public async Task<IWorkspace> CreateAsync(WorkspaceRequest request, CancellationToken ct)
     {
-        var tempDir = Path.Combine(Path.GetTempPath(), $"reviewbot-{Guid.NewGuid():N}");
+        var tempDir = Path.Combine(tempRoot, $"reviewbot-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
 
         try
