@@ -45,6 +45,7 @@ public sealed class EvalRunScorer
         }
 
         var fixtureScores = new List<EvalFixtureScore>();
+        var abortedFixtures = 0;
         var verifier = new EvalVerifier();
         foreach (var fixtureDirectory in fixtureDirectories)
         {
@@ -71,6 +72,18 @@ public sealed class EvalRunScorer
             }
 
             var rawResult = await File.ReadAllTextAsync(resultPath).ConfigureAwait(false);
+
+            // A run the provider never answered (timeout, or a reasoning model that spent
+            // its whole output allowance thinking) carries no information about review
+            // quality. Counting its absent findings as misses reported an infrastructure
+            // failure as a recall failure: an n=3 baseline had every single false negative
+            // come from an aborted request, not from the model overlooking a bug.
+            if (EvalAbortDetector.IsAborted(rawResult))
+            {
+                abortedFixtures++;
+                continue;
+            }
+
             var parseResult = LlmResultParser.Parse(rawResult);
             if (!parseResult.Success)
             {
@@ -87,10 +100,10 @@ public sealed class EvalRunScorer
                 scorer.Score(fixture, verified)));
         }
 
-        return Aggregate(fixtureScores);
+        return Aggregate(fixtureScores, abortedFixtures);
     }
 
-    private static EvalRunScore Aggregate(IReadOnlyList<EvalFixtureScore> fixtures)
+    private static EvalRunScore Aggregate(IReadOnlyList<EvalFixtureScore> fixtures, int abortedFixtures)
     {
         var totalComments = fixtures.Sum(fixture => fixture.Score.TotalComments);
         var truePositives = fixtures.Sum(fixture => fixture.Score.TruePositives);
@@ -113,7 +126,8 @@ public sealed class EvalRunScorer
             Precision: precision,
             Recall: recall,
             F1: f1,
-            Fixtures: fixtures);
+            Fixtures: fixtures,
+            AbortedFixtures: abortedFixtures);
     }
 
     private static double Divide(int numerator, int denominator)
