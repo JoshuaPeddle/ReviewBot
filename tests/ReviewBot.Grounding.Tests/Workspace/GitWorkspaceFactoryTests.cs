@@ -46,20 +46,39 @@ public class GitWorkspaceFactoryTests : IDisposable
     [Fact]
     public async Task CreateAsyncCleansUpTempDirOnCloneFailure()
     {
-        var factory = new GitWorkspaceFactory();
+        // Give the factory a private root. Scanning the shared system temp directory
+        // instead made this test assert on global state: any workspace another test held
+        // at that moment looked like an orphan, and it failed roughly one CI run in two on
+        // an unchanged commit. A dedicated root makes the assertion exact and deterministic.
+        var workspaceRoot = TempDir("workspace-root");
+        var factory = new GitWorkspaceFactory(tempRoot: workspaceRoot);
         var request = new WorkspaceRequest("/nonexistent/path/reviewbot-test-repo", "abc1234", "");
 
         var act = () => factory.CreateAsync(request, CancellationToken.None);
 
         await act.Should().ThrowAsync<InvalidOperationException>();
 
-        // No orphaned reviewbot temp dirs should remain.
-        // The factory names dirs "reviewbot-{32-hex-char-guid}" — match that exact pattern
-        // to avoid picking up unrelated temp dirs from other tests (e.g. reviewbot-build-test-*).
-        var orphaned = Directory.GetDirectories(Path.GetTempPath(), "reviewbot-????????????????????????????????")
-            .Where(d => Directory.GetCreationTimeUtc(d) > DateTime.UtcNow.AddSeconds(-5))
-            .ToList();
-        orphaned.Should().BeEmpty("temp workspace must be removed after clone failure");
+        Directory.GetDirectories(workspaceRoot).Should()
+            .BeEmpty("temp workspace must be removed after clone failure");
+    }
+
+    [Fact]
+    public async Task CreateAsyncCreatesTheWorkspaceUnderTheConfiguredRoot()
+    {
+        var workspaceRoot = TempDir("workspace-root-success");
+        var originPath = TempDir("origin-root");
+        SetupLocalGitRepo(originPath);
+        var sha = GetHeadSha(originPath);
+
+        var factory = new GitWorkspaceFactory(tempRoot: workspaceRoot);
+
+        await using var workspace = await factory.CreateAsync(
+            new WorkspaceRequest(originPath, sha, ""), CancellationToken.None);
+
+        // Pins the seam the cleanup test depends on: if the root were ignored, that test
+        // would silently pass by asserting on an empty directory nothing ever used.
+        workspace.LocalPath.Should().StartWith(workspaceRoot);
+        Directory.GetDirectories(workspaceRoot).Should().ContainSingle();
     }
 
     [Fact]
