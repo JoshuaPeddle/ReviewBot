@@ -17,10 +17,14 @@ REVIEWBOT_EVAL_INDEX_CACHE_DIR ?= runs/eval-index
 # rather than burn an hour silently. Default tuned for a 27B thinking model.
 REVIEWBOT_EVAL_PER_FIXTURE_TIMEOUT ?= 240
 REVIEWBOT_EVAL_REQUEST_TIMEOUT ?= 180
-# Output token cap for each eval request. Kept small so prompt + output stays
-# within tight local context windows (e.g. the 32K reference model); 4096 is
-# ample for the structured JSON review response.
-REVIEWBOT_EVAL_MAX_TOKENS ?= 4096
+# Output token cap for each eval request. 4096 was sized for a 32K context model
+# and is ample for the JSON response itself — but a reasoning model spends this
+# budget thinking before it answers, and on the larger fixtures it runs out and
+# returns nothing. Measured: an n=3 baseline aborted 4 of 78 fixture runs that way
+# (024 three times, 026 once), and EVERY false negative in that baseline was an
+# aborted request rather than a reasoning failure — silently depressing recall.
+# 16384 matches the response reserve the worker derives for a 100K window.
+REVIEWBOT_EVAL_MAX_TOKENS ?= 16384
 # Sampling knobs. Empty means "don't send it" — the server's own default applies.
 # Qwen3.6 recommends temperature=0.6, top_p=0.95, top_k=20 for thinking mode; the
 # remaining three are identity values kept explicit so a run is fully reproducible.
