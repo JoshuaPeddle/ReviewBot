@@ -17,6 +17,7 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
 
     private readonly ApiKeyCredential credential;
     private readonly OpenAIClientOptions clientOptions;
+    private readonly Uri? baseUrl;
     private readonly ILogger? logger;
 
     public OpenAiSdkChatClient(OpenAiLlmOptions options, ILogger? logger = null)
@@ -29,6 +30,7 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
         }
 
         credential = new ApiKeyCredential(options.ApiKey);
+        baseUrl = options.BaseUrl;
         clientOptions = CreateClientOptions(options.BaseUrl, options.TimeoutSeconds);
         this.logger = logger;
     }
@@ -93,7 +95,15 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
                     continue;
                 }
 
-                throw new OpenAiChatRequestException(ex.Status, body, ex);
+                throw new OpenAiChatRequestException(ex.Status, body, ex, baseUrl, request.ModelName);
+            }
+            catch (ClientResultException ex)
+            {
+                // Everything else used to surface as the SDK's bare "Service request
+                // failed", which named neither the endpoint nor the model — a stale base
+                // URL read as an unexplained dead review job.
+                throw new OpenAiChatRequestException(
+                    ex.Status, TryReadResponseBody(ex), ex, baseUrl, request.ModelName);
             }
         }
     }

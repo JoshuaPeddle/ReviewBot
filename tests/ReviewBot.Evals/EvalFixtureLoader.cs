@@ -96,12 +96,16 @@ public sealed class EvalFixtureLoader
         var mustNotFlag = (file.MustNotFlag ?? [])
             .Select((entry, index) => ConvertMustNotFlag(entry, path, index))
             .ToArray();
+        var mayFlag = (file.MayFlag ?? [])
+            .Select((entry, index) => ConvertMayFlag(entry, path, index))
+            .ToArray();
 
         return new ExpectedFindings(
             mustFlag,
             mustNotFlag,
             file.MaxTotalComments,
-            ParseExpectedReviewState(file.ExpectedReviewState, path));
+            ParseExpectedReviewState(file.ExpectedReviewState, path),
+            mayFlag);
     }
 
     private static MustFlagExpectation ConvertMustFlag(MustFlagFile file, string path, int index)
@@ -143,6 +147,34 @@ public sealed class EvalFixtureLoader
             RequiredString(file.Path, path, $"{prefix}.path"),
             lineRange[0],
             lineRange[1]);
+    }
+
+    private static MayFlagExpectation ConvertMayFlag(MayFlagFile file, string path, int index)
+    {
+        var prefix = $"may_flag[{index}]";
+        var lineRange = file.LineRange;
+
+        // The line range is optional: an allowed finding is often about the same code the
+        // fixture already targets, and pinning it to exact lines adds brittleness for no
+        // benefit when the entry earns no credit either way.
+        if (lineRange is not null &&
+            (lineRange.Count != 2 || lineRange[0] <= 0 || lineRange[1] < lineRange[0]))
+        {
+            throw new InvalidDataException(
+                $"Eval fixture field '{path}:{prefix}.line_range' must contain a positive [start, end] range.");
+        }
+
+        // A reason is mandatory. An allowed finding is an assertion that the model was
+        // right, so the corpus has to record why — otherwise this becomes a place to hide
+        // real false positives and precision quietly stops meaning anything.
+        return new MayFlagExpectation(
+            RequiredString(file.Path, path, $"{prefix}.path"),
+            lineRange?[0],
+            lineRange?[1],
+            RequiredString(file.Topic, path, $"{prefix}.topic"),
+            RequiredString(file.Reason, path, $"{prefix}.reason"),
+            file.MustMentionAny?.Where(keyword => !string.IsNullOrWhiteSpace(keyword)).Select(keyword => keyword.Trim()).ToArray()
+                ?? []);
     }
 
     private static MustNotFlagExpectation ConvertMustNotFlag(MustNotFlagFile file, string path, int index)
@@ -214,9 +246,24 @@ public sealed class EvalFixtureLoader
 
         public List<MustNotFlagFile>? MustNotFlag { get; set; }
 
+        public List<MayFlagFile>? MayFlag { get; set; }
+
         public int? MaxTotalComments { get; set; }
 
         public string? ExpectedReviewState { get; set; }
+    }
+
+    private sealed class MayFlagFile
+    {
+        public string? Path { get; set; }
+
+        public List<int>? LineRange { get; set; }
+
+        public string? Topic { get; set; }
+
+        public string? Reason { get; set; }
+
+        public List<string>? MustMentionAny { get; set; }
     }
 
     private sealed class MustFlagFile

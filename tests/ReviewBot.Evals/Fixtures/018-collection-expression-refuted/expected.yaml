@@ -4,5 +4,19 @@ must_not_flag:
       A C#12 collection expression is valid syntax; a "won't compile" claim on it
       must be refuted by verification (Preview parsing accepts it).
     severity_above: info
+may_flag:
+  - path: src/Demo/PrimeTable.cs
+    topic: mutable_public_array
+    reason: >
+      `public static readonly int[]` protects only the reference — callers can still
+      write `PrimeTable.Primes[0] = 1`. Recommending ImmutableArray/ReadOnlyCollection
+      is correct C#, just not the syntax hallucination this fixture hunts for. Scoring
+      it as a false positive understated precision on an accurate finding.
+    must_mention_any:
+      - ImmutableArray
+      - ReadOnlyCollection
+      - mutate
+      - mutable
+      - elements
 max_total_comments: 0
 expected_review_state: APPROVE

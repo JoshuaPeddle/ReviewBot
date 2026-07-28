@@ -261,5 +261,6 @@ public sealed class EvalCliTests : IDisposable
                 F1: f1,
                 MustFlagResults: [],
                 MustNotFlagResults: [],
-                FalsePositiveComments: []));
+                FalsePositiveComments: [],
+                AllowedFindingComments: []));
 }

@@ -74,15 +74,88 @@ public sealed class OpenAiReviewLlmTests
     }
 
     [Fact]
-    public async Task ReviewAsyncReturnsEmptyResultWhenRepairIsMalformed()
+    public async Task ReviewAsyncThrowsWhenRepairIsMalformed()
     {
         var client = new FakeOpenAiChatClient("not json", "still not json");
         var llm = CreateLlm(client);
 
-        var result = await llm.ReviewAsync(CreateRequest(), CancellationToken.None);
+        // Returning an empty result here would be posted as a clean review, telling the
+        // author nothing is wrong with a PR that was never successfully reviewed.
+        await llm.Invoking(l => l.ReviewAsync(CreateRequest(), CancellationToken.None))
+            .Should().ThrowAsync<LlmResponseUnusableException>()
+            .WithMessage("*could not be parsed as review JSON*");
 
-        result.Should().BeEquivalentTo(new ReviewResult(string.Empty, []) { RawLlmResponse = "not json" });
         client.Requests.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncGrowsTheOutputAllowanceWhenReasoningExhaustsIt()
+    {
+        // A reasoning model that burns its whole allowance on chain-of-thought reports
+        // completion tokens and returns no content. Observed on Qwen3.6-27B, which did
+        // this at 4096 and again at 12500 on the same PR.
+        var client = new FakeOpenAiChatClient(
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 4096)),
+            new OpenAiChatResult(
+                """{"summary": "Done.", "comments": []}""",
+                new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 5000)));
+        var llm = CreateLlm(client);
+
+        var result = await llm.ReviewAsync(CreateRequest(maxOutputTokens: 4096), CancellationToken.None);
+
+        result.Summary.Should().Be("Done.");
+        client.Requests.Should().HaveCount(2);
+        client.Requests[0].MaxTokens.Should().Be(4096);
+        client.Requests[1].MaxTokens.Should().Be(8192);
+        // Usage is cumulative across the expansion so cost reporting stays honest.
+        result.TokenUsage!.CompletionTokens.Should().Be(9096);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncThrowsAfterExhaustingTheAllowanceExpansions()
+    {
+        var client = new FakeOpenAiChatClient(
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 4096)),
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 8192)),
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 16384)));
+        var llm = CreateLlm(client);
+
+        await llm.Invoking(l => l.ReviewAsync(CreateRequest(maxOutputTokens: 4096), CancellationToken.None))
+            .Should().ThrowAsync<LlmResponseUnusableException>()
+            .WithMessage("*16384 completion tokens*response_reserve_tokens*");
+
+        client.Requests.Should().HaveCount(3);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncDoesNotGrowTheAllowanceWhenTheModelStoppedEarly()
+    {
+        // Few tokens consumed means the model gave up for some other reason; more room
+        // would not help, so fail immediately rather than burn two more requests.
+        var client = new FakeOpenAiChatClient(new OpenAiChatResult(
+            string.Empty,
+            new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 12)));
+        var llm = CreateLlm(client);
+
+        await llm.Invoking(l => l.ReviewAsync(CreateRequest(maxOutputTokens: 4096), CancellationToken.None))
+            .Should().ThrowAsync<LlmResponseUnusableException>();
+
+        client.Requests.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncThrowsWhenResponseIsEmptyWithNoTokens()
+    {
+        var client = new FakeOpenAiChatClient(new OpenAiChatResult(
+            "   ",
+            new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 0)));
+        var llm = CreateLlm(client);
+
+        await llm.Invoking(l => l.ReviewAsync(CreateRequest(), CancellationToken.None))
+            .Should().ThrowAsync<LlmResponseUnusableException>()
+            .WithMessage("*no completion tokens at all*");
+
+        client.Requests.Should().HaveCount(1);
     }
 
     [Fact]
@@ -380,6 +453,52 @@ public sealed class OpenAiReviewLlmTests
             .WithMessage("*Accepted values: json_object, json_schema, text*");
     }
 
+    [Fact]
+    public void ChatRequestExceptionNamesEndpointAndModelOnNotFound()
+    {
+        // A stale base URL used to surface as a bare "Service request failed", which
+        // named neither the endpoint nor the model that was actually called.
+        var exception = new OpenAiChatRequestException(
+            404,
+            responseBody: null,
+            innerException: new InvalidOperationException("boom"),
+            baseUrl: new Uri("https://stale.example.com/v1"),
+            modelName: "Qwen/Qwen3.6-27B-FP8");
+
+        exception.Message.Should().Contain("https://stale.example.com/v1");
+        exception.Message.Should().Contain("Qwen/Qwen3.6-27B-FP8");
+        exception.Message.Should().Contain("REVIEWBOT__OpenAi__BaseUrl");
+        exception.Message.Should().Contain("REVIEWBOT__OpenAi__ModelName");
+    }
+
+    [Fact]
+    public void ChatRequestExceptionPointsAtTheApiKeyOnUnauthorized()
+    {
+        var exception = new OpenAiChatRequestException(
+            401,
+            responseBody: "invalid api key",
+            innerException: new InvalidOperationException("boom"),
+            baseUrl: new Uri("https://api.example.com/v1"),
+            modelName: "some-model");
+
+        exception.Message.Should().Contain("invalid api key");
+        exception.Message.Should().Contain("REVIEWBOT__OpenAi__ApiKey");
+    }
+
+    [Fact]
+    public void ChatRequestExceptionLeavesOtherStatusesUnembellished()
+    {
+        var exception = new OpenAiChatRequestException(
+            500,
+            responseBody: "upstream exploded",
+            innerException: new InvalidOperationException("boom"),
+            baseUrl: new Uri("https://api.example.com/v1"),
+            modelName: "some-model");
+
+        exception.Message.Should().Be(
+            "OpenAI-compatible request failed with status 500: upstream exploded");
+    }
+
     [Theory]
     [InlineData("json_object", true)]
     [InlineData("json_schema", true)]
@@ -556,7 +675,7 @@ public sealed class OpenAiReviewLlmTests
             client,
             (delay, _) => delayAsync(delay));
 
-    private static ReviewRequest CreateRequest(bool agenticContext = false) =>
+    private static ReviewRequest CreateRequest(bool agenticContext = false, int? maxOutputTokens = null) =>
         new(
             PrTitle: "Test PR",
             PrBody: "Adds a widget.",
@@ -579,7 +698,8 @@ public sealed class OpenAiReviewLlmTests
             Config: ReviewConfig.Default with
             {
                 Review = ReviewConfig.Default.Review with { AgenticContext = agenticContext }
-            });
+            },
+            MaxOutputTokens: maxOutputTokens);
 
     private sealed class FakeOpenAiChatClient(params object[] outcomes) : IOpenAiChatClient
     {
