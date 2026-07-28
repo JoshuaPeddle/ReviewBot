@@ -1,0 +1,38 @@
+name: Index only the paths that changed in a push
+category: cross_file_body
+difficulty: high
+description: |
+  Add an incremental indexing path that filters parsed symbol rows down to the
+  changed paths for a commit and writes that batch, instead of re-indexing the
+  whole repository on every push.
+notes: |
+  Maintainer notes (not shown to the model — the loader ignores this key).
+
+  The corpus's TWO-HOP fixture, and the first one deliberately aimed past what
+  retrieval can reach. Retrieval is one hop: CSharpDiffSymbolExtractor pulls
+  symbols named in the diff and SqliteRetrievalProvider fetches their definitions
+  and callers. A symbol referenced only INSIDE a retrieved definition is never
+  fetched.
+
+  The chain:
+    hop 0  IncrementalSymbolIndexer.IndexChangedPaths  (added by this diff)
+    hop 1  SymbolBatchWriter.WriteBatch                (named in the diff, retrievable)
+    hop 2  SymbolBatchValidator.EnsureNotEmpty         (NOT named in the diff)
+
+  The bug: the LINQ filter on changedPaths can produce an empty array — a push
+  touching only non-code files, or paths the parser yielded no symbols for — and
+  EnsureNotEmpty throws ArgumentException on an empty batch. Indexing then fails
+  for that commit and the review proceeds with no retrieval context.
+
+  Verified structurally before authoring the expectation: the diff contains the
+  string "WriteBatch" and does NOT contain "EnsureNotEmpty", so the invariant is
+  genuinely out of retrieval's reach.
+
+  What makes it solvable rather than unfair: the model does see WriteBatch's body
+  via retrieval, and that body's first statement names EnsureNotEmpty. So the name
+  alone should be enough to infer the constraint and connect it to a filter that
+  can empty the batch. It is a reasoning test, not a lookup test.
+
+  If the model fails this, that is real headroom and a concrete argument for
+  transitive retrieval (following symbols named inside retrieved bodies). If it
+  passes, one-hop retrieval plus name inference is demonstrably sufficient here.

@@ -1,0 +1,12 @@
+{
+  "summary": "The new incremental path can filter a batch down to empty, which the writer rejects two calls away.",
+  "comments": [
+    {
+      "path": "src/ReviewBot.Retrieval/Indexing/IncrementalSymbolIndexer.cs",
+      "line": 32,
+      "severity": "warning",
+      "confidence": "high",
+      "body": "A push that touches no files carrying symbols leaves `rows` empty, and WriteBatch rejects that through SymbolBatchValidator.EnsureNotEmpty, so indexing throws for the commit and the review loses its retrieval context. Return early when the filtered batch is empty."
+    }
+  ]
+}
