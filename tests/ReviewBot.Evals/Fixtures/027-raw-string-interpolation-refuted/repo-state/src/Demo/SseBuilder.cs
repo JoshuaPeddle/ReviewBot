@@ -7,7 +7,7 @@ public static class SseBuilder
     public static string Chunk(string content)
     {
         var delta = $$"""
-            {"id":"c1","choices":[{"delta":{"content":{{JsonSerializer.Serialize(content)}}}}]}
+            {"content":{{JsonSerializer.Serialize(content)}},"done":false}
             """;
 
         return $"data: {delta}\n\n";
