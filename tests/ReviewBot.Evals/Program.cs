@@ -31,8 +31,14 @@ public static class EvalCli
                   dotnet run --project tests/ReviewBot.Evals -- score --fixtures <dir> --results <dir> [--out <run.json>]
                   dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>] [--context-tokens 32768] [--per-fixture-timeout 240] [--request-timeout 180] [--max-tokens 4096] [--temperature 0.2] [--top-p 0.95] [--top-k 20] [--min-p 0.0] [--presence-penalty 0.0] [--repetition-penalty 1.0] [--seed 1] [--self-critique true|false] [--index-cache-dir <dir>]
                   dotnet run --project tests/ReviewBot.Evals -- compare <baseline-run.json> <candidate-run.json> [--out <comparison.json>]
+                  dotnet run --project tests/ReviewBot.Evals -- aggregate <run-1.json> <run-2.json> [<run-n.json> ...] [--out <aggregate.json>]
                 """).ConfigureAwait(false);
             return 0;
+        }
+
+        if (string.Equals(args[0], "aggregate", StringComparison.OrdinalIgnoreCase))
+        {
+            return await RunAggregateAsync(args, output, error).ConfigureAwait(false);
         }
 
         if (string.Equals(args[0], "run-live", StringComparison.OrdinalIgnoreCase))
@@ -222,24 +228,67 @@ public static class EvalCli
     private static async Task<int> RunCompareAsync(string[] args, TextWriter output, TextWriter error)
     {
         var outputPath = ReadOption(args, "--out");
-        var positionalArgs = ReadPositionals(args);
+        var baselinePaths = ReadOptions(args, "--baseline");
+        var candidatePaths = ReadOptions(args, "--candidate");
 
-        if (positionalArgs.Length != 2)
+        // Positional form kept for the single-run case: `compare a.json b.json`.
+        if (baselinePaths.Length == 0 && candidatePaths.Length == 0)
         {
-            await error.WriteLineAsync("The compare command requires <baseline-run.json> and <candidate-run.json>.").ConfigureAwait(false);
+            var positionalArgs = ReadPositionals(args);
+            if (positionalArgs.Length != 2)
+            {
+                await error.WriteLineAsync(
+                    "The compare command requires <baseline-run.json> and <candidate-run.json>, "
+                    + "or repeated --baseline/--candidate options.").ConfigureAwait(false);
+                return 2;
+            }
+
+            baselinePaths = [positionalArgs[0]];
+            candidatePaths = [positionalArgs[1]];
+        }
+
+        if (baselinePaths.Length == 0 || candidatePaths.Length == 0)
+        {
+            await error.WriteLineAsync("Both --baseline and --candidate must be given at least once.")
+                .ConfigureAwait(false);
             return 2;
         }
 
         try
         {
-            var baseline = await ReadRunScoreAsync(positionalArgs[0]).ConfigureAwait(false);
-            var candidate = await ReadRunScoreAsync(positionalArgs[1]).ConfigureAwait(false);
-            var comparison = new EvalRunComparer().Compare(baseline, candidate);
+            var baselineRuns = new List<EvalRunScore>();
+            foreach (var path in baselinePaths)
+            {
+                baselineRuns.Add(await ReadRunScoreAsync(path).ConfigureAwait(false));
+            }
 
+            var candidateRuns = new List<EvalRunScore>();
+            foreach (var path in candidatePaths)
+            {
+                candidateRuns.Add(await ReadRunScoreAsync(path).ConfigureAwait(false));
+            }
+
+            // The per-fixture table still compares one run against one run, because a
+            // fixture either passed or did not in a given run. The spread verdict below
+            // is what says whether the headline delta means anything.
+            var comparison = new EvalRunComparer().Compare(baselineRuns[0], candidateRuns[0]);
             await WriteCompareTableAsync(comparison, output).ConfigureAwait(false);
             if (outputPath is not null)
             {
                 await WriteJsonAsync(comparison, outputPath, TextWriter.Null).ConfigureAwait(false);
+            }
+
+            if (baselineRuns.Count > 1 || candidateRuns.Count > 1)
+            {
+                await WriteSpreadVerdictAsync(baselineRuns, candidateRuns, output).ConfigureAwait(false);
+            }
+            else
+            {
+                await output.WriteLineAsync().ConfigureAwait(false);
+                await output.WriteLineAsync(
+                    "NOTE: one run per arm. This corpus moves by about 2 fixtures between identical "
+                    + "runs, so a delta of that size is not evidence. Pass --baseline/--candidate "
+                    + "repeatedly to compare spreads.").ConfigureAwait(false);
             }
 
             return comparison.RegressedFixtures == 0 ? 0 : 1;
@@ -250,6 +299,132 @@ public static class EvalCli
             return 1;
         }
     }
+
+    /// <summary>
+    /// Reports each arm's mean and range, and how many fixtures are unstable across all
+    /// the runs pooled together.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately does not emit a significant/not-significant verdict. The obvious rule
+    /// — "delta beats the within-arm range" — is wrong at these sample sizes, and wrong in
+    /// the dangerous direction. Two arms of this corpus each scored an identical F1 across
+    /// their runs while failing *different* fixtures each time, so the within-arm range was
+    /// zero and any threshold built on it called a provably inert change a regression.
+    /// The pooled instability count is the honest summary: it says how many fixtures are
+    /// capable of moving on their own, and the reader weighs the delta against that.
+    /// </remarks>
+    private static async Task WriteSpreadVerdictAsync(
+        IReadOnlyList<EvalRunScore> baselineRuns,
+        IReadOnlyList<EvalRunScore> candidateRuns,
+        TextWriter output)
+    {
+        var aggregator = new EvalRunAggregator();
+        var baseline = aggregator.Aggregate(baselineRuns);
+        var candidate = aggregator.Aggregate(candidateRuns);
+        var pooled = aggregator.Aggregate([.. baselineRuns, .. candidateRuns]);
+        var deltaF1 = candidate.F1.Mean - baseline.F1.Mean;
+        var deltaPassed = candidate.PassedFixtures.Mean - baseline.PassedFixtures.Mean;
+
+        await output.WriteLineAsync().ConfigureAwait(false);
+        await output.WriteLineAsync(
+            $"Baseline  n={baseline.Runs}  F1 {FormatScore(baseline.F1.Mean)} "
+            + $"[{FormatScore(baseline.F1.Min)}-{FormatScore(baseline.F1.Max)}]  "
+            + $"passed {FormatScore(baseline.PassedFixtures.Mean)}/{baseline.TotalFixtures}").ConfigureAwait(false);
+        await output.WriteLineAsync(
+            $"Candidate n={candidate.Runs}  F1 {FormatScore(candidate.F1.Mean)} "
+            + $"[{FormatScore(candidate.F1.Min)}-{FormatScore(candidate.F1.Max)}]  "
+            + $"passed {FormatScore(candidate.PassedFixtures.Mean)}/{candidate.TotalFixtures}").ConfigureAwait(false);
+        await output.WriteLineAsync(
+            $"Delta     mean F1 {FormatDelta(deltaF1)}, mean passed {FormatDelta(deltaPassed)} fixture(s)")
+            .ConfigureAwait(false);
+
+        var unstable = pooled.UnstableFixtures.Count;
+        await output.WriteLineAsync(
+            unstable == 0
+                ? $"Across all {pooled.Runs} runs pooled, every fixture was stable."
+                : $"Across all {pooled.Runs} runs pooled, {unstable} of {pooled.TotalFixtures} fixture(s) flipped on "
+                  + $"their own. Weigh the {FormatDelta(deltaPassed)}-fixture delta against that before calling it an effect.")
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<int> RunAggregateAsync(string[] args, TextWriter output, TextWriter error)
+    {
+        var outputPath = ReadOption(args, "--out");
+        var runPaths = ReadPositionals(args);
+
+        if (runPaths.Length < 2)
+        {
+            await error.WriteLineAsync(
+                "The aggregate command requires at least two run score files. One run cannot show a spread.")
+                .ConfigureAwait(false);
+            return 2;
+        }
+
+        try
+        {
+            var runs = new List<EvalRunScore>(runPaths.Length);
+            foreach (var path in runPaths)
+            {
+                runs.Add(await ReadRunScoreAsync(path).ConfigureAwait(false));
+            }
+
+            var aggregate = new EvalRunAggregator().Aggregate(runs);
+            await WriteAggregateTableAsync(aggregate, output).ConfigureAwait(false);
+            if (outputPath is not null)
+            {
+                await WriteJsonAsync(aggregate, outputPath, TextWriter.Null).ConfigureAwait(false);
+            }
+
+            return 0;
+        }
+        catch (Exception exception) when (exception is JsonException or IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            await error.WriteLineAsync(exception.Message).ConfigureAwait(false);
+            return 1;
+        }
+    }
+
+    private static async Task WriteAggregateTableAsync(EvalRunAggregate aggregate, TextWriter output)
+    {
+        await output.WriteLineAsync($"Aggregate over {aggregate.Runs} run(s) of {aggregate.TotalFixtures} fixture(s)")
+            .ConfigureAwait(false);
+        if (aggregate.AbortedFixtures > 0)
+        {
+            await output.WriteLineAsync($"  {aggregate.AbortedFixtures} fixture run(s) aborted and were excluded")
+                .ConfigureAwait(false);
+        }
+
+        await output.WriteLineAsync().ConfigureAwait(false);
+        await output.WriteLineAsync("Metric          Mean     Min      Max      Range").ConfigureAwait(false);
+        await output.WriteLineAsync("--------------  -------  -------  -------  -------").ConfigureAwait(false);
+        await WriteMetricRowAsync(output, "precision", aggregate.Precision).ConfigureAwait(false);
+        await WriteMetricRowAsync(output, "recall", aggregate.Recall).ConfigureAwait(false);
+        await WriteMetricRowAsync(output, "f1", aggregate.F1).ConfigureAwait(false);
+        await WriteMetricRowAsync(output, "passed", aggregate.PassedFixtures).ConfigureAwait(false);
+
+        var unstable = aggregate.UnstableFixtures;
+        await output.WriteLineAsync().ConfigureAwait(false);
+        if (unstable.Count == 0)
+        {
+            await output.WriteLineAsync("Every fixture was stable across these runs.").ConfigureAwait(false);
+            return;
+        }
+
+        // The spread above is produced by these fixtures. Naming them stops the next
+        // reader from reading a difference smaller than the spread as a real effect.
+        await output.WriteLineAsync(
+            $"{unstable.Count} fixture(s) flipped between runs — a delta smaller than the range above is not resolvable:")
+            .ConfigureAwait(false);
+        foreach (var rate in unstable)
+        {
+            await output.WriteLineAsync($"  {rate.Passed}/{rate.Runs}  {rate.FixtureName}").ConfigureAwait(false);
+        }
+    }
+
+    private static Task WriteMetricRowAsync(TextWriter output, string name, MetricSpread spread) =>
+        output.WriteLineAsync(
+            $"{name,-14}  {FormatScore(spread.Mean),7}  {FormatScore(spread.Min),7}  " +
+            $"{FormatScore(spread.Max),7}  {FormatScore(spread.Range),7}");
 
     private static async Task<EvalRunScore> ReadRunScoreAsync(string path)
     {
@@ -321,6 +496,21 @@ public static class EvalCli
         }
 
         return null;
+    }
+
+    /// <summary>All values given for a repeatable option, in the order they appeared.</summary>
+    private static string[] ReadOptions(string[] args, string name)
+    {
+        var values = new List<string>();
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+            {
+                values.Add(args[i + 1]);
+            }
+        }
+
+        return values.ToArray();
     }
 
     private static bool ParseBool(string? value, bool defaultValue) =>
