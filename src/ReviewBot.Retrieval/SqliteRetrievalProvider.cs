@@ -57,11 +57,21 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
             return new RetrievalContextResult([], budget, lookup.SymbolsQueried);
         }
 
+        var pathsSentInFull = GetPathsSentInFull(request);
         var snippets = new List<RepositoryContextSnippet>();
         var updated = budget;
         var remainingRetrievalTokens = tokenLimit;
         foreach (var symbol in lookup.Symbols)
         {
+            // A file whose whole content is already in the prompt gains nothing from a
+            // snippet cut out of it. Skipping before the budget is charged hands that
+            // room to the next symbol down the ranking — code that is genuinely absent,
+            // which is the only kind retrieval exists to supply.
+            if (pathsSentInFull.Contains(symbol.Path))
+            {
+                continue;
+            }
+
             // Prefer the brace-balanced body for method definitions; fall back to the
             // signature line for other kinds (types, fields) and usages where no body exists.
             var hasBody = symbol.Body is not null && symbol.BodyStartLine.HasValue && symbol.BodyEndLine.HasValue;
@@ -100,6 +110,39 @@ public sealed class SqliteRetrievalProvider : IRetrievalProvider
         }
 
         return new RetrievalContextResult(snippets, updated, lookup.SymbolsQueried);
+    }
+
+    /// <summary>
+    /// Paths whose entire head content is already in the prompt, so a retrieved snippet
+    /// from them would be a third copy of the same code.
+    /// </summary>
+    /// <remarks>
+    /// Measured before this existed: on 15 of the 27 corpus fixtures, <em>every</em>
+    /// retrieval snippet came from a file the prompt already carried in full, and on a
+    /// live review of a 10-file PR retrieval spent ~26K tokens across 120 snippets —
+    /// enough of the content budget to push the diff over what remained and force a
+    /// chunk split. Repeating code the model already has also concentrates its attention
+    /// on code that is merely nearby rather than on what the diff changed.
+    ///
+    /// Two sources, because callers differ in whether full-file content has been fetched
+    /// yet. When it has (the eval harness fetches first) its keys are ground truth. When
+    /// it has not (the worker runs retrieval first, so the budget can be shared out
+    /// before the larger fetch) the same <see cref="FullFileContextSelector"/> the worker
+    /// will apply predicts the set. A prediction that misses — the fetch 404s, or the
+    /// file no longer fits the budget — costs only the out-of-hunk regions of a
+    /// <em>changed</em> file, whose diff is in the prompt regardless.
+    /// </remarks>
+    private static IReadOnlySet<string> GetPathsSentInFull(ReviewRequest request)
+    {
+        if (request.FullFileContents is { Count: > 0 } fetched)
+        {
+            return fetched.Keys.ToHashSet(StringComparer.Ordinal);
+        }
+
+        return FullFileContextSelector
+            .SelectCandidates(request.Files, request.Config.Review.FullFileMaxBytes)
+            .Select(file => file.Path)
+            .ToHashSet(StringComparer.Ordinal);
     }
 
     private static int CalculateRetrievalTokenLimit(RetrievalConfig config, PromptBudget budget)
