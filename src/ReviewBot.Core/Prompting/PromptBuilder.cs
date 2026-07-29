@@ -265,7 +265,8 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
         }
 
         var hasRepositoryContext = PromptSections.AppendRepositoryContext(prompt, request.RepositoryContext);
-        prompt.Append(hasRepositoryContext ? "\nChanged Files:\n" : "\n\nChanged Files:\n");
+        var hasLanguageFacts = PromptSections.AppendLanguageFacts(prompt, request.LanguageFacts);
+        prompt.Append(hasRepositoryContext || hasLanguageFacts ? "\nChanged Files:\n" : "\n\nChanged Files:\n");
 
         PromptSections.AppendChangedFiles(
             prompt,

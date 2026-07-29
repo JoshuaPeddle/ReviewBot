@@ -84,6 +84,41 @@ internal static class PromptSections
     }
 
     /// <summary>
+    /// Renders compiler-settled facts about constructs in the diff. Returns false when
+    /// there were none.
+    /// </summary>
+    /// <remarks>
+    /// Placed before the diff on purpose: the model should have the answer in hand before
+    /// it reads the code and forms a view, not after.
+    /// </remarks>
+    public static bool AppendLanguageFacts(StringBuilder prompt, IReadOnlyList<LanguageFact>? facts)
+    {
+        if (facts is null || facts.Count == 0)
+        {
+            return false;
+        }
+
+        prompt.Append("\n\n## Verified language facts\n");
+        prompt.Append(
+            "Computed from the syntax tree, not inferred. These are ground truth: do not contradict "
+            + "them, and do not raise a concern that depends on one of them being false.\n");
+        foreach (var fact in facts
+            .OrderBy(fact => fact.Path, StringComparer.Ordinal)
+            .ThenBy(fact => fact.Line))
+        {
+            prompt.Append("- ");
+            prompt.Append(fact.Path);
+            prompt.Append(" line ");
+            prompt.Append(fact.Line);
+            prompt.Append(": ");
+            prompt.Append(fact.Fact);
+            prompt.Append('\n');
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Normalises line endings and breaks any literal triple-backtick run with a
     /// zero-width space, so file content cannot close the surrounding fence and inject
     /// prompt instructions to the model.

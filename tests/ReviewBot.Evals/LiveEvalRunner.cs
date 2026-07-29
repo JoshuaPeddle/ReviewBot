@@ -10,6 +10,7 @@ using ReviewBot.Core.Prompting;
 using ReviewBot.Llm.OpenAi;
 using ReviewBot.Retrieval;
 using ReviewBot.Retrieval.Indexing;
+using ReviewBot.Grounding.Languages.DotNet;
 using ReviewBot.Retrieval.Symbols;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -269,6 +270,14 @@ public sealed class LiveEvalRunner
             {
                 request = request with { FullFileContents = fullFileContents };
             }
+
+            // Same compiler-settled facts the worker states, from the same extractor, so
+            // the corpus measures the prompt the product actually sends.
+            var languageFacts = ExtractLanguageFacts(files, repoState);
+            if (languageFacts.Count > 0)
+            {
+                request = request with { LanguageFacts = languageFacts };
+            }
         }
 
         if (!options.RetrievalEnabled || !hasRepoState)
@@ -329,6 +338,26 @@ public sealed class LiveEvalRunner
         }
 
         return contents;
+    }
+
+    private static IReadOnlyList<LanguageFact> ExtractLanguageFacts(
+        IReadOnlyList<FileChange> files,
+        string repoStateDirectory)
+    {
+        var facts = new List<LanguageFact>();
+        foreach (var file in files.Where(file => file.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)))
+        {
+            var path = Path.Combine(repoStateDirectory, file.Path.Replace('/', Path.DirectorySeparatorChar));
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            facts.AddRange(RoslynLiteralFactExtractor.Extract(
+                file.Path, File.ReadAllText(path), file.CommentableLines));
+        }
+
+        return facts;
     }
 
     private static string HashContent(string content)

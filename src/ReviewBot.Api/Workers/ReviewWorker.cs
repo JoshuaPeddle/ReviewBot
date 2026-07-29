@@ -402,6 +402,7 @@ public sealed class ReviewWorker : BackgroundService
         promptBudget = fullFileContext.Budget;
         var reviewChunks = PlanReviewChunks(files, config, promptBudget, job);
         var selfCritiqueContext = new SelfCritiqueContext(repositoryContext, fullFileContents);
+        var languageFacts = BuildLanguageFacts(files, fullFileContents, job);
         ReviewResult result;
         IReadOnlyList<InlineComment> candidateComments;
         IReadOnlyList<InlineComment> rawCandidateComments;
@@ -425,6 +426,7 @@ public sealed class ReviewWorker : BackgroundService
                     installationToken.Token,
                     promptBudget.ResponseReserveTokens,
                     isIncrementalUpdate,
+                    languageFacts,
                     ct)
                 .ConfigureAwait(false);
             result = ReviewResultMerger.Merge(chunkOutcomes.Select(o => o.Result).ToArray());
@@ -457,7 +459,8 @@ public sealed class ReviewWorker : BackgroundService
                 fullFileContents,
                 repositoryContext,
                 MaxOutputTokens: promptBudget.ResponseReserveTokens,
-                IsIncrementalUpdate: isIncrementalUpdate);
+                IsIncrementalUpdate: isIncrementalUpdate,
+                LanguageFacts: languageFacts);
 
             var prompt = PromptBuilder.Build(request);
             ReviewResult singleChunkResult;
@@ -871,6 +874,7 @@ public sealed class ReviewWorker : BackgroundService
         string installationToken,
         int maxOutputTokens,
         bool isIncrementalUpdate,
+        IReadOnlyList<LanguageFact>? languageFacts,
         CancellationToken ct)
     {
         ChunkReviewOutcome?[] outcomes;
@@ -888,6 +892,7 @@ public sealed class ReviewWorker : BackgroundService
                     installationToken,
                     maxOutputTokens,
                     isIncrementalUpdate,
+                    languageFacts,
                     ct)))
                 .ConfigureAwait(false);
         }
@@ -908,6 +913,7 @@ public sealed class ReviewWorker : BackgroundService
                         installationToken,
                         maxOutputTokens,
                         isIncrementalUpdate,
+                        languageFacts,
                         ct)
                     .ConfigureAwait(false));
             }
@@ -961,6 +967,7 @@ public sealed class ReviewWorker : BackgroundService
         string installationToken,
         int maxOutputTokens,
         bool isIncrementalUpdate,
+        IReadOnlyList<LanguageFact>? languageFacts,
         CancellationToken ct)
     {
         try
@@ -977,6 +984,7 @@ public sealed class ReviewWorker : BackgroundService
                     installationToken,
                     maxOutputTokens,
                     isIncrementalUpdate,
+                    languageFacts,
                     ct)
                 .ConfigureAwait(false);
         }
@@ -1005,6 +1013,7 @@ public sealed class ReviewWorker : BackgroundService
         string installationToken,
         int maxOutputTokens,
         bool isIncrementalUpdate,
+        IReadOnlyList<LanguageFact>? languageFacts,
         CancellationToken ct)
     {
         using var chunkActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.chunk_review");
@@ -1024,7 +1033,8 @@ public sealed class ReviewWorker : BackgroundService
             ChunkIndex: chunk.Index,
             TotalChunks: chunk.TotalChunks,
             MaxOutputTokens: maxOutputTokens,
-            IsIncrementalUpdate: isIncrementalUpdate);
+            IsIncrementalUpdate: isIncrementalUpdate,
+            LanguageFacts: FilterLanguageFacts(languageFacts, chunk.Files));
 
         var prompt = PromptBuilder.Build(request);
         ReviewResult result;
@@ -1099,6 +1109,99 @@ public sealed class ReviewWorker : BackgroundService
             .Distinct(StringComparer.Ordinal)
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToArray();
+    }
+
+    /// <summary>
+    /// Compiler-settled facts about constructs in the changed C# files, for the prompt.
+    /// </summary>
+    /// <remarks>
+    /// Uses content we already have rather than forcing a clone: the full file when it was
+    /// fetched for context, otherwise the reconstructed content of an added file, whose
+    /// patch is the whole file. A modified file with no full-file context yields nothing,
+    /// which simply leaves behaviour as it was.
+    /// </remarks>
+    private IReadOnlyList<LanguageFact>? BuildLanguageFacts(
+        IReadOnlyList<FileChange> files,
+        IReadOnlyDictionary<string, string>? fullFileContents,
+        ReviewJob job)
+    {
+        var facts = new List<LanguageFact>();
+        foreach (var file in files.Where(file => file.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)))
+        {
+            var source = fullFileContents?.GetValueOrDefault(file.Path) ?? TryReconstructAddedFile(file);
+            if (source is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                facts.AddRange(RoslynLiteralFactExtractor.Extract(file.Path, source, file.CommentableLines));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogDebug(ex, "Language facts: could not analyse {Path}; skipping", file.Path);
+            }
+        }
+
+        if (facts.Count == 0)
+        {
+            return null;
+        }
+
+        logger.LogInformation(
+            "Language facts: stated {FactCount} compiler-settled fact(s) for {Owner}/{Repo}#{PrNumber}",
+            facts.Count,
+            job.Owner,
+            job.Repo,
+            job.PrNumber);
+        return facts;
+    }
+
+    /// <summary>Narrows the facts to the files a chunk actually contains.</summary>
+    private static IReadOnlyList<LanguageFact>? FilterLanguageFacts(
+        IReadOnlyList<LanguageFact>? facts,
+        IReadOnlyList<FileChange> chunkFiles)
+    {
+        if (facts is null || facts.Count == 0)
+        {
+            return null;
+        }
+
+        var paths = chunkFiles.Select(file => file.Path).ToHashSet(StringComparer.Ordinal);
+        var scoped = facts.Where(fact => paths.Contains(fact.Path)).ToArray();
+        return scoped.Length == 0 ? null : scoped;
+    }
+
+    /// <summary>
+    /// The content of a newly added file, taken from its patch (every line is an addition).
+    /// Null for anything else, where the patch holds only fragments.
+    /// </summary>
+    private static string? TryReconstructAddedFile(FileChange file)
+    {
+        if (file.Status != FileChangeStatus.Added || string.IsNullOrEmpty(file.Patch))
+        {
+            return null;
+        }
+
+        var content = new StringBuilder();
+        foreach (var line in file.Patch.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        {
+            if (line.StartsWith("@@", StringComparison.Ordinal) || line.StartsWith('\\'))
+            {
+                continue;
+            }
+
+            if (!line.StartsWith('+'))
+            {
+                // A context or deleted line means this is not a pure addition after all.
+                return null;
+            }
+
+            content.Append(line[1..]).Append('\n');
+        }
+
+        return content.Length == 0 ? null : content.ToString();
     }
 
     private static IReadOnlyList<FileChange> GetReviewedChunkFiles(IReadOnlyList<ReviewChunk> chunks) =>
