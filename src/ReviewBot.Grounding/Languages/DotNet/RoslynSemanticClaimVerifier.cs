@@ -110,11 +110,19 @@ public static class RoslynSemanticClaimVerifier
             : SemanticVerdict.Unknown;
     }
 
+    /// <summary>
+    /// Only a multi-line raw string literal token, whose ValueText is the string content.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately excludes the interpolated start tokens and single-line raw strings.
+    /// An interpolated start token carries only the opening delimiter, so its ValueText
+    /// never begins with a newline and testing it would refute on a meaningless basis;
+    /// and the newline-stripping rule the claim describes applies to multi-line raw
+    /// strings only. Both cases now fall through to Unknown and the comment survives,
+    /// which is the conservative direction. Caught by ReviewBot reviewing this change.
+    /// </remarks>
     private static bool IsRawStringToken(SyntaxToken token) =>
-        token.IsKind(SyntaxKind.SingleLineRawStringLiteralToken) ||
-        token.IsKind(SyntaxKind.MultiLineRawStringLiteralToken) ||
-        token.IsKind(SyntaxKind.InterpolatedMultiLineRawStringStartToken) ||
-        token.IsKind(SyntaxKind.InterpolatedSingleLineRawStringStartToken);
+        token.IsKind(SyntaxKind.MultiLineRawStringLiteralToken);
 
     private static TextSpan? TryGetLineSpan(SyntaxTree tree, int line)
     {

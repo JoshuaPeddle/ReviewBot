@@ -66,6 +66,32 @@ public sealed class RoslynSemanticClaimVerifierTests
     }
 
     [Fact]
+    public void DoesNotRefuteTheNewlineClaimFromAnInterpolatedStartToken()
+    {
+        // An interpolated raw string's start token carries only the opening delimiter, so
+        // its ValueText never begins with a newline. Testing it would refute on a
+        // meaningless basis; the content lives in the interpolated expression's parts.
+        RoslynSemanticClaimVerifier.Verify(
+                SemanticClaimKind.RawStringRetainsOpeningNewline, DoubleDollarRawString, line: 8)
+            .Should().Be(SemanticVerdict.Unknown);
+    }
+
+    [Fact]
+    public void DoesNotRefuteTheNewlineClaimForASingleLineRawString()
+    {
+        // The stripping rule the claim describes applies to multi-line raw strings only.
+        var source = string.Join('\n',
+            "public static class Single",
+            "{",
+            "    public const string Value = " + Q3 + "hello" + Q3 + ";",
+            "}");
+
+        RoslynSemanticClaimVerifier.Verify(
+                SemanticClaimKind.RawStringRetainsOpeningNewline, source, line: 3)
+            .Should().Be(SemanticVerdict.Unknown);
+    }
+
+    [Fact]
     public void ReturnsUnknownWhenNoSuchConstructIsNearTheLine()
     {
         RoslynSemanticClaimVerifier.Verify(
