@@ -552,7 +552,12 @@ public sealed class ReviewWorker : BackgroundService
             // survived, so the counts can never disagree with the posted comments.
             result = result with
             {
-                Summary = BuildFindingsSummary(result.Summary, candidateComments, reviewChunks)
+                Summary = BuildFindingsSummary(
+                    result.Summary,
+                    candidateComments,
+                    reviewedFileCount: chunkOutcomes?.Sum(o => o.ChunkFiles?.Count ?? 0) ?? files.Count,
+                    reviewedChunkCount: chunkOutcomes?.Count ?? 1,
+                    failedChunkCount: Math.Max(0, reviewChunks.Count - (chunkOutcomes?.Count ?? 1)))
             };
         }
 
@@ -1116,20 +1121,39 @@ public sealed class ReviewWorker : BackgroundService
     /// When nothing survived, the prose is dropped rather than shown: it would be
     /// describing findings that are not on the page.
     /// </remarks>
+    /// <param name="reviewedFileCount">
+    /// Files in the chunks that actually produced a result — not the files that were
+    /// planned. A chunk whose response was unusable is dropped so the rest of the review
+    /// can still post, and counting its files here would credit the bot for reading code
+    /// no model ever saw.
+    /// </param>
+    /// <param name="failedChunkCount">
+    /// Chunks that returned nothing usable. Any value above zero means the review is
+    /// partial, which has to be said out loud: "no actionable issues were found" over a
+    /// half-failed review reads as a clean bill of health for files nobody reviewed.
+    /// </param>
     private static string BuildFindingsSummary(
         string? modelSummary,
         IReadOnlyList<InlineComment> comments,
-        IReadOnlyList<ReviewChunk> chunks)
+        int reviewedFileCount,
+        int reviewedChunkCount,
+        int failedChunkCount)
     {
-        var reviewedFileCount = chunks.Sum(chunk => chunk.Files.Count);
-        var chunkCount = chunks.Count;
-        var prefix = chunkCount > 1
-            ? $"Reviewed {reviewedFileCount} file(s) across {chunkCount} chunk(s)."
+        var prefix = reviewedChunkCount > 1
+            ? $"Reviewed {reviewedFileCount} file(s) across {reviewedChunkCount} chunk(s)."
             : $"Reviewed {reviewedFileCount} file(s).";
+
+        var partialNote = failedChunkCount == 0
+            ? string.Empty
+            : $" ⚠️ {failedChunkCount} of {reviewedChunkCount + failedChunkCount} chunk(s) could not be reviewed"
+                + " (the model returned no usable response), so this review is incomplete —"
+                + " re-run it with `/review` before relying on the result.";
 
         if (comments.Count == 0)
         {
-            return $"{prefix} No actionable issues were found.";
+            return failedChunkCount == 0
+                ? $"{prefix} No actionable issues were found."
+                : $"{prefix} No actionable issues were found in the part that was reviewed.{partialNote}";
         }
 
         var highestSeverity = comments.Max(comment => comment.Severity).ToString().ToLowerInvariant();
@@ -1144,7 +1168,7 @@ public sealed class ReviewWorker : BackgroundService
         var pathText = affectedPaths.Length == 0 ? string.Empty : $" Most affected files: {string.Join(", ", affectedPaths)}.";
         var verifiedCount = comments.Count(comment => comment.Verification == VerificationStatus.Verified);
         var verifiedText = verifiedCount == 0 ? string.Empty : $" {verifiedCount} corroborated against ground truth.";
-        var facts = $"{prefix} Found {issueText}; highest severity: {highestSeverity}.{pathText}{verifiedText}";
+        var facts = $"{prefix} Found {issueText}; highest severity: {highestSeverity}.{pathText}{verifiedText}{partialNote}";
 
         return string.IsNullOrWhiteSpace(modelSummary)
             ? facts

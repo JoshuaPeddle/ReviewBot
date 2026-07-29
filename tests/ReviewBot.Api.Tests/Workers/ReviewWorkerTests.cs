@@ -1008,6 +1008,81 @@ public class ReviewWorkerTests
         selfCritiqueCalls.Should().Be(1);
     }
 
+    /// <summary>
+    /// A chunk whose response is unusable is dropped so the rest of the review can still
+    /// post. The summary must say so, and must not count that chunk's files as reviewed.
+    /// </summary>
+    /// <remarks>
+    /// Caught by dogfooding PR #52: one of two chunks exhausted its output allowance and
+    /// returned nothing, and the bot posted "Reviewed 10 file(s) across 2 chunk(s). No
+    /// actionable issues were found." Five of those files had never been reviewed by any
+    /// model, so a half-failed review read as a clean bill of health.
+    /// </remarks>
+    [Fact]
+    public async Task SummaryReportsPartialCoverageWhenAChunkReturnsNothingUsable()
+    {
+        var estimator = new KeywordTokenEstimator(
+            new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                ["chunk-token"] = 10
+            });
+        await using var fixture = new WorkerFixture(
+            modelContextRegistry: new FixedModelContextRegistry(20),
+            tokenEstimator: estimator);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                ResponseReserveTokens = 0,
+                ChunkHeadroom = 0.5,
+                MaxChunks = 10,
+                SelfCritique = false
+            }
+        };
+        var files = Enumerable.Range(1, 3)
+            .Select(i => CreateFile($"src/File{i}.cs", "@@ -1 +1 @@\n+chunk-token", new HashSet<int> { 1 }))
+            .ToArray();
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var file = call.Arg<ReviewRequest>().Files.Single();
+                if (file.Path == "src/File2.cs")
+                {
+                    throw new LlmResponseUnusableException("model exhausted its output allowance");
+                }
+
+                return new ReviewResult($"Reviewed {file.Path}.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult.Should().NotBeNull();
+        // Two of three chunks produced a result, so two files were reviewed — not three.
+        postedResult!.Summary.Should().Contain("Reviewed 2 file(s)");
+        postedResult.Summary.Should().NotContain("Reviewed 3 file(s)");
+        postedResult.Summary.Should().Contain("1 of 3 chunk(s) could not be reviewed");
+        postedResult.Summary.Should().Contain("this review is incomplete");
+        // The unqualified all-clear is what made the old summary misleading.
+        postedResult.Summary.Should().NotContain("No actionable issues were found.\n");
+    }
+
     [Fact]
     public async Task PromptBudgetingUsesProviderAwareTokenEstimatorForConfiguredModel()
     {
