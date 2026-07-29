@@ -10,9 +10,24 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
     private const int MaxLoggedRawResponseLength = 500;
 
     // How many times we may double the output allowance when a reasoning model spends
-    // the whole thing thinking and returns nothing. Two doublings take the 100K-context
-    // default from 12.5K to 50K, which leaves room for a ~30K prompt in the window.
-    private const int MaxEmptyResponseExpansions = 2;
+    // the whole thing thinking and returns nothing.
+    //
+    // One. A model that merely lacked room finishes at some size, so a single doubling
+    // settles the question; if the doubled attempt also consumes every token and still
+    // says nothing, the generation is not converging and each further doubling spends a
+    // whole extra generation to learn that again. Measured reviewing a 5-file chunk of
+    // this repo on Qwen3.6-27B: 12,500 then 25,000 then 50,000 completion tokens, every
+    // one of them 100% consumed with no content — 87,500 tokens to fail. Stopping after
+    // the first expansion caps the same failure at 37,500.
+    private const int MaxEmptyResponseExpansions = 1;
+
+    // An expanded allowance is never grown past this, however large the starting reserve.
+    // ContextBudget already treats a response reserve above a quarter of the window as
+    // unreasonable (MaxReserveContextDivisor), and doubling used to sail straight through
+    // that: on a 100K model the third attempt asked for 50,000 output tokens — half the
+    // entire window — for a reply that is a few thousand tokens of JSON. This only ever
+    // caps growth; a caller that deliberately configures a larger allowance keeps it.
+    private const int MaxExpandedOutputTokens = 32_000;
 
     // Providers do not always report completion tokens exactly equal to the allowance
     // when they truncate, so treat "near the ceiling" as having hit it.
@@ -165,20 +180,24 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
 
             var consumed = usage?.CompletionTokens ?? 0;
             var exhaustedAllowance = consumed >= allowance * OutputAllowanceExhaustedFraction;
-            if (attempt >= MaxEmptyResponseExpansions || !exhaustedAllowance)
+            var expanded = Math.Min(allowance * 2, MaxExpandedOutputTokens);
+            var canGrow = expanded > allowance;
+            if (attempt >= MaxEmptyResponseExpansions || !exhaustedAllowance || !canGrow)
             {
-                // Either we have grown the allowance as far as we are willing to, or the
-                // model stopped early for some other reason and more room would not help.
-                EmptyLlmResponse.ThrowIfUnusable(content, ProviderName, consumed, allowance);
+                // Either we have grown the allowance as far as we are willing to, the
+                // model stopped early for some other reason so more room would not help,
+                // or the allowance is already at the ceiling.
+                EmptyLlmResponse.ThrowIfUnusable(
+                    content, ProviderName, consumed, allowance, allowanceWasExpanded: attempt > 0);
             }
 
             logger.LogWarning(
                 "{Provider} consumed its entire {Allowance}-token output allowance without emitting content "
-                + "(reasoning model out of room); retrying with {NewAllowance}",
+                + "(reasoning model out of room); retrying once with {NewAllowance}",
                 ProviderName,
                 allowance,
-                allowance * 2);
-            allowance *= 2;
+                expanded);
+            allowance = expanded;
         }
     }
 

@@ -111,8 +111,16 @@ public sealed class OpenAiReviewLlmTests
         result.TokenUsage!.CompletionTokens.Should().Be(9096);
     }
 
+    /// <summary>
+    /// One expansion, then stop. A model that merely lacked room finishes at some size,
+    /// so a doubled attempt that also consumes everything and still says nothing has
+    /// already answered the question — each further doubling costs a whole generation to
+    /// learn it again. Reviewing a 5-file chunk of this repo on Qwen3.6-27B cost
+    /// 12,500 + 25,000 + 50,000 completion tokens, every one 100% consumed with no
+    /// content, before this was capped.
+    /// </summary>
     [Fact]
-    public async Task ReviewAsyncThrowsAfterExhaustingTheAllowanceExpansions()
+    public async Task ReviewAsyncStopsAfterASingleAllowanceExpansion()
     {
         var client = new FakeOpenAiChatClient(
             new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 4096)),
@@ -122,9 +130,67 @@ public sealed class OpenAiReviewLlmTests
 
         await llm.Invoking(l => l.ReviewAsync(CreateRequest(maxOutputTokens: 4096), CancellationToken.None))
             .Should().ThrowAsync<LlmResponseUnusableException>()
-            .WithMessage("*16384 completion tokens*response_reserve_tokens*");
+            .WithMessage("*8192 completion tokens*not converging*");
 
-        client.Requests.Should().HaveCount(3);
+        client.Requests.Should().HaveCount(2);
+        client.Requests.Select(request => request.MaxTokens).Should().Equal(4096, 8192);
+    }
+
+    /// <summary>
+    /// "Raise the reserve" is the right advice the first time and the wrong advice once a
+    /// raised reserve has demonstrably not helped.
+    /// </summary>
+    [Fact]
+    public async Task ReviewAsyncStopsAdvisingAReserveIncreaseOnceRaisingItHasNotHelped()
+    {
+        var client = new FakeOpenAiChatClient(
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 4096)),
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 8192)));
+        var llm = CreateLlm(client);
+
+        var thrown = await llm
+            .Invoking(l => l.ReviewAsync(CreateRequest(maxOutputTokens: 4096), CancellationToken.None))
+            .Should().ThrowAsync<LlmResponseUnusableException>();
+
+        thrown.Which.Message.Should().NotContain("response_reserve_tokens");
+        thrown.Which.Message.Should().Contain("max_patch_lines");
+    }
+
+    /// <summary>
+    /// An allowance already at the ceiling is not doubled. On a 100K model the old loop's
+    /// third attempt asked for 50,000 output tokens — half the whole window — for a reply
+    /// that is a few thousand tokens of JSON, well past the quarter-window ceiling
+    /// <c>ContextBudget</c> itself enforces on the response reserve.
+    /// </summary>
+    [Fact]
+    public async Task ReviewAsyncDoesNotExpandAnAllowanceAlreadyAtTheCeiling()
+    {
+        var client = new FakeOpenAiChatClient(
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 32_000)),
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 64_000)));
+        var llm = CreateLlm(client);
+
+        await llm.Invoking(l => l.ReviewAsync(CreateRequest(maxOutputTokens: 32_000), CancellationToken.None))
+            .Should().ThrowAsync<LlmResponseUnusableException>();
+
+        client.Requests.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task ReviewAsyncClampsTheExpandedAllowanceToTheCeiling()
+    {
+        var client = new FakeOpenAiChatClient(
+            new OpenAiChatResult(string.Empty, new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 20_000)),
+            new OpenAiChatResult(
+                """{"summary": "Done.", "comments": []}""",
+                new LlmTokenUsage(PromptTokens: 100, CompletionTokens: 900)));
+        var llm = CreateLlm(client);
+
+        var result = await llm.ReviewAsync(CreateRequest(maxOutputTokens: 20_000), CancellationToken.None);
+
+        result.Summary.Should().Be("Done.");
+        // Doubling would ask for 40,000; the ceiling holds it at 32,000.
+        client.Requests.Select(request => request.MaxTokens).Should().Equal(20_000, 32_000);
     }
 
     [Fact]
