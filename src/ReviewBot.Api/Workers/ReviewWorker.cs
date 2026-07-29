@@ -6,6 +6,7 @@ using Octokit;
 using ReviewBot.Api.Cost;
 using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
+using ReviewBot.Core.Diff;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
@@ -1128,7 +1129,10 @@ public sealed class ReviewWorker : BackgroundService
         var facts = new List<LanguageFact>();
         foreach (var file in files.Where(file => file.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)))
         {
-            var source = fullFileContents?.GetValueOrDefault(file.Path) ?? TryReconstructAddedFile(file);
+            var source = fullFileContents?.GetValueOrDefault(file.Path)
+                ?? (file.Status == FileChangeStatus.Added
+                    ? UnifiedDiffParser.TryReconstructAddedFileContent(file.Patch)
+                    : null);
             if (source is null)
             {
                 continue;
@@ -1171,37 +1175,6 @@ public sealed class ReviewWorker : BackgroundService
         var paths = chunkFiles.Select(file => file.Path).ToHashSet(StringComparer.Ordinal);
         var scoped = facts.Where(fact => paths.Contains(fact.Path)).ToArray();
         return scoped.Length == 0 ? null : scoped;
-    }
-
-    /// <summary>
-    /// The content of a newly added file, taken from its patch (every line is an addition).
-    /// Null for anything else, where the patch holds only fragments.
-    /// </summary>
-    private static string? TryReconstructAddedFile(FileChange file)
-    {
-        if (file.Status != FileChangeStatus.Added || string.IsNullOrEmpty(file.Patch))
-        {
-            return null;
-        }
-
-        var content = new StringBuilder();
-        foreach (var line in file.Patch.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
-        {
-            if (line.StartsWith("@@", StringComparison.Ordinal) || line.StartsWith('\\'))
-            {
-                continue;
-            }
-
-            if (!line.StartsWith('+'))
-            {
-                // A context or deleted line means this is not a pure addition after all.
-                return null;
-            }
-
-            content.Append(line[1..]).Append('\n');
-        }
-
-        return content.Length == 0 ? null : content.ToString();
     }
 
     private static IReadOnlyList<FileChange> GetReviewedChunkFiles(IReadOnlyList<ReviewChunk> chunks) =>
