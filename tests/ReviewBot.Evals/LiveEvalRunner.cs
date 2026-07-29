@@ -104,7 +104,7 @@ public sealed class LiveEvalRunner
                         // the self-critique LLM pass) so the corpus measures real product
                         // precision, not raw model output.
                         result = await ApplyNoiseFiltersAsync(
-                            llm, requestContext.Request.Files, result, config, fixtureCts.Token).ConfigureAwait(false);
+                            llm, requestContext.Request, result, config, fixtureCts.Token).ConfigureAwait(false);
                     }
 
                     status = "succeeded";
@@ -171,51 +171,48 @@ public sealed class LiveEvalRunner
         return results;
     }
 
-    // Reproduces the worker's noise-pruning: a deterministic MinConfidence gate followed
-    // by the self-critique LLM pass over the routed subset. ShouldCritique here is a
-    // subset of the worker's ShouldCritiqueComment (it omits the checkable/confirmation
-    // phrase routing), so the precision this measures is a conservative lower bound.
+    // Reproduces the worker's noise-pruning: the deterministic MinConfidence gate followed
+    // by the self-critique LLM pass over every surviving comment. The critique is handed
+    // the same repository context and full-file content the review pass saw, exactly as
+    // the worker does — without it the critic deletes findings that reason across files.
     private static async Task<ReviewResult> ApplyNoiseFiltersAsync(
         IReviewLlm llm,
-        IReadOnlyList<FileChange> files,
+        ReviewRequest request,
         ReviewResult result,
         ReviewConfig config,
         CancellationToken ct)
     {
-        var filtered = result.Comments
+        var candidates = result.Comments
             .Where(comment => comment.Confidence >= config.Review.MinConfidence)
             .ToArray();
-        if (filtered.Length == 0)
-        {
-            return result with { Comments = filtered };
-        }
-
-        static bool ShouldCritique(InlineComment comment) =>
-            comment.Confidence != Confidence.High || comment.Severity == Severity.Error;
-
-        var exempt = filtered.Where(comment => !ShouldCritique(comment)).ToArray();
-        var candidates = filtered.Where(ShouldCritique).ToArray();
         if (candidates.Length == 0)
         {
-            return result with { Comments = filtered };
+            return result with { Comments = candidates };
         }
 
         try
         {
-            var payload = SelfCritiquePromptBuilder.Build(files, candidates);
+            var payload = SelfCritiquePromptBuilder.Build(
+                request.Files,
+                candidates,
+                request.RepositoryContext,
+                request.FullFileContents,
+                config.Review.MaxPatchLines);
             var rawCritique = await llm.CompleteRawAsync(payload, ct, "self_critique").ConfigureAwait(false);
             var critique = SelfCritiqueParser.Parse(rawCritique, candidates.Length);
             if (critique is null)
             {
-                return result with { Comments = filtered };
+                return result with { Comments = candidates };
             }
 
-            var retained = critique.RetainedIndices.Select(index => candidates[index]).ToArray();
-            return result with { Comments = exempt.Concat(retained).ToArray() };
+            return result with
+            {
+                Comments = critique.RetainedIndices.Select(index => candidates[index]).ToArray()
+            };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return result with { Comments = filtered };
+            return result with { Comments = candidates };
         }
     }
 

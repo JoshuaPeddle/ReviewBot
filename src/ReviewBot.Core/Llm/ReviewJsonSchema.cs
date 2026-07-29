@@ -35,7 +35,7 @@ public static class ReviewJsonSchema
                          "path": { "type": "string" },
                          "line": { "type": "integer" },
                          "severity": { "type": "string", "enum": ["info", "warning", "error"] },
-                         "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+                         "confidence": { "type": "string", "enum": ["high", "medium"] },
                          "body": { "type": "string" }
                        },
                        "required": ["path", "line", "severity", "confidence", "body"],

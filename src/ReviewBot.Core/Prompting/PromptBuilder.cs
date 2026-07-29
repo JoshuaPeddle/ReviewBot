@@ -1,5 +1,4 @@
 using System.Text;
-using ReviewBot.Core.Diff;
 using ReviewBot.Core.Domain;
 
 namespace ReviewBot.Core.Prompting;
@@ -77,7 +76,6 @@ Assign a severity level to each comment:
 Assign a confidence level to each comment based on how certain you are:
 - "high": you have seen the code in question and are certain this is a real issue
 - "medium": likely an issue but depends on context outside the diff
-- "low": weak but evidence-backed; you would not block a merge on this alone
 
 What a good comment looks like:
 GOOD (specific, ties to a visible line, names the value, gives a fix direction):
@@ -130,7 +128,7 @@ Schema:
       "path": "string, must match one of the changed files",
       "line": "integer, copy the NNN from the diff line annotation prefix verbatim; never count lines yourself",
       "severity": "info|warning|error",
-      "confidence": "high|medium|low",
+      "confidence": "high|medium",
       "body": "string, markdown allowed; concise review comment, no copied diff code"
     }
   ]
@@ -150,7 +148,7 @@ Schema:
         prompt.Append("""
 }
 Before you emit, consolidate. Group your candidate comments by root cause and keep exactly one per distinct cause, at the single best line: if one edit would resolve two comments, they are one comment. Restating the same defect in different words, or at a second location it also affects, counts as a duplicate.
-Omit a comment entirely rather than pick a guessed line or provide positive feedback. Aim for the 3 to 7 highest-impact issues; never exceed 15. When in doubt, omit.
+Omit a comment entirely rather than pick a guessed line or provide positive feedback. Report only the issues you actually found, however few that is; a change with nothing wrong in it gets an empty comments array. Never exceed 15 comments. When in doubt, omit.
 """);
 
         return prompt.ToString();
@@ -266,71 +264,16 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
             prompt.Append(')');
         }
 
-        if (AppendRepositoryContext(prompt, request.RepositoryContext))
-        {
-            prompt.Append("\nChanged Files:\n");
-        }
-        else
-        {
-            prompt.Append("\n\nChanged Files:\n");
-        }
+        var hasRepositoryContext = PromptSections.AppendRepositoryContext(prompt, request.RepositoryContext);
+        prompt.Append(hasRepositoryContext ? "\nChanged Files:\n" : "\n\nChanged Files:\n");
 
-        var orderedFiles = request.Files.OrderBy(file => file.Path, StringComparer.Ordinal);
-        foreach (var file in orderedFiles)
-        {
-            prompt.Append("=== ");
-            prompt.Append(file.Path);
-            prompt.Append(" (");
-            prompt.Append(file.Status);
-            prompt.Append(", +");
-            prompt.Append(file.AdditionsCount);
-            prompt.Append(" -");
-            prompt.Append(file.DeletionsCount);
-            prompt.Append(") ===\n");
-            if (request.FullFileContents?.TryGetValue(file.Path, out var fullFileContent) == true)
-            {
-                prompt.Append("### Full file: ");
-                prompt.Append(file.Path);
-                prompt.Append("\n```\n");
-                prompt.Append(SanitizeFetchedContent(fullFileContent));
-                prompt.Append("\n```\n");
-            }
-
-            prompt.Append("```diff\n");
-            prompt.Append(AnnotateAndTruncatePatch(file.Patch, request.Config.Review.MaxPatchLines));
-            prompt.Append("\n```\n\n");
-        }
+        PromptSections.AppendChangedFiles(
+            prompt,
+            request.Files,
+            request.FullFileContents,
+            request.Config.Review.MaxPatchLines);
 
         return prompt.ToString().TrimEnd();
-    }
-
-    private static bool AppendRepositoryContext(
-        StringBuilder prompt,
-        IReadOnlyList<RepositoryContextSnippet>? repositoryContext)
-    {
-        if (repositoryContext is null || repositoryContext.Count == 0)
-        {
-            return false;
-        }
-
-        prompt.Append("\n\n## Repository context\n");
-        foreach (var snippet in repositoryContext
-            .OrderBy(snippet => snippet.Path, StringComparer.Ordinal)
-            .ThenBy(snippet => snippet.StartLine)
-            .ThenBy(snippet => snippet.EndLine))
-        {
-            prompt.Append("### ");
-            prompt.Append(snippet.Path);
-            prompt.Append(" lines ");
-            prompt.Append(snippet.StartLine);
-            prompt.Append('-');
-            prompt.Append(snippet.EndLine);
-            prompt.Append("\n```\n");
-            prompt.Append(SanitizeFetchedContent(snippet.Content));
-            prompt.Append("\n```\n");
-        }
-
-        return true;
     }
 
     private static string BuildContextEnrichedUserPrompt(
@@ -375,36 +318,13 @@ Omit a comment entirely rather than pick a guessed line or provide positive feed
             prompt.Append("### ");
             prompt.Append(fetchedFile.Path);
             prompt.Append("\n```\n");
-            prompt.Append(SanitizeFetchedContent(fetchedFile.Content));
+            prompt.Append(PromptSections.Sanitize(fetchedFile.Content));
             prompt.Append("\n```\n");
         }
 
         return prompt.ToString().TrimEnd();
     }
 
-    private static string SanitizeFetchedContent(string content)
-    {
-        // Break any literal triple-backtick run with a zero-width space so file
-        // content cannot close the surrounding ```...``` fence and inject prompt
-        // instructions to the model.
-        return content
-            .Replace("\0", string.Empty, StringComparison.Ordinal)
-            .Replace("\r\n", "\n", StringComparison.Ordinal)
-            .Replace('\r', '\n')
-            .Replace("```", "``​`", StringComparison.Ordinal);
-    }
-
-    private static string AnnotateAndTruncatePatch(string patch, int maxPatchLines)
-    {
-        var lines = UnifiedDiffParser.AnnotateWithLineNumbers(patch);
-
-        if (lines.Length <= maxPatchLines)
-            return string.Join('\n', lines);
-
-        var omittedCount = lines.Length - maxPatchLines;
-        return string.Join('\n',
-            lines.Take(maxPatchLines).Append($"... (truncated, {omittedCount} more lines)"));
-    }
 }
 
 public sealed record PromptPayload(string SystemPrompt, string UserPrompt);
