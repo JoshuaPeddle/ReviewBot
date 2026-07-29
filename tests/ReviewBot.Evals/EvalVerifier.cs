@@ -72,7 +72,36 @@ public sealed class EvalVerifier
         }
 
         var refutation = FindingRefuter.Refute(result.Comments, cleanlyParsed);
-        var corroborated = FindingCorroborator.Corroborate(refutation.Kept, diagnostics);
+
+        // Mirror the worker's semantic tier too, otherwise the corpus cannot measure a
+        // precision gain from refuting language-semantics claims (fixtures 019 and 027).
+        var semantic = SemanticFindingRefuter.Refute(
+            refutation.Kept,
+            RoslynSemanticClaimVerifier.Verify,
+            path => TryReadRepoStateFile(repoState, path));
+
+        var corroborated = FindingCorroborator.Corroborate(semantic.Kept, diagnostics);
         return result with { Comments = corroborated.Select(finding => finding.Comment).ToArray() };
+    }
+
+    private static string? TryReadRepoStateFile(string repoState, string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var root = Path.GetFullPath(repoState);
+            var full = Path.GetFullPath(Path.Combine(root, relativePath));
+            return full.StartsWith(root, StringComparison.Ordinal) && File.Exists(full)
+                ? File.ReadAllText(full)
+                : null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return null;
+        }
     }
 }

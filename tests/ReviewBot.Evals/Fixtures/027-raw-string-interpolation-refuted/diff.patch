@@ -2,7 +2,7 @@ diff --git a/src/Demo/SseBuilder.cs b/src/Demo/SseBuilder.cs
 index 1111111..2222222 100644
 --- a/src/Demo/SseBuilder.cs
 +++ b/src/Demo/SseBuilder.cs
-@@ -1,5 +1,16 @@
+@@ -1,7 +1,15 @@
  using System.Text.Json;
  
  namespace Demo;
@@ -12,7 +12,7 @@ index 1111111..2222222 100644
 +    public static string Chunk(string content)
 +    {
 +        var delta = $$"""
-+            {"id":"c1","choices":[{"delta":{"content":{{JsonSerializer.Serialize(content)}}}}]}
++            {"content":{{JsonSerializer.Serialize(content)}},"done":false}
 +            """;
 +
 +        return $"data: {delta}\n\n";

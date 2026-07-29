@@ -18,6 +18,7 @@ using ReviewBot.GitHub.Config;
 using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding;
 using ReviewBot.Grounding.Diagnostics;
+using ReviewBot.Grounding.Languages.DotNet;
 using ReviewBot.Grounding.Workspace;
 using ReviewBot.Retrieval;
 using ReviewBot.Retrieval.Indexing;
@@ -2243,8 +2244,28 @@ public sealed class ReviewWorker : BackgroundService
                 job.PrNumber);
         }
 
+        // Then refute language-semantics claims the syntax tree disproves. Separate from
+        // the parse-based refutation above because these comments concede the code
+        // compiles and assert it behaves differently, so parse results cannot touch them.
+        var semantic = SemanticFindingRefuter.Refute(
+            refutation.Kept,
+            RoslynSemanticClaimVerifier.Verify,
+            path => TryReadWorkspaceFile(gathered.WorkspacePath, path));
+        if (semantic.Refuted.Count > 0)
+        {
+            refutedDrops = refutedDrops
+                .Concat(semantic.Refuted.Select(c => new DroppedComment(c, "verification_semantics_contradict")))
+                .ToArray();
+            logger.LogInformation(
+                "Verification: refuted {RefutedCount} language-semantics claim(s) the syntax tree disproves for {Owner}/{Repo}#{PrNumber}",
+                semantic.Refuted.Count,
+                job.Owner,
+                job.Repo,
+                job.PrNumber);
+        }
+
         // Corroborate the survivors against diagnostics.
-        var survivors = refutation.Kept;
+        var survivors = semantic.Kept;
         var finalComments = survivors;
         if (gathered.Diagnostics.Count > 0)
         {
@@ -2293,7 +2314,7 @@ public sealed class ReviewWorker : BackgroundService
                 grounding, config, files, sharedWorkspace, metadata, installationToken, job, ct)
             .ConfigureAwait(false);
         diagnostics.AddRange(providerResult.Diagnostics);
-        return new GatheredDiagnostics(diagnostics, providerResult.CleanlyParsedPaths);
+        return new GatheredDiagnostics(diagnostics, providerResult.CleanlyParsedPaths, providerResult.WorkspacePath);
     }
 
     private async Task<GatheredDiagnostics> RunDiagnosticProvidersAsync(
@@ -2375,7 +2396,7 @@ public sealed class ReviewWorker : BackgroundService
             }
         }
 
-        return new GatheredDiagnostics(results, cleanlyParsed);
+        return new GatheredDiagnostics(results, cleanlyParsed, workspacePath);
     }
 
     private static InlineComment AppendVerificationEvidence(InlineComment comment, Diagnostic evidence)
@@ -2392,9 +2413,43 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyList<InlineComment> Comments,
         IReadOnlyList<DroppedComment> RefutedDrops);
 
+    /// <summary>
+    /// Reads a repo-relative file from the head checkout, or null when it cannot be read.
+    /// </summary>
+    /// <remarks>
+    /// Rejects anything that escapes the workspace root, since the path originates in
+    /// model output.
+    /// </remarks>
+    private static string? TryReadWorkspaceFile(string? workspacePath, string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath) || string.IsNullOrWhiteSpace(relativePath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var root = Path.GetFullPath(workspacePath);
+            var full = Path.GetFullPath(Path.Combine(root, relativePath));
+            if (!full.StartsWith(root, StringComparison.Ordinal) || !File.Exists(full))
+            {
+                return null;
+            }
+
+            return File.ReadAllText(full);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
     private sealed record GatheredDiagnostics(
         IReadOnlyList<Diagnostic> Diagnostics,
-        IReadOnlySet<string> CleanlyParsedPaths)
+        IReadOnlySet<string> CleanlyParsedPaths,
+        // Where the head checkout lives, so the semantic tier can read the file a comment
+        // refers to and ask the syntax tree whether the claim about it holds.
+        string? WorkspacePath = null)
     {
         public static GatheredDiagnostics Empty { get; } =
             new([], new HashSet<string>(StringComparer.Ordinal));
