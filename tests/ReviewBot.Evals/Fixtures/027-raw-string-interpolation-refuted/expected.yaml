@@ -1,0 +1,11 @@
+must_not_flag:
+  - path: src/Demo/SseBuilder.cs
+    reason: >
+      In a `$$"""` raw string the interpolation delimiter is `{{ }}` and a single
+      brace is literal — which is exactly why this form is used for a JSON body
+      full of literal braces. Claiming the expression is emitted as literal text,
+      or that the braces need different escaping, is a language-semantics
+      hallucination.
+    severity_above: info
+max_total_comments: 0
+expected_review_state: APPROVE

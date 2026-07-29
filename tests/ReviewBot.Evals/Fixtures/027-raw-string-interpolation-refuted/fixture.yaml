@@ -1,0 +1,31 @@
+name: Build a server-sent-event chunk for a test double
+category: precision
+difficulty: high
+description: |
+  Add a helper that serialises content into a single server-sent-event data frame.
+notes: |
+  Maintainer notes (not shown to the model — the loader ignores this key).
+
+  Taken verbatim from a review ReviewBot posted on its own PR #50. The bot claimed:
+
+    "In a `$$\"\"\"` interpolated raw string literal, `$$` is the interpolation
+     prefix (not `{`), and `{{`/`}}` are escape sequences that produce literal
+     `{`/`}`. This expression yields the literal text
+     `{JsonSerializer.Serialize(content)}`..."
+
+  That is backwards. With `$$"""` the interpolation delimiter IS `{{ }}` and a
+  single brace is literal — the whole reason the form is used for a JSON body.
+  Disproved at the time by the change's own test suite: 15/15 E2E tests passed,
+  which they could not have done if the body carried the literal expression text
+  instead of serialised JSON.
+
+  This is the SECOND raw-string-semantics hallucination in the corpus (019 claims
+  a raw string retains the newline after the opening delimiter). Both are false
+  claims about how a C# language feature behaves, and neither is reachable by the
+  syntax tier: the file parses cleanly, so RoslynDiagnosticProvider has nothing to
+  refute, and CompileClaimClassifier does not fire because the comment never says
+  the code fails to compile — it says it behaves differently.
+
+  That pairing is the concrete argument for a semantic verification tier. A narrow
+  check would settle this one outright: ask Roslyn whether the interpolated string
+  actually contains an interpolation hole, and refute the claim when it does.
