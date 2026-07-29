@@ -878,48 +878,44 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyList<LanguageFact>? languageFacts,
         CancellationToken ct)
     {
-        ChunkReviewOutcome?[] outcomes;
-        if (llm.SupportsParallelRequests)
-        {
-            outcomes = await Task.WhenAll(chunks.Select(chunk => TryReviewChunkAsync(
-                    llm,
-                    chunk,
-                    metadata,
-                    config,
-                    grounding,
-                    repositoryContext,
-                    fullFileContents,
-                    job,
-                    installationToken,
-                    maxOutputTokens,
-                    isIncrementalUpdate,
-                    languageFacts,
-                    ct)))
-                .ConfigureAwait(false);
-        }
-        else
-        {
-            var sequentialResults = new List<ChunkReviewOutcome?>(chunks.Count);
-            foreach (var chunk in chunks)
-            {
-                sequentialResults.Add(await TryReviewChunkAsync(
-                        llm,
-                        chunk,
-                        metadata,
-                        config,
-                        grounding,
-                        repositoryContext,
-                        fullFileContents,
-                        job,
-                        installationToken,
-                        maxOutputTokens,
-                        isIncrementalUpdate,
-                        languageFacts,
-                        ct)
-                    .ConfigureAwait(false));
-            }
+        // One dispatch path for every provider: a gate of 1 is sequential, so the old
+        // parallel/serial branch is just this with the degree fixed at either end.
+        var degree = Math.Max(1, llm.MaxConcurrentRequests);
+        logger.LogDebug(
+            "Reviewing {ChunkCount} chunk(s) for {DeliveryId} at concurrency {Degree}",
+            chunks.Count,
+            job.DeliveryId,
+            degree);
 
-            outcomes = [.. sequentialResults];
+        ChunkReviewOutcome?[] outcomes;
+        using (var gate = new SemaphoreSlim(degree, degree))
+        {
+            outcomes = await Task.WhenAll(chunks.Select(async chunk =>
+            {
+                await gate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    return await TryReviewChunkAsync(
+                            llm,
+                            chunk,
+                            metadata,
+                            config,
+                            grounding,
+                            repositoryContext,
+                            fullFileContents,
+                            job,
+                            installationToken,
+                            maxOutputTokens,
+                            isIncrementalUpdate,
+                            languageFacts,
+                            ct)
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            })).ConfigureAwait(false);
         }
 
         var succeeded = outcomes.OfType<ChunkReviewOutcome>().ToArray();
@@ -1695,35 +1691,28 @@ public sealed class ReviewWorker : BackgroundService
             return new FullFileContextResult(null, budget);
         }
 
-        var candidates = FullFileContextSelector.SelectCandidates(files, config.Review.FullFileMaxBytes);
-
-        var selectedRequests = new List<ContextRequest>();
-        var selectionBudget = budget;
-        var loggedBudgetLimitedSelection = false;
-        foreach (var file in candidates)
+        // Nothing left to spend, so there is nothing worth fetching.
+        if (budget.RemainingContentTokens == 0)
         {
-            var estimatedTokens = EstimateTokens(config, file.Patch);
-            if (!selectionBudget.TryConsume("full_file_request_estimate", estimatedTokens, out var updatedBudget))
-            {
-                if (!loggedBudgetLimitedSelection)
-                {
-                    logger.LogWarning(
-                        "Full-file context for {Owner}/{Repo}#{PrNumber} is limited by prompt budget; skipping candidate {Path} because its estimated patch cost is {EstimatedTokens} token(s) and only {RemainingTokens} token(s) remain",
-                        job.Owner,
-                        job.Repo,
-                        job.PrNumber,
-                        file.Path,
-                        estimatedTokens,
-                        selectionBudget.RemainingContentTokens);
-                    loggedBudgetLimitedSelection = true;
-                }
-
-                continue;
-            }
-
-            selectionBudget = updatedBudget;
-            selectedRequests.Add(new ContextRequest(file.Path, "full-file context for small changed file"));
+            logger.LogDebug(
+                "Full-file context skipped for {Owner}/{Repo}#{PrNumber}: no content budget remains",
+                job.Owner,
+                job.Repo,
+                job.PrNumber);
+            return new FullFileContextResult(null, budget);
         }
+
+        // Every candidate is requested. There used to be a pre-fetch budget gate here that
+        // charged each file its *patch* size — a quantity with no relation to the file size
+        // it was guarding, since a five-line patch on a two-thousand-line file estimates ~20
+        // tokens against a real cost of ~15,000. It therefore admitted everything and only
+        // looked like a control. GitHub's files API reports additions, deletions and the
+        // patch but not the file's size, so nothing better is knowable until the content is
+        // in hand; the real gate is below, where the sizes are exact.
+        var selectedRequests = FullFileContextSelector
+            .SelectCandidates(files, config.Review.FullFileMaxBytes)
+            .Select(file => new ContextRequest(file.Path, "full-file context for small changed file"))
+            .ToList();
 
         var requests = selectedRequests.ToArray();
 
@@ -1772,9 +1761,18 @@ public sealed class ReviewWorker : BackgroundService
 
         var included = new Dictionary<string, string>(StringComparer.Ordinal);
         var updated = budget;
-        foreach (var fetchedFile in fetchedFiles)
+
+        // Smallest first. The sizes are exact now, and a budget that cannot hold everything
+        // should buy as many files as it can rather than however many happened to come
+        // before the large one: in candidate order a single 13K-token file can consume what
+        // five 2K-token files would have fitted in. Never includes fewer files than the old
+        // order, and usually more.
+        foreach (var fetchedFile in fetchedFiles
+            .Select(file => (file.Path, file.Content, Tokens: EstimateTokens(config, file.Content)))
+            .OrderBy(file => file.Tokens)
+            .ThenBy(file => file.Path, StringComparer.Ordinal))
         {
-            var estimatedTokens = EstimateTokens(config, fetchedFile.Content);
+            var estimatedTokens = fetchedFile.Tokens;
             if (!updated.TryConsume("full_file", estimatedTokens, out var afterFullFile))
             {
                 logger.LogDebug(

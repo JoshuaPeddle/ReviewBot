@@ -814,7 +814,12 @@ public class ReviewWorkerTests
     }
 
     [Fact]
-    public async Task FullFileContextUsesRemainingPromptBudgetToLimitFetchRequests()
+    /// <summary>
+    /// Every candidate is requested; the prompt budget decides afterwards, once the sizes
+    /// are known. The pre-fetch gate this replaced charged each file its *patch* size,
+    /// which bears no relation to the file size it was guarding.
+    /// </summary>
+    public async Task FullFileContextRequestsEveryCandidateAndBudgetsAfterFetching()
     {
         var estimator = new KeywordTokenEstimator(
             new Dictionary<string, int>(StringComparer.Ordinal)
@@ -871,9 +876,78 @@ public class ReviewWorkerTests
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        fetchedRequests!.Select(request => request.Path).Should().Equal("src/Small.cs");
+        fetchedRequests!.Select(request => request.Path)
+            .Should().Equal("src/Small.cs", "src/Large.cs");
         capturedRequest!.FullFileContents.Should().ContainSingle()
             .Which.Key.Should().Be("src/Small.cs");
+    }
+
+    /// <summary>
+    /// A budget that cannot hold everything buys as many files as it can, rather than
+    /// however many happened to precede the large one.
+    /// </summary>
+    [Fact]
+    public async Task FullFileContextIncludesSmallestFilesFirstWhenTheBudgetIsTight()
+    {
+        var estimator = new KeywordTokenEstimator(
+            new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                ["large body"] = 15,
+                ["small body"] = 8
+            });
+        await using var fixture = new WorkerFixture(
+            modelContextRegistry: new FixedModelContextRegistry(20),
+            tokenEstimator: estimator);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                FullFileMaxBytes = 10_000,
+                ResponseReserveTokens = 0
+            }
+        };
+        var files = new[]
+        {
+            CreateFile("src/Large.cs", "@@ -1 +1 @@\n+x", new HashSet<int> { 1 }),
+            CreateFile("src/SmallA.cs", "@@ -1 +1 @@\n+x", new HashSet<int> { 1 }),
+            CreateFile("src/SmallB.cs", "@@ -1 +1 @@\n+x", new HashSet<int> { 1 })
+        };
+        ReviewRequest? capturedRequest = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        // Returned large-first, so only the ordering under test can rescue the small ones.
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(_ => new[]
+            {
+                ("src/Large.cs", "large body"),
+                ("src/SmallA.cs", "small body"),
+                ("src/SmallB.cs", "small body")
+            });
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedRequest = call.Arg<ReviewRequest>();
+                return new ReviewResult("Reviewed.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        // 8 + 8 fits in 20; taking the 15-token file first would have fitted only itself.
+        capturedRequest!.FullFileContents!.Keys.Should()
+            .BeEquivalentTo(["src/SmallA.cs", "src/SmallB.cs"]);
     }
 
     [Fact]
@@ -1212,12 +1286,17 @@ public class ReviewWorkerTests
         postedResult.Summary.Should().Contain("`src/C.cs`");
     }
 
+    /// <summary>
+    /// Chunk dispatch honours the provider's stated concurrency exactly: never more than
+    /// it allows, and — given three chunks and a slow provider — actually reaching it.
+    /// </summary>
     [Theory]
-    [InlineData(false, 1)]
-    [InlineData(true, 2)]
-    public async Task ChunkedReviewDispatchesAccordingToLlmParallelSupport(
-        bool supportsParallelRequests,
-        int expectedMinimumConcurrency)
+    [InlineData(1, 1)]
+    [InlineData(2, 2)]
+    [InlineData(3, 3)]
+    public async Task ChunkedReviewDispatchesAtTheProvidersConcurrencyLimit(
+        int maxConcurrentRequests,
+        int expectedConcurrency)
     {
         var estimator = new KeywordTokenEstimator(
             new Dictionary<string, int>(StringComparer.Ordinal)
@@ -1245,7 +1324,7 @@ public class ReviewWorkerTests
         var maxConcurrency = 0;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        fixture.Llm.SupportsParallelRequests.Returns(supportsParallelRequests);
+        fixture.Llm.MaxConcurrentRequests.Returns(maxConcurrentRequests);
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(config);
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
@@ -1280,11 +1359,8 @@ public class ReviewWorkerTests
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        maxConcurrency.Should().BeGreaterThanOrEqualTo(expectedMinimumConcurrency);
-        if (!supportsParallelRequests)
-        {
-            maxConcurrency.Should().Be(1);
-        }
+        // Exactly the stated degree: the gate must neither throttle below it nor leak above it.
+        maxConcurrency.Should().Be(expectedConcurrency);
     }
 
     [Fact]

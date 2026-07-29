@@ -43,7 +43,7 @@ public sealed class OpenAiReviewLlm : IConfigurableReviewLlm, IModelContextProbe
 
     public string ModelName => options.ModelName;
 
-    public bool SupportsParallelRequests => false;
+    public int MaxConcurrentRequests => Math.Max(1, options.MaxConcurrentRequests);
 
     private readonly OpenAiLlmOptions options;
     private readonly ILogger<OpenAiReviewLlm> logger;
