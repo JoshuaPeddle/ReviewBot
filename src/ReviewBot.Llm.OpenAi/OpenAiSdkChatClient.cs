@@ -1,3 +1,4 @@
+using System.Text;
 using OpenAI;
 using OpenAI.Chat;
 using System.ClientModel;
@@ -18,6 +19,7 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
     private readonly ApiKeyCredential credential;
     private readonly OpenAIClientOptions clientOptions;
     private readonly Uri? baseUrl;
+    private readonly bool streaming;
     private readonly ILogger? logger;
 
     public OpenAiSdkChatClient(OpenAiLlmOptions options, ILogger? logger = null)
@@ -31,6 +33,7 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
 
         credential = new ApiKeyCredential(options.ApiKey);
         baseUrl = options.BaseUrl;
+        streaming = options.Streaming;
         clientOptions = CreateClientOptions(options.BaseUrl, options.TimeoutSeconds);
         this.logger = logger;
     }
@@ -65,19 +68,9 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
 
             try
             {
-                var completion = await client.CompleteChatAsync(messages, options, ct);
-                var textParts = completion.Value.Content
-                    .Where(part => !string.IsNullOrEmpty(part.Text))
-                    .Select(part => part.Text);
-
-                var usage = completion.Value.Usage is null
-                    ? null
-                    : new LlmTokenUsage(
-                        PromptTokens: completion.Value.Usage.InputTokenCount,
-                        CompletionTokens: completion.Value.Usage.OutputTokenCount,
-                        CachedPromptTokens: completion.Value.Usage.InputTokenDetails?.CachedTokenCount ?? 0);
-
-                return new OpenAiChatResult(string.Concat(textParts), usage);
+                return streaming
+                    ? await CompleteStreamingAsync(client, messages, options, ct).ConfigureAwait(false)
+                    : await CompleteBufferedAsync(client, messages, options, ct).ConfigureAwait(false);
             }
             catch (ClientResultException ex) when (ex.Status == 400)
             {
@@ -107,6 +100,71 @@ internal sealed class OpenAiSdkChatClient : IOpenAiChatClient
             }
         }
     }
+
+    private static async Task<OpenAiChatResult> CompleteBufferedAsync(
+        ChatClient client,
+        IReadOnlyList<ChatMessage> messages,
+        ChatCompletionOptions options,
+        CancellationToken ct)
+    {
+        var completion = await client.CompleteChatAsync(messages, options, ct).ConfigureAwait(false);
+        var textParts = completion.Value.Content
+            .Where(part => !string.IsNullOrEmpty(part.Text))
+            .Select(part => part.Text);
+
+        return new OpenAiChatResult(string.Concat(textParts), ToUsage(completion.Value.Usage));
+    }
+
+    /// <summary>
+    /// Streams the completion, accumulating content deltas.
+    /// </summary>
+    /// <remarks>
+    /// A reasoning model can think for minutes before emitting its first content token.
+    /// On a buffered request nothing crosses the wire during that time, so any proxy in
+    /// front of the model closes the idle connection — observed as HTTP 524 from the
+    /// Cloudflare-fronted endpoint on the three largest eval fixtures, which aborted
+    /// roughly 5% of fixture runs while our own client timeout (600s) was nowhere near
+    /// expiring. Streaming keeps bytes moving, so the proxy sees a live connection.
+    /// </remarks>
+    private static async Task<OpenAiChatResult> CompleteStreamingAsync(
+        ChatClient client,
+        IReadOnlyList<ChatMessage> messages,
+        ChatCompletionOptions options,
+        CancellationToken ct)
+    {
+        // Usage only arrives on the final chunk when explicitly requested, and the SDK
+        // exposes no typed property for it, so patch it into the request body.
+#pragma warning disable SCME0001
+        options.Patch.Set("$.stream_options.include_usage"u8, true);
+#pragma warning restore SCME0001
+
+        var content = new StringBuilder();
+        ChatTokenUsage? usage = null;
+
+        await foreach (var update in client.CompleteChatStreamingAsync(messages, options, ct).ConfigureAwait(false))
+        {
+            foreach (var part in update.ContentUpdate)
+            {
+                if (!string.IsNullOrEmpty(part.Text))
+                {
+                    content.Append(part.Text);
+                }
+            }
+
+            // Whichever chunk carries usage wins; servers differ on which one that is.
+            usage ??= update.Usage;
+        }
+
+        return new OpenAiChatResult(content.ToString(), ToUsage(usage));
+    }
+
+    private static LlmTokenUsage? ToUsage(ChatTokenUsage? usage) =>
+        usage is null
+            ? null
+            : new LlmTokenUsage(
+                PromptTokens: usage.InputTokenCount,
+                CompletionTokens: usage.OutputTokenCount,
+                CachedPromptTokens: usage.InputTokenDetails?.CachedTokenCount ?? 0);
 
     /// <summary>
     /// Copies the configured sampling knobs onto the outgoing request. Knobs the OpenAI

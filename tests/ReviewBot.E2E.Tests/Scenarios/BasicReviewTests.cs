@@ -612,7 +612,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
                 .UsingPost())
             .RespondWith(Response.Create()
                 .WithStatusCode(200)
-                .WithHeader("Content-Type", "application/json")
+                .WithHeader("Content-Type", "text/event-stream")
                 .WithBody(OpenAiChatResponse(reviewJson)));
     }
 
@@ -625,7 +625,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
                 .UsingPost())
             .RespondWith(Response.Create()
                 .WithStatusCode(200)
-                .WithHeader("Content-Type", "application/json")
+                .WithHeader("Content-Type", "text/event-stream")
                 .WithBody(_ =>
                 {
                     var response = Interlocked.Increment(ref callCount) == 1
@@ -643,7 +643,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
                 .UsingPost())
             .RespondWith(Response.Create()
                 .WithStatusCode(200)
-                .WithHeader("Content-Type", "application/json")
+                .WithHeader("Content-Type", "text/event-stream")
                 .WithBody(request =>
                 {
                     var body = request.Body ?? string.Empty;
@@ -662,7 +662,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
                 .UsingPost())
             .RespondWith(Response.Create()
                 .WithStatusCode(200)
-                .WithHeader("Content-Type", "application/json")
+                .WithHeader("Content-Type", "text/event-stream")
                 .WithBody(request =>
                 {
                     var body = request.Body ?? string.Empty;
@@ -708,30 +708,27 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         """;
     }
 
-    private static string OpenAiChatResponse(string content) =>
-        $$"""
-        {
-          "id": "chatcmpl-e2e",
-          "object": "chat.completion",
-          "created": 1779537600,
-          "model": "e2e-openai-model",
-          "choices": [
-            {
-              "index": 0,
-              "message": {
-                "role": "assistant",
-                "content": {{JsonSerializer.Serialize(content)}}
-              },
-              "finish_reason": "stop"
-            }
-          ],
-          "usage": {
-            "prompt_tokens": 100,
-            "completion_tokens": 50,
-            "total_tokens": 150
-          }
-        }
-        """;
+    /// <summary>
+    /// Builds the server-sent-event stream an OpenAI-compatible endpoint returns.
+    /// </summary>
+    /// <remarks>
+    /// The provider streams by default, so these stubs must speak the streaming wire
+    /// format — a mock that returned a buffered completion body would have the E2E suite
+    /// exercising a path production no longer takes. Content arrives as one delta chunk,
+    /// then a final chunk carrying finish_reason and usage (requested via
+    /// stream_options.include_usage), then the [DONE] sentinel.
+    /// </remarks>
+    private static string OpenAiChatResponse(string content)
+    {
+        var delta = $$"""
+            {"id":"chatcmpl-e2e","object":"chat.completion.chunk","created":1779537600,"model":"e2e-openai-model","choices":[{"index":0,"delta":{"role":"assistant","content":{{JsonSerializer.Serialize(content)}}},"finish_reason":null}]}
+            """;
+        const string final = """
+            {"id":"chatcmpl-e2e","object":"chat.completion.chunk","created":1779537600,"model":"e2e-openai-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}
+            """;
+
+        return $"data: {delta}\n\ndata: {final}\n\ndata: [DONE]\n\n";
+    }
 
     private static JsonDocument GetSingleRequestJson(
         WireMockServer server,

@@ -1,0 +1,4 @@
+{
+  "summary": "The helper builds one SSE frame; the raw string form is correct for a body containing literal braces.",
+  "comments": []
+}
