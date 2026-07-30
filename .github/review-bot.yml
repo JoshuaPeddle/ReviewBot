@@ -85,12 +85,6 @@ retrieval:
     # Symbol lookup mode: callers, definitions, or both.
     symbol_lookup_depth: both
 
-    # Embedding retrieval lane.
-    embeddings: false
-
-    # Disk location for the per-SHA repository index cache.
-    index_cache_dir: ./cache/reviewbot/index
-
 # Glob patterns for files to exclude from the review.
 # Uses Microsoft.Extensions.FileSystemGlobbing syntax (forward slashes, ** for any depth).
 # Default: [] (no files excluded)
