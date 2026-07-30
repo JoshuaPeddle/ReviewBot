@@ -1,6 +1,7 @@
 using FluentAssertions;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Prompting;
+using DomainTestResult = ReviewBot.Core.Domain.TestResult;
 
 namespace ReviewBot.Core.Tests.Prompting;
 
@@ -591,7 +592,7 @@ public interface IReviewStore
             Grounding = new GroundingContext(
                 Language: null,
                 Build: null,
-                Tests: new TestResult(1, 1, 0, "- check tests: failure", "github_checks"))
+                Tests: new DomainTestResult(1, 1, 0, "- check tests: failure", "github_checks"))
         };
 
         var payload = PromptBuilder.Build(request);
@@ -610,7 +611,7 @@ public interface IReviewStore
             Grounding = new GroundingContext(
                 Language: new LanguageMetadata("dotnet", "10.0", null, []),
                 Build: new BuildResult(true, 0, 0, "ok"),
-                Tests: new TestResult(42, 0, 3, "local tests ok"))
+                Tests: new DomainTestResult(42, 0, 3, "local tests ok"))
         };
 
         var payload = PromptBuilder.Build(request);
@@ -627,7 +628,7 @@ public interface IReviewStore
             Grounding = new GroundingContext(
                 Language: new LanguageMetadata("dotnet", "10.0", null, []),
                 Build: new BuildResult(true, 0, 0, "ok"),
-                Tests: new TestResult(Passed: 38, Failed: 4, Skipped: 0, Output: "test output"))
+                Tests: new DomainTestResult(Passed: 38, Failed: 4, Skipped: 0, Output: "test output"))
         };
 
         var payload = PromptBuilder.Build(request);

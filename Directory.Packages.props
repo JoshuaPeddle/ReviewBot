@@ -22,7 +22,11 @@
     <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
     <PackageVersion Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.15.3-beta.1" />
     <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
-    <PackageVersion Include="YamlDotNet" Version="18.0.0" />
+    <!-- Security: Microsoft.Data.Sqlite 10.0.8 resolves the vulnerable native SQLite
+         bundle 2.1.11 (GHSA-2m69-gcr7-jv3q). Pin the patched bundle until the upstream
+         dependency raises its minimum version. -->
+    <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
+    <PackageVersion Include="YamlDotNet" Version="18.1.0" />
   </ItemGroup>
   <!-- Microsoft.Extensions -->
   <ItemGroup>
@@ -52,17 +56,13 @@
   <ItemGroup>
     <PackageVersion Include="coverlet.collector" Version="10.0.1" />
     <PackageVersion Include="FluentAssertions" Version="8.10.0" />
+    <!-- WireMock.Net.Minimal still declares the deprecated IdentityModel 6.34 line.
+         Keep its OpenID Connect graph on the current supported release. -->
+    <PackageVersion Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" Version="8.22.0" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
     <PackageVersion Include="NSubstitute" Version="5.3.0" />
-    <!-- Transitive of WireMock.Net, which still resolves 7.0.6. That version carries
-         GHSA-24c8-4792-22hx (high) plus two moderate advisories, and TreatWarningsAsErrors
-         turns the NU1902/NU1903 audit warnings into build failures. All three are patched
-         in 7.2.1; pinned here and referenced directly by ReviewBot.E2E.Tests to force the
-         upgrade. Drop the direct reference once WireMock.Net ships a fixed Scriban. -->
-    <PackageVersion Include="Scriban.Signed" Version="7.2.5" />
-    <PackageVersion Include="WireMock.Net" Version="2.6.0" />
-    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="WireMock.Net" Version="2.13.0" />
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
-    <PackageVersion Include="Xunit.SkippableFact" Version="1.4.13" />
   </ItemGroup>
 </Project>

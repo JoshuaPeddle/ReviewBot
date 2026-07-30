@@ -11,6 +11,7 @@ using ReviewBot.GitHub.Pulls;
 using ReviewBot.Grounding.Build;
 using ReviewBot.Grounding.Detection;
 using ReviewBot.Grounding.Workspace;
+using GroundingTestResult = ReviewBot.Core.Domain.TestResult;
 
 namespace ReviewBot.Grounding.Tests;
 
@@ -528,7 +529,7 @@ public class CompositeGroundingProviderTests
     public async Task GetContextAsyncFetchesGitHubChecksWhenTestsEnabled()
     {
         var checkFetcher = Substitute.For<ICheckRunFetcher>();
-        var checks = new TestResult(1, 0, 0, "- check build: success", "github_checks");
+        var checks = new GroundingTestResult(1, 0, 0, "- check build: success", "github_checks");
         checkFetcher.GetHeadCheckSummaryAsync("acme", "myapp", "abc1234", "ghs_token", Arg.Any<CancellationToken>())
             .Returns(checks);
 
@@ -555,7 +556,7 @@ public class CompositeGroundingProviderTests
     public async Task GetContextAsyncReturnsChecksWhenNoDetectorMatches()
     {
         var checkFetcher = Substitute.For<ICheckRunFetcher>();
-        var checks = new TestResult(0, 1, 0, "- check tests: failure", "github_checks");
+        var checks = new GroundingTestResult(0, 1, 0, "- check tests: failure", "github_checks");
         checkFetcher.GetHeadCheckSummaryAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(checks);
 
@@ -600,7 +601,7 @@ public class CompositeGroundingProviderTests
     public async Task GetContextAsyncDoesNotRunLocalTestsWhenChecksExistAndLocalTestsDisabled()
     {
         var checkFetcher = Substitute.For<ICheckRunFetcher>();
-        var checks = new TestResult(1, 0, 0, "- check build: success", "github_checks");
+        var checks = new GroundingTestResult(1, 0, 0, "- check build: success", "github_checks");
         checkFetcher.GetHeadCheckSummaryAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(checks);
 
@@ -642,7 +643,7 @@ public class CompositeGroundingProviderTests
     public async Task GetContextAsyncRunsLocalTestsAfterSuccessfulBuildWhenEnabled()
     {
         var checkFetcher = Substitute.For<ICheckRunFetcher>();
-        var checks = new TestResult(1, 0, 0, "- check build: success", "github_checks");
+        var checks = new GroundingTestResult(1, 0, 0, "- check build: success", "github_checks");
         checkFetcher.GetHeadCheckSummaryAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(checks);
 
@@ -659,7 +660,7 @@ public class CompositeGroundingProviderTests
         var testRunner = Substitute.For<ITestRunner>();
         testRunner.LanguageId.Returns("dotnet");
         testRunner.RunAsync("/tmp/ws", Arg.Any<GroundingConfig>(), Arg.Any<CancellationToken>())
-            .Returns(new TestResult(12, 0, 1, "local tests ok"));
+            .Returns(new GroundingTestResult(12, 0, 1, "local tests ok"));
 
         var workspace = Substitute.For<IWorkspace>();
         workspace.LocalPath.Returns("/tmp/ws");
@@ -758,7 +759,7 @@ public class CompositeGroundingProviderTests
 
         var ctx = await provider.GetContextAsync(request, CancellationToken.None);
 
-        ctx.Tests.Should().Be(new TestResult(0, 0, 0, "test runner exploded"));
+        ctx.Tests.Should().Be(new GroundingTestResult(0, 0, 0, "test runner exploded"));
     }
 
     [Fact]
@@ -781,7 +782,7 @@ public class CompositeGroundingProviderTests
 
         var checkFetcher = Substitute.For<ICheckRunFetcher>();
         checkFetcher.GetHeadCheckSummaryAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(new TestResult(1, 0, 0, "checks ok", "github_checks"));
+            .Returns(new GroundingTestResult(1, 0, 0, "checks ok", "github_checks"));
 
         var detector = Substitute.For<ILanguageDetector>();
         detector.LanguageId.Returns("dotnet");
@@ -797,7 +798,7 @@ public class CompositeGroundingProviderTests
         var testRunner = Substitute.For<ITestRunner>();
         testRunner.LanguageId.Returns("dotnet");
         testRunner.RunAsync(Arg.Any<string>(), Arg.Any<GroundingConfig>(), Arg.Any<CancellationToken>())
-            .Returns(new TestResult(12, 1, 0, "local tests ran"));
+            .Returns(new GroundingTestResult(12, 1, 0, "local tests ran"));
 
         var workspace = Substitute.For<IWorkspace>();
         workspace.LocalPath.Returns("/tmp/ws");

@@ -69,12 +69,14 @@ public class OllamaReviewE2eTests
     /// GitHub API interactions (token provisioning, config fetching, PR fetching, and review posting)
     /// are replaced with NSubstitute fakes so no real GitHub credentials are required.
     /// </remarks>
-    [SkippableFact]
+    [Fact]
     public async Task PipelineProducesValidReviewViaOllama()
     {
-        Skip.If(OllamaModel is null, "Set REVIEWBOT_E2E_OLLAMA_MODEL to an installed model name to run this test.");
+        Assert.SkipWhen(
+            OllamaModel is null,
+            "Set REVIEWBOT_E2E_OLLAMA_MODEL to an installed model name to run this test.");
         var reachable = await IsOllamaReachableAsync();
-        Skip.If(!reachable, $"Ollama not reachable at {OllamaBaseUrl}");
+        Assert.SkipUnless(reachable, $"Ollama not reachable at {OllamaBaseUrl}");
 
         var tokenProvider = Substitute.For<IInstallationTokenProvider>();
         var repoConfigFetcher = Substitute.For<IRepoConfigFetcher>();
