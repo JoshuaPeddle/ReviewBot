@@ -1287,6 +1287,58 @@ public class ReviewWorkerTests
     }
 
     /// <summary>
+    /// A diff that fits the budget but exceeds the headroom fraction still splits.
+    /// Chunking used to trigger only on overflow, which made chunk_headroom unreachable
+    /// on a large context window — the diff always fit, so a review was never split
+    /// however small the operator asked chunks to be.
+    /// </summary>
+    [Fact]
+    public async Task ChunkedReviewSplitsADiffThatFitsTheBudgetButExceedsTheHeadroom()
+    {
+        var estimator = new KeywordTokenEstimator(
+            new Dictionary<string, int>(StringComparer.Ordinal) { ["chunk-token"] = 10 });
+        await using var fixture = new WorkerFixture(
+            modelContextRegistry: new FixedModelContextRegistry(100),
+            tokenEstimator: estimator);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                ResponseReserveTokens = 0,
+                // 30 tokens of diff fits the 100-token budget outright, but not a quarter of it.
+                ChunkHeadroom = 0.25,
+                MaxChunks = 10,
+                SelfCritique = false
+            }
+        };
+        var files = Enumerable.Range(1, 3)
+            .Select(i => CreateFile($"src/File{i}.cs", "@@ -1 +1 @@\n+chunk-token", new HashSet<int> { 1 }))
+            .ToArray();
+        var chunkIndexes = new List<int?>();
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var request = call.Arg<ReviewRequest>();
+                lock (chunkIndexes) { chunkIndexes.Add(request.ChunkIndex); }
+                return new ReviewResult("Reviewed.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ => { posted.SetResult(); return Task.CompletedTask; });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        chunkIndexes.Should().HaveCountGreaterThan(1, "the diff exceeded the headroom fraction");
+    }
+
+    /// <summary>
     /// Chunk dispatch honours the provider's stated concurrency exactly: never more than
     /// it allows, and — given three chunks and a slow provider — actually reaching it.
     /// </summary>

@@ -819,18 +819,35 @@ public sealed class ReviewWorker : BackgroundService
     {
         var planner = new ReviewChunkPlanner(text => EstimateTokens(config, text));
         var estimatedDiffTokens = planner.EstimateDiffTokens(files, config.Review.MaxPatchLines);
-        if (!config.Review.ChunkedReview || estimatedDiffTokens <= promptBudget.RemainingContentTokens)
+
+        // Split once the diff passes the headroom fraction, not once it overflows the whole
+        // budget. Chunking used to be a pure "does it fit?" test, with chunk_headroom read
+        // only afterwards to size the pieces — so on a large context window the knob could
+        // not be reached at all: the diff always fit, and a review that fits was never
+        // split however small the operator asked chunks to be.
+        //
+        // Fitting is not the only reason to split. A prompt can fit and still be more than
+        // the model will reason about: on this repo, three reviews spent an entire output
+        // allowance thinking and returned nothing, from prompts well inside the window.
+        // Making headroom the trigger gives that failure a knob, and it is what "headroom"
+        // already implied — leave room, rather than fill the budget and split only on
+        // overflow. At the 0.80 default this splits slightly earlier than before.
+        var chunkTargetTokens = Math.Max(1, (int)Math.Floor(
+            promptBudget.RemainingContentTokens * config.Review.ChunkHeadroom));
+        if (!config.Review.ChunkedReview || estimatedDiffTokens <= chunkTargetTokens)
         {
             return [new ReviewChunk(1, 1, files, estimatedDiffTokens)];
         }
 
         logger.LogWarning(
-            "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} has estimated diff cost of {DiffTokens} token(s), exceeding the remaining prompt budget of {RemainingTokens} token(s) for model {ModelName}; splitting into chunks",
+            "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} has estimated diff cost of {DiffTokens} token(s), exceeding the {ChunkTargetTokens}-token chunk target ({Headroom:P0} of the {RemainingTokens}-token remaining prompt budget) for model {ModelName}; splitting into chunks",
             job.DeliveryId,
             job.Owner,
             job.Repo,
             job.PrNumber,
             estimatedDiffTokens,
+            chunkTargetTokens,
+            config.Review.ChunkHeadroom,
             promptBudget.RemainingContentTokens,
             config.Model.Name);
 
