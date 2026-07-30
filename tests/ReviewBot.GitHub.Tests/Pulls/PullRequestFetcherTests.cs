@@ -71,7 +71,7 @@ public class PullRequestFetcherTests
     }
 
     [Fact]
-    public async Task FetchAsyncOmitsFilesWithNullPatch()
+    public async Task FetchAsyncKeepsFilesWithNullPatchButMarksThemUnreviewable()
     {
         var pullRequests = Substitute.For<IPullRequestsClient>();
         var clientFactory = CreateClientFactory(pullRequests);
@@ -92,8 +92,11 @@ public class PullRequestFetcherTests
 
         var snapshot = await fetcher.FetchAsync("octo", "repo", 42, "ghs_token", CancellationToken.None);
 
-        snapshot.Files.Should().ContainSingle();
-        snapshot.Files[0].Path.Should().Be("src/a.cs");
+        // The binary file is part of the change, so it has to reach the caller for coverage
+        // to be reported honestly. It is flagged rather than dropped on sight.
+        snapshot.Files.Select(file => file.Path).Should().Equal("large.bin", "src/a.cs");
+        snapshot.Files.Single(file => file.Path == "large.bin").IsReviewable.Should().BeFalse();
+        snapshot.Files.Single(file => file.Path == "src/a.cs").IsReviewable.Should().BeTrue();
     }
 
     [Fact]
@@ -108,11 +111,14 @@ public class PullRequestFetcherTests
                 42,
                 Arg.Is<ApiOptions>(options => options.StartPage == 1 && options.PageSize == 30 && options.PageCount == 1))
             .Returns(CreateFiles(1, 30));
+        // Page size must stay fixed across the walk: a page number is an offset multiplier,
+        // so asking for page 2 at size 20 returns items 21-40, re-reading nine files and
+        // losing the tail.
         pullRequests.Files(
                 "octo",
                 "repo",
                 42,
-                Arg.Is<ApiOptions>(options => options.StartPage == 2 && options.PageSize == 20 && options.PageCount == 1))
+                Arg.Is<ApiOptions>(options => options.StartPage == 2 && options.PageSize == 30 && options.PageCount == 1))
             .Returns(CreateFiles(31, 1));
         var fetcher = new PullRequestFetcher(clientFactory);
 
@@ -133,6 +139,30 @@ public class PullRequestFetcherTests
     }
 
     [Fact]
+    public async Task FetchAsyncNeverShrinksPageSizeOnTheFinalRequest()
+    {
+        // Regression: the cap used to size the last page to whatever was left, so a walk
+        // capped at 40 asked for page 2 at size 10 — items 11-20 rather than 31-40. The
+        // result silently duplicated files and dropped the real tail.
+        var pullRequests = Substitute.For<IPullRequestsClient>();
+        var clientFactory = CreateClientFactory(pullRequests);
+        pullRequests.Get("octo", "repo", 42).Returns(CreatePullRequest());
+        pullRequests.Files("octo", "repo", 42, Arg.Any<ApiOptions>())
+            .Returns(CreateFiles(1, 30), CreateFiles(31, 30));
+        var fetcher = new PullRequestFetcher(clientFactory);
+
+        var snapshot = await fetcher.FetchAsync("octo", "repo", 42, "ghs_token", 40, CancellationToken.None);
+
+        snapshot.Files.Should().HaveCount(40);
+        snapshot.Files.Select(file => file.Path).Should().OnlyHaveUniqueItems();
+        await pullRequests.DidNotReceive().Files(
+            "octo",
+            "repo",
+            42,
+            Arg.Is<ApiOptions>(options => options.PageSize != 30));
+    }
+
+    [Fact]
     public async Task FetchAsyncCapsChangedFilesAtDefaultMaxFiles()
     {
         var pullRequests = Substitute.For<IPullRequestsClient>();
@@ -148,8 +178,8 @@ public class PullRequestFetcherTests
                 "octo",
                 "repo",
                 42,
-                Arg.Is<ApiOptions>(options => options.StartPage == 2 && options.PageSize == 20))
-            .Returns(CreateFiles(31, 20));
+                Arg.Is<ApiOptions>(options => options.StartPage == 2 && options.PageSize == 30))
+            .Returns(CreateFiles(31, 30));
         var fetcher = new PullRequestFetcher(clientFactory);
 
         var snapshot = await fetcher.FetchAsync("octo", "repo", 42, "ghs_token", CancellationToken.None);
