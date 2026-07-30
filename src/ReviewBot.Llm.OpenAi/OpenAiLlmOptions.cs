@@ -40,4 +40,19 @@ public sealed record OpenAiLlmOptions
     /// own 600s timeout. Set false only for a server that cannot stream.
     /// </remarks>
     public bool Streaming { get; set; } = true;
+
+    /// <summary>
+    /// How many chunk reviews to run against this endpoint at once. Default 1.
+    /// </summary>
+    /// <remarks>
+    /// Sequential by default because the same adapter serves Ollama on a laptop, where
+    /// concurrent requests queue behind one another and gain nothing. Raise it for a
+    /// server that batches — vLLM and SGLang serve several requests at close to the
+    /// latency of one, so a chunked review finishes in a fraction of the wall time. The
+    /// reference H100 running SGLang handles 6 comfortably.
+    ///
+    /// Total in-flight requests are this times <c>Worker:Concurrency</c>; size it against
+    /// what the server will hold, not just what one review wants.
+    /// </remarks>
+    public int MaxConcurrentRequests { get; set; } = 1;
 }

@@ -274,7 +274,6 @@ Assign a severity level to each comment:
 Assign a confidence level to each comment based on how certain you are:
 - "high": you have seen the code in question and are certain this is a real issue
 - "medium": likely an issue but depends on context outside the diff
-- "low": weak but evidence-backed; you would not block a merge on this alone
 
 What a good comment looks like:
 GOOD (specific, ties to a visible line, names the value, gives a fix direction):
@@ -309,13 +308,13 @@ Schema:
       "path": "string, must match one of the changed files",
       "line": "integer, copy the NNN from the diff line annotation prefix verbatim; never count lines yourself",
       "severity": "info|warning|error",
-      "confidence": "high|medium|low",
+      "confidence": "high|medium",
       "body": "string, markdown allowed; concise review comment, no copied diff code"
     }
   ]
 }
 Before you emit, consolidate. Group your candidate comments by root cause and keep exactly one per distinct cause, at the single best line: if one edit would resolve two comments, they are one comment. Restating the same defect in different words, or at a second location it also affects, counts as a duplicate.
-Omit a comment entirely rather than pick a guessed line or provide positive feedback. Aim for the 3 to 7 highest-impact issues; never exceed 15. When in doubt, omit.
+Omit a comment entirely rather than pick a guessed line or provide positive feedback. Report only the issues you actually found, however few that is; a change with nothing wrong in it gets an empty comments array. Never exceed 15 comments. When in doubt, omit.
 """);
 
         payload.UserPrompt.Should().Be("""
@@ -355,8 +354,13 @@ Changed Files:
         payload.SystemPrompt.Should().Contain("Assign a confidence level to each comment");
         payload.SystemPrompt.Should().Contain("\"high\": you have seen the code in question");
         payload.SystemPrompt.Should().Contain("\"medium\": likely an issue but depends on context");
-        payload.SystemPrompt.Should().Contain("\"low\": weak but evidence-backed");
-        payload.SystemPrompt.Should().Contain("\"confidence\": \"high|medium|low\"");
+        payload.SystemPrompt.Should().Contain("\"confidence\": \"high|medium\"");
+
+        // "low" is gone from both the rubric and the schema. MinConfidence defaults to
+        // Medium, so every comment the model rated low was defined and then discarded —
+        // prompt tokens spent teaching a tier we always throw away. Dropping it leaves
+        // min_confidence: high as the one setting that still selects anything.
+        payload.SystemPrompt.Should().NotContain("\"low\": weak but evidence-backed");
 
         var confidenceIndex = payload.SystemPrompt.IndexOf("Assign a confidence level", StringComparison.Ordinal);
         var schemaIndex = payload.SystemPrompt.IndexOf("Respond ONLY with a JSON", StringComparison.Ordinal);

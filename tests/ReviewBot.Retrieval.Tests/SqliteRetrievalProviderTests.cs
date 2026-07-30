@@ -158,6 +158,124 @@ public sealed class SqliteRetrievalProviderTests
             [new FileChange("src/App.cs", patch, new HashSet<int> { 2 }, 1, 0, FileChangeStatus.Modified)],
             config);
 
+    /// <summary>
+    /// A snippet cut out of a file the prompt already carries in full is a third copy of
+    /// the same code — the diff, the whole file, and then the snippet. The budget it
+    /// would have consumed goes to the next symbol instead.
+    /// </summary>
+    [Fact]
+    public async Task GetContextAsyncSkipsSnippetsFromFilesAlreadySentInFull()
+    {
+        var index = new FakeRepoIndex();
+        index.Results[("GetAsync", RepoSymbolKind.Method)] =
+        [
+            // Defined inside the changed file, which qualifies for full-file context.
+            new RepoSymbol("GetAsync", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/App.cs", 12, "Task<User?> GetAsync(int id);"),
+            new RepoSymbol("GetAsync", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/IUsers.cs", 4, "Task<User?> GetAsync(int id);")
+        ];
+        var provider = new SqliteRetrievalProvider(
+            new FakeRepoIndexFactory(index),
+            new CSharpDiffSymbolExtractor(),
+            new HeuristicTokenEstimator());
+        var request = CreateFullFileCandidateRequest();
+        var budget = PromptBudget.Create(1_000, 10, 0, 100);
+
+        var result = await provider.GetContextAsync("octo", "reviewbot", request, budget);
+
+        result.Snippets.Select(snippet => snippet.Path).Should().Equal("src/IUsers.cs");
+        result.Snippets.Should().NotContain(snippet => snippet.Path == "src/App.cs");
+    }
+
+    /// <summary>
+    /// When the caller already fetched full-file content, its keys are ground truth
+    /// rather than a prediction.
+    /// </summary>
+    [Fact]
+    public async Task GetContextAsyncUsesFetchedFullFileContentsWhenTheyArePresent()
+    {
+        var index = new FakeRepoIndex();
+        index.Results[("GetAsync", RepoSymbolKind.Method)] =
+        [
+            new RepoSymbol("GetAsync", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/IUsers.cs", 4, "Task<User?> GetAsync(int id);"),
+            new RepoSymbol("GetAsync", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/Other.cs", 7, "Task<User?> GetAsync(int id);")
+        ];
+        var provider = new SqliteRetrievalProvider(
+            new FakeRepoIndexFactory(index),
+            new CSharpDiffSymbolExtractor(),
+            new HeuristicTokenEstimator());
+        var request = CreateFullFileCandidateRequest() with
+        {
+            FullFileContents = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["src/IUsers.cs"] = "public interface IUsers { }"
+            }
+        };
+        var budget = PromptBudget.Create(1_000, 10, 0, 100);
+
+        var result = await provider.GetContextAsync("octo", "reviewbot", request, budget);
+
+        result.Snippets.Select(snippet => snippet.Path).Should().Equal("src/Other.cs");
+    }
+
+    /// <summary>
+    /// A changed file too large (or too new) for full-file context keeps its snippets:
+    /// the diff shows only the hunks, so a definition elsewhere in that file is still
+    /// context the model does not otherwise have.
+    /// </summary>
+    [Fact]
+    public async Task GetContextAsyncKeepsSnippetsFromChangedFilesThatAreNotSentInFull()
+    {
+        var index = new FakeRepoIndex();
+        index.Results[("GetAsync", RepoSymbolKind.Method)] =
+        [
+            new RepoSymbol("GetAsync", RepoSymbolKind.Method, RepoSymbolRole.Definition, "src/App.cs", 12, "Task<User?> GetAsync(int id);")
+        ];
+        var provider = new SqliteRetrievalProvider(
+            new FakeRepoIndexFactory(index),
+            new CSharpDiffSymbolExtractor(),
+            new HeuristicTokenEstimator());
+        // FullFileMaxBytes = 0 disables full-file context entirely, so nothing is duplicated.
+        var request = CreateFullFileCandidateRequest(
+            ReviewConfig.Default with
+            {
+                Retrieval = ReviewConfig.Default.Retrieval with { Enabled = true },
+                Review = ReviewConfig.Default.Review with { FullFileMaxBytes = 0 }
+            });
+        var budget = PromptBudget.Create(1_000, 10, 0, 100);
+
+        var result = await provider.GetContextAsync("octo", "reviewbot", request, budget);
+
+        result.Snippets.Select(snippet => snippet.Path).Should().Equal("src/App.cs");
+    }
+
+    /// <summary>
+    /// A changed file with a balanced add/delete ratio and a small patch — the shape
+    /// <see cref="FullFileContextSelector"/> selects for full-file context.
+    /// </summary>
+    private static ReviewRequest CreateFullFileCandidateRequest(ReviewConfig? config = null) =>
+        new(
+            "PR",
+            "",
+            "base",
+            "head",
+            [
+                new FileChange(
+                    "src/App.cs",
+                    """
+                    @@ -1,2 +1,2 @@
+                    -    => repository.FindAsync(id);
+                    +    => repository.GetAsync(id);
+                    """,
+                    new HashSet<int> { 2 },
+                    AdditionsCount: 1,
+                    DeletionsCount: 1,
+                    FileChangeStatus.Modified)
+            ],
+            config ?? ReviewConfig.Default with
+            {
+                Retrieval = ReviewConfig.Default.Retrieval with { Enabled = true }
+            });
+
     [Fact]
     public async Task GetContextAsyncFollowsSymbolsNamedInsideARetrievedBody()
     {

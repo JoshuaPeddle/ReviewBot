@@ -5,35 +5,53 @@ namespace ReviewBot.Core.Prompting;
 
 public static class SelfCritiquePromptBuilder
 {
+    /// <summary>
+    /// Builds the critique pass over <paramref name="proposedComments"/>.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="repositoryContext"/> and <paramref name="fullFileContents"/> must be
+    /// the same evidence the review pass saw. A critic given only the diff has no way to
+    /// tell a finding derived from a retrieved callee body apart from one invented about
+    /// code that is not there, and its instructions tell it to delete the latter — so it
+    /// deletes both. Measured on the 27-fixture corpus, that cost 8 of 22 true positives.
+    /// </remarks>
     public static PromptPayload Build(
         IReadOnlyList<FileChange> files,
-        IReadOnlyList<InlineComment> proposedComments)
+        IReadOnlyList<InlineComment> proposedComments,
+        IReadOnlyList<RepositoryContextSnippet>? repositoryContext = null,
+        IReadOnlyDictionary<string, string>? fullFileContents = null,
+        int maxPatchLines = int.MaxValue)
     {
         ArgumentNullException.ThrowIfNull(files);
         ArgumentNullException.ThrowIfNull(proposedComments);
 
         return new PromptPayload(
             SystemPrompt: BuildSystemPrompt(),
-            UserPrompt: BuildUserPrompt(files, proposedComments));
+            UserPrompt: BuildUserPrompt(
+                files, proposedComments, repositoryContext, fullFileContents, maxPatchLines));
     }
 
     private static string BuildSystemPrompt() =>
         """
 You are a senior code reviewer evaluating a junior reviewer's proposed pull request comments for accuracy and usefulness.
 
+The evidence below is everything the junior reviewer saw: the diff, and — when present — the full content of changed files and a "Repository context" section holding definitions pulled from elsewhere in the repository. A comment grounded in the repository context is grounded in evidence, not speculation. Judge every comment against all of it, not the diff alone.
+
 Remove comments that:
 - target a line not present in the diff
-- claim a bug that is clearly handled elsewhere in the same diff
+- claim a bug that the diff or the provided context shows is already handled
 - flag valid modern syntax as invalid
 - express pure style preference with no correctness, security, reliability, or maintainability implication
-- depend on missing context instead of evidence visible in the diff
+- rest on an assumption about code that appears in none of the evidence provided
 - say an implementation is not visible, cannot be verified, or should be checked elsewhere
-- speculate about a referenced method's return type, async behavior, side effects, or contract
+- guess at a referenced method's return type, async behavior, side effects, or contract when no provided evidence shows it
 - praise, validate, or confirm that code is correct instead of identifying an actionable concern
 - discuss whether a fixture, expected finding, or expected.yaml correctly models or requires a result
 - merely say a call could throw without a changed error-handling boundary, visible contract violation, or observable reliability regression
 - duplicate the same root cause already covered by a clearer comment
 - paste or restate code already visible in the diff instead of giving concise review guidance
+
+Keep every comment whose claim the provided evidence supports, including one that reasons across files. Removing a real defect is a worse error than keeping a marginal comment.
 
 Respond ONLY with a JSON object matching this schema and nothing else. Do not use markdown fences, preambles, or trailing prose.
 Schema:
@@ -47,26 +65,20 @@ The retained_indices array is authoritative. Do not rewrite or re-emit the comme
 
     private static string BuildUserPrompt(
         IReadOnlyList<FileChange> files,
-        IReadOnlyList<InlineComment> proposedComments)
+        IReadOnlyList<InlineComment> proposedComments,
+        IReadOnlyList<RepositoryContextSnippet>? repositoryContext,
+        IReadOnlyDictionary<string, string>? fullFileContents,
+        int maxPatchLines)
     {
         var prompt = new StringBuilder();
 
-        prompt.Append("Changed Files:\n");
-        foreach (var file in files.OrderBy(file => file.Path, StringComparer.Ordinal))
+        if (PromptSections.AppendRepositoryContext(prompt, repositoryContext))
         {
-            prompt.Append("=== ");
-            prompt.Append(file.Path);
-            prompt.Append(" (");
-            prompt.Append(file.Status);
-            prompt.Append(", +");
-            prompt.Append(file.AdditionsCount);
-            prompt.Append(" -");
-            prompt.Append(file.DeletionsCount);
-            prompt.Append(") ===\n");
-            prompt.Append("```diff\n");
-            prompt.Append(SanitizePatch(file.Patch));
-            prompt.Append("\n```\n\n");
+            prompt.Append('\n');
         }
+
+        prompt.Append("Changed Files:\n");
+        PromptSections.AppendChangedFiles(prompt, files, fullFileContents, maxPatchLines);
 
         prompt.Append("Proposed Comments:\n");
         for (var index = 0; index < proposedComments.Count; index++)
@@ -86,9 +98,4 @@ The retained_indices array is authoritative. Do not rewrite or re-emit the comme
 
         return prompt.ToString().TrimEnd();
     }
-
-    private static string SanitizePatch(string patch) =>
-        patch.Replace("\0", string.Empty, StringComparison.Ordinal)
-            .Replace("\r\n", "\n", StringComparison.Ordinal)
-            .Replace('\r', '\n');
 }

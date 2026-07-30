@@ -6,6 +6,7 @@ using Octokit;
 using ReviewBot.Api.Cost;
 using ReviewBot.Api.Tracing;
 using ReviewBot.Core.Context;
+using ReviewBot.Core.Diff;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Jobs;
 using ReviewBot.Core.Llm;
@@ -401,6 +402,8 @@ public sealed class ReviewWorker : BackgroundService
         var fullFileContents = fullFileContext.Contents;
         promptBudget = fullFileContext.Budget;
         var reviewChunks = PlanReviewChunks(files, config, promptBudget, job);
+        var selfCritiqueContext = new SelfCritiqueContext(repositoryContext, fullFileContents);
+        var languageFacts = BuildLanguageFacts(files, fullFileContents, job);
         ReviewResult result;
         IReadOnlyList<InlineComment> candidateComments;
         IReadOnlyList<InlineComment> rawCandidateComments;
@@ -424,12 +427,14 @@ public sealed class ReviewWorker : BackgroundService
                     installationToken.Token,
                     promptBudget.ResponseReserveTokens,
                     isIncrementalUpdate,
+                    languageFacts,
                     ct)
                 .ConfigureAwait(false);
             result = ReviewResultMerger.Merge(chunkOutcomes.Select(o => o.Result).ToArray());
             rawCandidateComments = result.Comments;
             var filteredComments = FilterCandidateComments(result, config, grounding);
-            var critiquedComments = await ApplySelfCritiqueWithDropsAsync(llm, reviewedFiles, filteredComments.Comments, config, ct)
+            var critiquedComments = await ApplySelfCritiqueWithDropsAsync(
+                    llm, reviewedFiles, filteredComments.Comments, config, selfCritiqueContext, ct)
                 .ConfigureAwait(false);
             candidateComments = critiquedComments.Comments;
             droppedComments = CombineDroppedComments(filteredComments.DroppedComments, critiquedComments.DroppedComments);
@@ -455,7 +460,8 @@ public sealed class ReviewWorker : BackgroundService
                 fullFileContents,
                 repositoryContext,
                 MaxOutputTokens: promptBudget.ResponseReserveTokens,
-                IsIncrementalUpdate: isIncrementalUpdate);
+                IsIncrementalUpdate: isIncrementalUpdate,
+                LanguageFacts: languageFacts);
 
             var prompt = PromptBuilder.Build(request);
             ReviewResult singleChunkResult;
@@ -480,7 +486,8 @@ public sealed class ReviewWorker : BackgroundService
 
             var initialResult = result;
             var initialFilteredComments = FilterCandidateComments(initialResult, config, grounding);
-            var speculativeSelfCritique = StartSelfCritiqueIfNeeded(llm, files, initialFilteredComments.Comments, config, ct);
+            var speculativeSelfCritique = StartSelfCritiqueIfNeeded(
+                llm, files, initialFilteredComments.Comments, config, selfCritiqueContext, ct);
             AgenticContextReviewOutcome agenticOutcome;
 
             try
@@ -518,7 +525,8 @@ public sealed class ReviewWorker : BackgroundService
                 CancelSelfCritique(speculativeSelfCritique);
                 rawCandidateComments = result.Comments;
                 var filteredComments = FilterCandidateComments(result, config, grounding);
-                var critiquedComments = await ApplySelfCritiqueWithDropsAsync(llm, files, filteredComments.Comments, config, ct)
+                var critiquedComments = await ApplySelfCritiqueWithDropsAsync(
+                        llm, files, filteredComments.Comments, config, selfCritiqueContext, ct)
                     .ConfigureAwait(false);
                 candidateComments = critiquedComments.Comments;
                 droppedComments = CombineDroppedComments(filteredComments.DroppedComments, critiquedComments.DroppedComments);
@@ -544,10 +552,17 @@ public sealed class ReviewWorker : BackgroundService
         droppedComments = CombineDroppedComments(droppedComments, verification.RefutedDrops);
         if (config.Review.Summary)
         {
-            // Synthesize the summary from the final, surviving findings so it can never
-            // describe a comment that filtering, self-critique, or refutation dropped,
-            // nor carry a hallucinated claim the model wrote into its free-text prose.
-            result = result with { Summary = BuildFindingsSummary(candidateComments, reviewChunks) };
+            // Keep the model's explanation, then state the facts about what actually
+            // survived, so the counts can never disagree with the posted comments.
+            result = result with
+            {
+                Summary = BuildFindingsSummary(
+                    result.Summary,
+                    candidateComments,
+                    reviewedFileCount: chunkOutcomes?.Sum(o => o.ChunkFiles?.Count ?? 0) ?? files.Count,
+                    reviewedChunkCount: chunkOutcomes?.Count ?? 1,
+                    failedChunkCount: Math.Max(0, reviewChunks.Count - (chunkOutcomes?.Count ?? 1)))
+            };
         }
 
         // ApplyOutputConfig may clear a no-issues summary (quiet on clean PRs); append the
@@ -804,18 +819,35 @@ public sealed class ReviewWorker : BackgroundService
     {
         var planner = new ReviewChunkPlanner(text => EstimateTokens(config, text));
         var estimatedDiffTokens = planner.EstimateDiffTokens(files, config.Review.MaxPatchLines);
-        if (!config.Review.ChunkedReview || estimatedDiffTokens <= promptBudget.RemainingContentTokens)
+
+        // Split once the diff passes the headroom fraction, not once it overflows the whole
+        // budget. Chunking used to be a pure "does it fit?" test, with chunk_headroom read
+        // only afterwards to size the pieces — so on a large context window the knob could
+        // not be reached at all: the diff always fit, and a review that fits was never
+        // split however small the operator asked chunks to be.
+        //
+        // Fitting is not the only reason to split. A prompt can fit and still be more than
+        // the model will reason about: on this repo, three reviews spent an entire output
+        // allowance thinking and returned nothing, from prompts well inside the window.
+        // Making headroom the trigger gives that failure a knob, and it is what "headroom"
+        // already implied — leave room, rather than fill the budget and split only on
+        // overflow. At the 0.80 default this splits slightly earlier than before.
+        var chunkTargetTokens = Math.Max(1, (int)Math.Floor(
+            promptBudget.RemainingContentTokens * config.Review.ChunkHeadroom));
+        if (!config.Review.ChunkedReview || estimatedDiffTokens <= chunkTargetTokens)
         {
             return [new ReviewChunk(1, 1, files, estimatedDiffTokens)];
         }
 
         logger.LogWarning(
-            "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} has estimated diff cost of {DiffTokens} token(s), exceeding the remaining prompt budget of {RemainingTokens} token(s) for model {ModelName}; splitting into chunks",
+            "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} has estimated diff cost of {DiffTokens} token(s), exceeding the {ChunkTargetTokens}-token chunk target ({Headroom:P0} of the {RemainingTokens}-token remaining prompt budget) for model {ModelName}; splitting into chunks",
             job.DeliveryId,
             job.Owner,
             job.Repo,
             job.PrNumber,
             estimatedDiffTokens,
+            chunkTargetTokens,
+            config.Review.ChunkHeadroom,
             promptBudget.RemainingContentTokens,
             config.Model.Name);
 
@@ -860,48 +892,47 @@ public sealed class ReviewWorker : BackgroundService
         string installationToken,
         int maxOutputTokens,
         bool isIncrementalUpdate,
+        IReadOnlyList<LanguageFact>? languageFacts,
         CancellationToken ct)
     {
-        ChunkReviewOutcome?[] outcomes;
-        if (llm.SupportsParallelRequests)
-        {
-            outcomes = await Task.WhenAll(chunks.Select(chunk => TryReviewChunkAsync(
-                    llm,
-                    chunk,
-                    metadata,
-                    config,
-                    grounding,
-                    repositoryContext,
-                    fullFileContents,
-                    job,
-                    installationToken,
-                    maxOutputTokens,
-                    isIncrementalUpdate,
-                    ct)))
-                .ConfigureAwait(false);
-        }
-        else
-        {
-            var sequentialResults = new List<ChunkReviewOutcome?>(chunks.Count);
-            foreach (var chunk in chunks)
-            {
-                sequentialResults.Add(await TryReviewChunkAsync(
-                        llm,
-                        chunk,
-                        metadata,
-                        config,
-                        grounding,
-                        repositoryContext,
-                        fullFileContents,
-                        job,
-                        installationToken,
-                        maxOutputTokens,
-                        isIncrementalUpdate,
-                        ct)
-                    .ConfigureAwait(false));
-            }
+        // One dispatch path for every provider: a gate of 1 is sequential, so the old
+        // parallel/serial branch is just this with the degree fixed at either end.
+        var degree = Math.Max(1, llm.MaxConcurrentRequests);
+        logger.LogDebug(
+            "Reviewing {ChunkCount} chunk(s) for {DeliveryId} at concurrency {Degree}",
+            chunks.Count,
+            job.DeliveryId,
+            degree);
 
-            outcomes = [.. sequentialResults];
+        ChunkReviewOutcome?[] outcomes;
+        using (var gate = new SemaphoreSlim(degree, degree))
+        {
+            outcomes = await Task.WhenAll(chunks.Select(async chunk =>
+            {
+                await gate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    return await TryReviewChunkAsync(
+                            llm,
+                            chunk,
+                            metadata,
+                            config,
+                            grounding,
+                            repositoryContext,
+                            fullFileContents,
+                            job,
+                            installationToken,
+                            maxOutputTokens,
+                            isIncrementalUpdate,
+                            languageFacts,
+                            ct)
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            })).ConfigureAwait(false);
         }
 
         var succeeded = outcomes.OfType<ChunkReviewOutcome>().ToArray();
@@ -950,6 +981,7 @@ public sealed class ReviewWorker : BackgroundService
         string installationToken,
         int maxOutputTokens,
         bool isIncrementalUpdate,
+        IReadOnlyList<LanguageFact>? languageFacts,
         CancellationToken ct)
     {
         try
@@ -966,6 +998,7 @@ public sealed class ReviewWorker : BackgroundService
                     installationToken,
                     maxOutputTokens,
                     isIncrementalUpdate,
+                    languageFacts,
                     ct)
                 .ConfigureAwait(false);
         }
@@ -994,6 +1027,7 @@ public sealed class ReviewWorker : BackgroundService
         string installationToken,
         int maxOutputTokens,
         bool isIncrementalUpdate,
+        IReadOnlyList<LanguageFact>? languageFacts,
         CancellationToken ct)
     {
         using var chunkActivity = ReviewBotActivitySource.Instance.StartActivity("reviewbot.chunk_review");
@@ -1013,7 +1047,8 @@ public sealed class ReviewWorker : BackgroundService
             ChunkIndex: chunk.Index,
             TotalChunks: chunk.TotalChunks,
             MaxOutputTokens: maxOutputTokens,
-            IsIncrementalUpdate: isIncrementalUpdate);
+            IsIncrementalUpdate: isIncrementalUpdate,
+            LanguageFacts: FilterLanguageFacts(languageFacts, chunk.Files));
 
         var prompt = PromptBuilder.Build(request);
         ReviewResult result;
@@ -1090,28 +1125,124 @@ public sealed class ReviewWorker : BackgroundService
             .ToArray();
     }
 
+    /// <summary>
+    /// Compiler-settled facts about constructs in the changed C# files, for the prompt.
+    /// </summary>
+    /// <remarks>
+    /// Uses content we already have rather than forcing a clone: the full file when it was
+    /// fetched for context, otherwise the reconstructed content of an added file, whose
+    /// patch is the whole file. A modified file with no full-file context yields nothing,
+    /// which simply leaves behaviour as it was.
+    /// </remarks>
+    private IReadOnlyList<LanguageFact>? BuildLanguageFacts(
+        IReadOnlyList<FileChange> files,
+        IReadOnlyDictionary<string, string>? fullFileContents,
+        ReviewJob job)
+    {
+        var facts = new List<LanguageFact>();
+        foreach (var file in files.Where(file => file.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)))
+        {
+            var source = fullFileContents?.GetValueOrDefault(file.Path)
+                ?? (file.Status == FileChangeStatus.Added
+                    ? UnifiedDiffParser.TryReconstructAddedFileContent(file.Patch)
+                    : null);
+            if (source is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                facts.AddRange(RoslynLiteralFactExtractor.Extract(file.Path, source, file.CommentableLines));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogDebug(ex, "Language facts: could not analyse {Path}; skipping", file.Path);
+            }
+        }
+
+        if (facts.Count == 0)
+        {
+            return null;
+        }
+
+        logger.LogInformation(
+            "Language facts: stated {FactCount} compiler-settled fact(s) for {Owner}/{Repo}#{PrNumber}",
+            facts.Count,
+            job.Owner,
+            job.Repo,
+            job.PrNumber);
+        return facts;
+    }
+
+    /// <summary>Narrows the facts to the files a chunk actually contains.</summary>
+    private static IReadOnlyList<LanguageFact>? FilterLanguageFacts(
+        IReadOnlyList<LanguageFact>? facts,
+        IReadOnlyList<FileChange> chunkFiles)
+    {
+        if (facts is null || facts.Count == 0)
+        {
+            return null;
+        }
+
+        var paths = chunkFiles.Select(file => file.Path).ToHashSet(StringComparer.Ordinal);
+        var scoped = facts.Where(fact => paths.Contains(fact.Path)).ToArray();
+        return scoped.Length == 0 ? null : scoped;
+    }
+
     private static IReadOnlyList<FileChange> GetReviewedChunkFiles(IReadOnlyList<ReviewChunk> chunks) =>
         chunks
             .SelectMany(chunk => chunk.Files)
             .ToArray();
 
-    // Builds the posted summary from the final surviving findings (not the model's
-    // free-text), so it always matches the comments actually posted. Used for both the
-    // single-chunk and chunked paths; the "across N chunk(s)" phrasing only appears when
-    // the diff was actually split.
+    /// <summary>
+    /// Builds the posted summary: the model's own prose, followed by a factual line
+    /// derived from the findings that actually survived.
+    /// </summary>
+    /// <remarks>
+    /// The prose used to be discarded outright in favour of the generated line, because a
+    /// model summary can describe a comment that filtering later dropped, or carry a claim
+    /// nothing checked. But that traded a wrong summary for a contentless one — the first
+    /// thing a human reads on the PR became a comment count they can already see, while
+    /// the model still spent reasoning and output tokens producing prose that was thrown
+    /// away. Keeping both puts the explanation back and keeps the counts honest.
+    ///
+    /// When nothing survived, the prose is dropped rather than shown: it would be
+    /// describing findings that are not on the page.
+    /// </remarks>
+    /// <param name="reviewedFileCount">
+    /// Files in the chunks that actually produced a result — not the files that were
+    /// planned. A chunk whose response was unusable is dropped so the rest of the review
+    /// can still post, and counting its files here would credit the bot for reading code
+    /// no model ever saw.
+    /// </param>
+    /// <param name="failedChunkCount">
+    /// Chunks that returned nothing usable. Any value above zero means the review is
+    /// partial, which has to be said out loud: "no actionable issues were found" over a
+    /// half-failed review reads as a clean bill of health for files nobody reviewed.
+    /// </param>
     private static string BuildFindingsSummary(
+        string? modelSummary,
         IReadOnlyList<InlineComment> comments,
-        IReadOnlyList<ReviewChunk> chunks)
+        int reviewedFileCount,
+        int reviewedChunkCount,
+        int failedChunkCount)
     {
-        var reviewedFileCount = chunks.Sum(chunk => chunk.Files.Count);
-        var chunkCount = chunks.Count;
-        var prefix = chunkCount > 1
-            ? $"Reviewed {reviewedFileCount} file(s) across {chunkCount} chunk(s)."
+        var prefix = reviewedChunkCount > 1
+            ? $"Reviewed {reviewedFileCount} file(s) across {reviewedChunkCount} chunk(s)."
             : $"Reviewed {reviewedFileCount} file(s).";
+
+        var partialNote = failedChunkCount == 0
+            ? string.Empty
+            : $" ⚠️ {failedChunkCount} of {reviewedChunkCount + failedChunkCount} chunk(s) could not be reviewed"
+                + " (the model returned no usable response), so this review is incomplete —"
+                + " re-run it with `/review` before relying on the result.";
 
         if (comments.Count == 0)
         {
-            return $"{prefix} No actionable issues were found.";
+            return failedChunkCount == 0
+                ? $"{prefix} No actionable issues were found."
+                : $"{prefix} No actionable issues were found in the part that was reviewed.{partialNote}";
         }
 
         var highestSeverity = comments.Max(comment => comment.Severity).ToString().ToLowerInvariant();
@@ -1126,8 +1257,11 @@ public sealed class ReviewWorker : BackgroundService
         var pathText = affectedPaths.Length == 0 ? string.Empty : $" Most affected files: {string.Join(", ", affectedPaths)}.";
         var verifiedCount = comments.Count(comment => comment.Verification == VerificationStatus.Verified);
         var verifiedText = verifiedCount == 0 ? string.Empty : $" {verifiedCount} corroborated against ground truth.";
+        var facts = $"{prefix} Found {issueText}; highest severity: {highestSeverity}.{pathText}{verifiedText}{partialNote}";
 
-        return $"{prefix} Found {issueText}; highest severity: {highestSeverity}.{pathText}{verifiedText}";
+        return string.IsNullOrWhiteSpace(modelSummary)
+            ? facts
+            : $"{modelSummary.Trim()}\n\n{facts}";
     }
 
     private SelfCritiqueRun? StartSelfCritiqueIfNeeded(
@@ -1135,6 +1269,7 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyList<FileChange> files,
         IReadOnlyList<InlineComment> candidateComments,
         ReviewConfig config,
+        SelfCritiqueContext context,
         CancellationToken ct)
     {
         if (!ShouldRunSelfCritique(candidateComments, config))
@@ -1143,7 +1278,7 @@ public sealed class ReviewWorker : BackgroundService
         }
 
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var task = ApplySelfCritiqueWithDropsAsync(llm, files, candidateComments, config, cts.Token);
+        var task = ApplySelfCritiqueWithDropsAsync(llm, files, candidateComments, config, context, cts.Token);
         return new SelfCritiqueRun(task, cts);
     }
 
@@ -1573,35 +1708,28 @@ public sealed class ReviewWorker : BackgroundService
             return new FullFileContextResult(null, budget);
         }
 
-        var candidates = FullFileContextSelector.SelectCandidates(files, config.Review.FullFileMaxBytes);
-
-        var selectedRequests = new List<ContextRequest>();
-        var selectionBudget = budget;
-        var loggedBudgetLimitedSelection = false;
-        foreach (var file in candidates)
+        // Nothing left to spend, so there is nothing worth fetching.
+        if (budget.RemainingContentTokens == 0)
         {
-            var estimatedTokens = EstimateTokens(config, file.Patch);
-            if (!selectionBudget.TryConsume("full_file_request_estimate", estimatedTokens, out var updatedBudget))
-            {
-                if (!loggedBudgetLimitedSelection)
-                {
-                    logger.LogWarning(
-                        "Full-file context for {Owner}/{Repo}#{PrNumber} is limited by prompt budget; skipping candidate {Path} because its estimated patch cost is {EstimatedTokens} token(s) and only {RemainingTokens} token(s) remain",
-                        job.Owner,
-                        job.Repo,
-                        job.PrNumber,
-                        file.Path,
-                        estimatedTokens,
-                        selectionBudget.RemainingContentTokens);
-                    loggedBudgetLimitedSelection = true;
-                }
-
-                continue;
-            }
-
-            selectionBudget = updatedBudget;
-            selectedRequests.Add(new ContextRequest(file.Path, "full-file context for small changed file"));
+            logger.LogDebug(
+                "Full-file context skipped for {Owner}/{Repo}#{PrNumber}: no content budget remains",
+                job.Owner,
+                job.Repo,
+                job.PrNumber);
+            return new FullFileContextResult(null, budget);
         }
+
+        // Every candidate is requested. There used to be a pre-fetch budget gate here that
+        // charged each file its *patch* size — a quantity with no relation to the file size
+        // it was guarding, since a five-line patch on a two-thousand-line file estimates ~20
+        // tokens against a real cost of ~15,000. It therefore admitted everything and only
+        // looked like a control. GitHub's files API reports additions, deletions and the
+        // patch but not the file's size, so nothing better is knowable until the content is
+        // in hand; the real gate is below, where the sizes are exact.
+        var selectedRequests = FullFileContextSelector
+            .SelectCandidates(files, config.Review.FullFileMaxBytes)
+            .Select(file => new ContextRequest(file.Path, "full-file context for small changed file"))
+            .ToList();
 
         var requests = selectedRequests.ToArray();
 
@@ -1650,9 +1778,18 @@ public sealed class ReviewWorker : BackgroundService
 
         var included = new Dictionary<string, string>(StringComparer.Ordinal);
         var updated = budget;
-        foreach (var fetchedFile in fetchedFiles)
+
+        // Smallest first. The sizes are exact now, and a budget that cannot hold everything
+        // should buy as many files as it can rather than however many happened to come
+        // before the large one: in candidate order a single 13K-token file can consume what
+        // five 2K-token files would have fitted in. Never includes fewer files than the old
+        // order, and usually more.
+        foreach (var fetchedFile in fetchedFiles
+            .Select(file => (file.Path, file.Content, Tokens: EstimateTokens(config, file.Content)))
+            .OrderBy(file => file.Tokens)
+            .ThenBy(file => file.Path, StringComparer.Ordinal))
         {
-            var estimatedTokens = EstimateTokens(config, fetchedFile.Content);
+            var estimatedTokens = fetchedFile.Tokens;
             if (!updated.TryConsume("full_file", estimatedTokens, out var afterFullFile))
             {
                 logger.LogDebug(
@@ -2004,6 +2141,7 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyList<FileChange> files,
         IReadOnlyList<InlineComment> candidateComments,
         ReviewConfig config,
+        SelfCritiqueContext context,
         CancellationToken ct)
     {
         if (!ShouldRunSelfCritique(candidateComments, config))
@@ -2011,14 +2149,17 @@ public sealed class ReviewWorker : BackgroundService
             return candidateComments;
         }
 
-        var retainedWithoutCritique = candidateComments
-            .Where(c => !ShouldCritiqueComment(c))
-            .ToArray();
-        var critiqueCandidates = candidateComments
-            .Where(ShouldCritiqueComment)
-            .ToArray();
+        var critiqueCandidates = candidateComments.ToArray();
 
-        var critiquePayload = SelfCritiquePromptBuilder.Build(files, critiqueCandidates);
+        // The critic is handed the same evidence the review pass saw. Given only the diff
+        // it cannot distinguish a finding grounded in a retrieved definition from one
+        // invented about absent code, and deletes both.
+        var critiquePayload = SelfCritiquePromptBuilder.Build(
+            files,
+            critiqueCandidates,
+            context.RepositoryContext,
+            context.FullFileContents,
+            config.Review.MaxPatchLines);
         try
         {
             var critiqueSw = Stopwatch.StartNew();
@@ -2045,12 +2186,12 @@ public sealed class ReviewWorker : BackgroundService
                 .Select(i => critiqueCandidates[i])
                 .ToArray();
             logger.LogDebug(
-                "Self-critique retained {Retained}/{Total} lower-confidence comments. Rationale: {Rationale}",
+                "Self-critique retained {Retained}/{Total} comments. Rationale: {Rationale}",
                 retained.Length,
                 critiqueCandidates.Length,
                 critique.Rationale);
 
-            return retainedWithoutCritique.Concat(retained).ToArray();
+            return retained;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2064,44 +2205,36 @@ public sealed class ReviewWorker : BackgroundService
         IReadOnlyList<FileChange> files,
         IReadOnlyList<InlineComment> candidateComments,
         ReviewConfig config,
+        SelfCritiqueContext context,
         CancellationToken ct)
     {
-        var retained = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, ct)
+        var retained = await ApplySelfCritiqueAsync(llm, files, candidateComments, config, context, ct)
             .ConfigureAwait(false);
         return new CommentFilterResult(
             retained,
             FindDroppedComments(candidateComments, retained, "self_critique"));
     }
 
+    /// <summary>
+    /// The non-diff evidence the review pass was given, forwarded to the critique pass.
+    /// </summary>
+    private sealed record SelfCritiqueContext(
+        IReadOnlyList<RepositoryContextSnippet>? RepositoryContext,
+        IReadOnlyDictionary<string, string>? FullFileContents);
+
+    // Every candidate goes through critique. The old routing exempted high-confidence
+    // non-error comments that matched no checkable-claim phrase; two thirds of that test
+    // is now gone with the phrase lists, and the remaining third rests on a signal the
+    // model does not actually vary — it reported high confidence on 14 of 14 comments in
+    // the reference run — so the exemption amounted to "skip review for warnings".
+    //
+    // The cost is real and deliberate: a review that produces any comment now always pays
+    // a second LLM round-trip, where before an all-high-confidence, sub-error review could
+    // skip it. That is only worth paying if the critique earns its keep, which is exactly
+    // what the live A/B measures; if it does not, the answer is to turn the stage off
+    // rather than to exempt comments from it on an uninformative signal.
     private static bool ShouldRunSelfCritique(IReadOnlyList<InlineComment> candidateComments, ReviewConfig config) =>
-        config.Review.SelfCritique &&
-        candidateComments.Any(ShouldCritiqueComment);
-
-    // Self-critique normally exempts high-confidence comments to save a pass. But a
-    // confident, error-severity claim is exactly the hallucination that most erodes
-    // trust (e.g. "this is invalid C# syntax" on code that compiles), and being
-    // high-confidence means it bypasses every other filter — so route those through
-    // critique too. Also route confirmation-style comments and mechanically-checkable
-    // claims (disposal, leaks, throws, null, range): these are the false positives that
-    // nearby code most often refutes (a `using` declaration, a `Count == 0` guard), and
-    // only the diff-aware critique pass can see that context. High-confidence
-    // warning/info comments that make none of these claims stay exempt.
-    private static bool ShouldCritiqueComment(InlineComment comment) =>
-        comment.Confidence != Confidence.High
-        || comment.Severity == Severity.Error
-        || MakesCheckableOrConfirmationClaim(comment.Body);
-
-    private static bool MakesCheckableOrConfirmationClaim(string body)
-    {
-        if (string.IsNullOrWhiteSpace(body))
-        {
-            return false;
-        }
-
-        var normalized = NormalizeForTextHeuristics(body);
-        return ContainsAny(normalized, CheckableClaimPhrases) ||
-            ContainsAny(normalized, ConfirmationPhrases);
-    }
+        config.Review.SelfCritique && candidateComments.Count > 0;
 
     private static CommentFilterResult FilterCandidateComments(
         ReviewResult result,
@@ -2135,6 +2268,23 @@ public sealed class ReviewWorker : BackgroundService
         return new CommentFilterResult(kept.ToArray(), dropped.ToArray());
     }
 
+    /// <summary>
+    /// Deterministic, evidence-backed reasons to drop a candidate comment.
+    /// </summary>
+    /// <remarks>
+    /// This deliberately holds only checks backed by something other than the comment's
+    /// own wording. Six prose-matching filters (praise, confirmation, meta-review,
+    /// non-actionable-process, speculative-missing-context, and the checkable-claim
+    /// routing) used to live here, matching ~250 lines of English phrases against the
+    /// body. Replayed against realistic true positives, six of seven were dropped: a
+    /// pagination-truncation bug as "confirmation_only" because it said "this ensures",
+    /// a concurrent-dictionary mutation as "non_actionable_process" because it said
+    /// "consider whether", a mid-codepoint truncation bug as "praise_only" because it
+    /// contained the word "correctly". None of it was measurable — the eval harness
+    /// never ran this method — and every rule it enforced is already stated in the
+    /// system prompt and the self-critique prompt, where a model can weigh it in
+    /// context instead of matching a substring.
+    /// </remarks>
     private static string? GetCommentDropReason(InlineComment comment, ReviewConfig config, GroundingContext? grounding)
     {
         if (comment.Confidence < config.Review.MinConfidence)
@@ -2147,31 +2297,6 @@ public sealed class ReviewWorker : BackgroundService
         if (ClaimsCompileFailureContradictedByBuild(comment.Body, grounding))
         {
             return "grounding_build_contradicts";
-        }
-
-        if (IsPraiseOnlyComment(comment.Body))
-        {
-            return "praise_only";
-        }
-
-        if (IsConfirmationOnlyComment(comment.Body))
-        {
-            return "confirmation_only";
-        }
-
-        if (IsMetaReviewComment(comment.Body))
-        {
-            return "meta_review";
-        }
-
-        if (IsNonActionableProcessComment(comment.Body))
-        {
-            return "non_actionable_process";
-        }
-
-        if (IsSpeculativeMissingContextComment(comment.Body))
-        {
-            return "speculative_missing_context";
         }
 
         return null;
@@ -2455,50 +2580,19 @@ public sealed class ReviewWorker : BackgroundService
             new([], new HashSet<string>(StringComparer.Ordinal));
     }
 
+    // The summary is now synthesized from the surviving findings (see BuildFindingsSummary),
+    // so a "looks good overall" summary sitting above a list of real defects is no longer
+    // reachable and the phrase-matching veto that used to blank it is gone with it.
     private static ReviewResult ApplyOutputConfig(
         ReviewResult result,
         IReadOnlyList<InlineComment> comments,
         ReviewConfig config)
     {
         var summary = config.Review.Summary ? result.Summary : string.Empty;
-        if (IsPositiveOnlySummary(summary))
-        {
-            summary = string.Empty;
-        }
 
         return summary == result.Summary && ReferenceEquals(comments, result.Comments)
             ? result
             : result with { Summary = summary, Comments = comments };
-    }
-
-    private static bool IsPraiseOnlyComment(string body)
-    {
-        if (string.IsNullOrWhiteSpace(body))
-        {
-            return false;
-        }
-
-        var normalized = NormalizeForTextHeuristics(body);
-        return ContainsAny(normalized, PraiseCommentPhrases) &&
-            !ContainsAny(normalized, ActionableConcernPhrases);
-    }
-
-    // Drops comments that only validate the code ("this is the correct approach",
-    // "works correctly") and identify no concern. Distinct from praise-only: it catches
-    // confirmations phrased with incidental suggestion words like "should" that defeat
-    // the praise veto, while staying conservative — any genuine defect or contrast word
-    // ("but", "however", "null", "leak", …) keeps the comment, so a real concern bundled
-    // with a confirmation is never dropped here (it is routed to self-critique instead).
-    private static bool IsConfirmationOnlyComment(string body)
-    {
-        if (string.IsNullOrWhiteSpace(body))
-        {
-            return false;
-        }
-
-        var normalized = NormalizeForTextHeuristics(body);
-        return ContainsAny(normalized, ConfirmationPhrases) &&
-            !ContainsAny(normalized, StrongConcernVetoPhrases);
     }
 
     private static bool ClaimsCompileFailureContradictedByBuild(string body, GroundingContext? grounding)
@@ -2508,327 +2602,6 @@ public sealed class ReviewWorker : BackgroundService
         // proves the code compiles, so any compile/syntax-failure claim is wrong.
         return grounding?.Build is { Success: true } && CompileClaimClassifier.IsCompileFailureClaim(body);
     }
-
-    private static bool IsPositiveOnlySummary(string summary)
-    {
-        if (string.IsNullOrWhiteSpace(summary))
-        {
-            return false;
-        }
-
-        var normalized = NormalizeForTextHeuristics(summary);
-        return ContainsAny(normalized, PositiveSummaryPhrases) &&
-            !ContainsAny(normalized, ActionableConcernPhrases);
-    }
-
-    private static bool IsMetaReviewComment(string body)
-    {
-        if (string.IsNullOrWhiteSpace(body))
-        {
-            return false;
-        }
-
-        var normalized = NormalizeForTextHeuristics(body);
-        var referencesEvalArtifact = ContainsAny(normalized, EvalArtifactPhrases);
-        var validatesExpectedOutcome = ContainsAny(normalized, ExpectedOutcomePhrases);
-
-        return referencesEvalArtifact && validatesExpectedOutcome;
-    }
-
-    private static bool IsSpeculativeMissingContextComment(string body)
-    {
-        if (string.IsNullOrWhiteSpace(body))
-        {
-            return false;
-        }
-
-        var normalized = NormalizeForTextHeuristics(body);
-        if (ContainsAny(normalized, ExplicitMissingContextPhrases))
-        {
-            return true;
-        }
-
-        var asksToVerifyMissingContract = ContainsAny(normalized, MissingContractDirectivePhrases);
-        var usesSpeculativeLanguage = ContainsAny(normalized, SpeculativeLanguagePhrases);
-        var referencesUnseenContract = ContainsAny(normalized, UnseenContractPhrases);
-
-        return asksToVerifyMissingContract && usesSpeculativeLanguage && referencesUnseenContract;
-    }
-
-    private static bool IsNonActionableProcessComment(string body)
-    {
-        if (string.IsNullOrWhiteSpace(body))
-        {
-            return false;
-        }
-
-        var normalized = NormalizeForTextHeuristics(body);
-        return ContainsAny(normalized, NonActionableProcessPhrases);
-    }
-
-    private static string NormalizeForTextHeuristics(string value)
-    {
-        var sb = new StringBuilder(value.Length + 2);
-        sb.Append(' ');
-        foreach (var character in value)
-        {
-            sb.Append(char.IsLetterOrDigit(character) ? char.ToLowerInvariant(character) : ' ');
-        }
-
-        sb.Append(' ');
-        return sb.ToString();
-    }
-
-    private static bool ContainsAny(string normalizedText, IReadOnlyList<string> phrases) =>
-        phrases.Any(phrase => normalizedText.Contains(phrase, StringComparison.Ordinal));
-
-    private static readonly string[] PraiseCommentPhrases =
-    [
-        " appropriate ",
-        " appropriately ",
-        " correct ",
-        " correctly ",
-        " correctly validates ",
-        " excellent ",
-        " good coverage ",
-        " good guard ",
-        " good test ",
-        " great ",
-        " guards against ",
-        " helpful ",
-        " looks good ",
-        " nice ",
-        " properly ",
-        " reasonable ",
-        " solid ",
-        " useful ",
-        " validates that ",
-        " well done ",
-        " well written "
-    ];
-
-    // Phrases that validate/confirm the code is correct (not phrased as a request).
-    // "is correct" is deliberately excluded — it appears in actionable asks like
-    // "validate that X is correct" — in favour of confirmation-specific wordings.
-    private static readonly string[] ConfirmationPhrases =
-    [
-        " correct approach ",
-        " correct way ",
-        " right approach ",
-        " correctly handles ",
-        " correctly handle ",
-        " correctly handled ",
-        " correctly implements ",
-        " works correctly ",
-        " works as intended ",
-        " working as intended ",
-        " behaves correctly ",
-        " handled correctly ",
-        " this ensures ",
-        " good approach ",
-        " sound approach ",
-        " no issue here ",
-        " no concern here ",
-        " no concerns here ",
-        " is acceptable here ",
-        " is fine here "
-    ];
-
-    // Genuine defect / contrast signals. Tighter than ActionableConcernPhrases: it omits
-    // weak hedges (" should ", " could ", " may ", " consider ") that appear in benign
-    // confirmation prose, so it vetoes confirmation-dropping only on a real concern.
-    private static readonly string[] StrongConcernVetoPhrases =
-    [
-        " but ",
-        " however ",
-        " instead ",
-        " bug ",
-        " wrong ",
-        " incorrect ",
-        " fail ",
-        " fails ",
-        " failure ",
-        " missing ",
-        " leak ",
-        " leaks ",
-        " race ",
-        " deadlock ",
-        " overflow ",
-        " injection ",
-        " vulnerable ",
-        " unsafe ",
-        " null ",
-        " exception ",
-        " crash ",
-        " throw ",
-        " throws ",
-        " regress ",
-        " breaks ",
-        " corrupt ",
-        " dereference ",
-        " does not ",
-        " doesn t ",
-        " not handled "
-    ];
-
-    // Mechanically-checkable correctness claims whose truth a few nearby lines usually
-    // settle (a `using`, a guard, an `await`). High-confidence comments making these are
-    // routed through the diff-aware self-critique that they would otherwise skip.
-    private static readonly string[] CheckableClaimPhrases =
-    [
-        " not disposed ",
-        " isn t disposed ",
-        " never disposed ",
-        " not be disposed ",
-        " dispose ",
-        " disposed ",
-        " leak ",
-        " leaks ",
-        " leaked ",
-        " orphaned ",
-        " resource leak ",
-        " memory leak ",
-        " will throw ",
-        " can throw ",
-        " could throw ",
-        " may throw ",
-        " throws ",
-        " null reference ",
-        " nullreferenceexception ",
-        " null deref ",
-        " dereference ",
-        " out of range ",
-        " index out of ",
-        " empty list ",
-        " empty collection ",
-        " on an empty ",
-        " on empty ",
-        " not awaited ",
-        " not closed ",
-        " never closed "
-    ];
-
-    private static readonly string[] PositiveSummaryPhrases =
-    [
-        " clean ",
-        " good overall ",
-        " looks good ",
-        " looks solid ",
-        " no actionable ",
-        " no concerns ",
-        " no issues ",
-        " nothing to flag ",
-        " solid "
-    ];
-
-    private static readonly string[] EvalArtifactPhrases =
-    [
-        " expected yaml ",
-        " expected finding ",
-        " expected findings ",
-        " fixture ",
-        " fixtures "
-    ];
-
-    private static readonly string[] ExpectedOutcomePhrases =
-    [
-        " correctly models ",
-        " expected yaml requires ",
-        " requires mentioning ",
-        " requires that ",
-        " should expect "
-    ];
-
-    private static readonly string[] NonActionableProcessPhrases =
-    [
-        " add a comment explaining ",
-        " consider adding a comment ",
-        " consider whether ",
-        " this is correct ",
-        " this is correct behavior ",
-        " this is the correct behavior ",
-        " this is intentional ",
-        " this is the intended behavior "
-    ];
-
-    private static readonly string[] MissingContractDirectivePhrases =
-    [
-        " check whether ",
-        " confirm ",
-        " ensure ",
-        " make sure ",
-        " verify "
-    ];
-
-    private static readonly string[] ExplicitMissingContextPhrases =
-    [
-        " implementation isn t visible ",
-        " implementation is not visible ",
-        " isn t visible in this diff ",
-        " is not visible in this diff ",
-        " not visible in this diff "
-    ];
-
-    private static readonly string[] SpeculativeLanguagePhrases =
-    [
-        " could ",
-        " depending on ",
-        " if ",
-        " may ",
-        " might "
-    ];
-
-    private static readonly string[] UnseenContractPhrases =
-    [
-        " async behavior ",
-        " async await ",
-        " contract ",
-        " is async ",
-        " method s return type ",
-        " return type ",
-        " side effects "
-    ];
-
-    private static readonly string[] ActionableConcernPhrases =
-    [
-        " add ",
-        " avoid ",
-        " breaks ",
-        " bug ",
-        " but ",
-        " change ",
-        " consider ",
-        " could ",
-        " deadlock ",
-        " does not ",
-        " doesn t ",
-        " exception ",
-        " fail ",
-        " fails ",
-        " fix ",
-        " however ",
-        " incorrect ",
-        " issue ",
-        " leak ",
-        " may ",
-        " might ",
-        " missing ",
-        " needs ",
-        " not ",
-        " null ",
-        " problem ",
-        " race ",
-        " regress ",
-        " remove ",
-        " restore ",
-        " risk ",
-        " should ",
-        " throw ",
-        " unsafe ",
-        " unless ",
-        " vulnerable ",
-        " wrong "
-    ];
 
     private static ContextRequestValidationResult FilterContextRequests(
         IReadOnlyList<ContextRequest> requests,

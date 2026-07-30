@@ -18,7 +18,7 @@ public sealed class AnthropicReviewLlm : IConfigurableReviewLlm
 
     public string ModelName => options.ModelName;
 
-    public bool SupportsParallelRequests => true;
+    public int MaxConcurrentRequests => Math.Max(1, options.MaxConcurrentRequests);
 
     private readonly AnthropicLlmOptions options;
     private readonly ILogger<AnthropicReviewLlm> logger;

@@ -98,10 +98,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
             harness.GitHubMock,
             IsReviewPostPath);
 
-        var llmRequest = harness.LlmMock.LogEntries
-            .Where(entry => entry.RequestMessage is { Path: "/v1/chat/completions" })
-            .Select(entry => entry.RequestMessage!.Body)
-            .Single();
+        var llmRequest = ReviewPromptBody(harness.LlmMock);
         llmRequest.Should().Contain("### Full file: src/Services/UserService.cs");
         llmRequest.Should().Contain("private readonly IUserRepository _repository;");
         llmRequest!.IndexOf("### Full file: src/Services/UserService.cs", StringComparison.Ordinal)
@@ -146,7 +143,8 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
             harness.GitHubMock,
             IsReviewPostPath);
 
-        WorkerSyncHelper.CountMatchingRequests(harness.LlmMock, "POST", IsOpenAiChatPath).Should().Be(2);
+        // Review, repair, then self-critique.
+        WorkerSyncHelper.CountMatchingRequests(harness.LlmMock, "POST", IsOpenAiChatPath).Should().Be(3);
         parseFailures.Should().ContainSingle(measurement => measurement.repaired == "true" && measurement.value == 1);
         using var reviewPayload = GetSingleRequestJson(harness.GitHubMock, "POST", IsReviewPostPath);
         reviewPayload.RootElement.GetProperty("comments").GetArrayLength().Should().Be(2);
@@ -249,10 +247,7 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
             harness.GitHubMock,
             IsReviewPostPath);
 
-        var llmRequest = harness.LlmMock.LogEntries
-            .Where(entry => entry.RequestMessage is { Path: "/v1/chat/completions" })
-            .Select(entry => entry.RequestMessage!.Body)
-            .Single();
+        var llmRequest = ReviewPromptBody(harness.LlmMock);
         llmRequest.Should().Contain("## Project context");
         llmRequest.Should().Contain("C# (.NET 10.0)");
         llmRequest.Should().Contain("Checks: FAILED");
@@ -279,7 +274,9 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         secondResponse.StatusCode.Should().Be(HttpStatusCode.OK);
         await Task.Delay(TimeSpan.FromMilliseconds(250));
 
-        WorkerSyncHelper.CountMatchingRequests(harness.LlmMock, "POST", IsOpenAiChatPath).Should().Be(1);
+        // One review's worth of LLM traffic (review + self-critique), not two: the
+        // duplicate delivery was deduped before it reached the worker.
+        WorkerSyncHelper.CountMatchingRequests(harness.LlmMock, "POST", IsOpenAiChatPath).Should().Be(2);
         WorkerSyncHelper.CountMatchingRequests(harness.GitHubMock, "POST", IsReviewPostPath).Should().Be(1);
     }
 
@@ -750,4 +747,19 @@ public sealed class BasicReviewTests(ReviewBotHarness harness)
         path == $"/repos/{Owner}/{Repo}/pulls/{PullNumber}/reviews";
 
     private static bool IsOpenAiChatPath(string path) => path == "/v1/chat/completions";
+
+    /// <summary>
+    /// The body of the review call, picked out by its system prompt.
+    /// </summary>
+    /// <remarks>
+    /// A review makes more than one call to the same endpoint — self-critique follows the
+    /// review, and a malformed response adds a repair — so selecting "the LLM request"
+    /// has to say which one it means rather than assume there is only one.
+    /// </remarks>
+    private static string ReviewPromptBody(WireMockServer llmMock) =>
+        llmMock.LogEntries
+            .Where(entry => entry.RequestMessage is { Path: "/v1/chat/completions" })
+            .Select(entry => entry.RequestMessage!.Body)
+            .Single(body => body is not null &&
+                body.Contains("senior code reviewer reviewing a pull request", StringComparison.Ordinal))!;
 }

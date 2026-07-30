@@ -19,7 +19,10 @@ public sealed record ReviewRequest(
     // True when this is an incremental re-review: the files below are only those
     // changed since the previous review, not the whole PR. Lets the prompt tell
     // the model to scope its summary to the update.
-    bool IsIncrementalUpdate = false);
+    bool IsIncrementalUpdate = false,
+    // Compiler-settled facts about constructs in the diff, stated up front so the
+    // model does not guess at them. See LanguageFact.
+    IReadOnlyList<LanguageFact>? LanguageFacts = null);
 
 public sealed record RepositoryContextSnippet(
     string Path,

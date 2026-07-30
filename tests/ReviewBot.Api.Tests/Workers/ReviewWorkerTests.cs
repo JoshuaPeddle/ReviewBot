@@ -221,7 +221,7 @@ public class ReviewWorkerTests
     }
 
     [Fact]
-    public async Task SynthesizesSummaryFromSurvivingFindingsNotModelProse()
+    public async Task SummaryKeepsModelProseAndAppendsFactsAboutSurvivingFindings()
     {
         await using var fixture = new WorkerFixture();
         var files = new[] { CreateFile("src/A.cs") };
@@ -234,11 +234,12 @@ public class ReviewWorkerTests
 
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default).ReturnsForAnyArgs(config);
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default, default).ReturnsForAnyArgs(files);
-        // The model's free-text summary asserts a dramatic, unbacked claim; only one
-        // concrete comment survives. The posted summary must reflect the finding, not the prose.
+        // The model's prose is what a human actually reads, so it is kept. The generated
+        // facts line follows it, derived from the findings that survived, so the counts
+        // can never disagree with the comments on the page.
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult(
-                "This PR has a critical flaw in the disposal logic that leaks processes everywhere.",
+                "Tightens disposal in the worker; one nullable path still looks unguarded.",
                 [new InlineComment("src/A.cs", 2, "RIGHT", "Guard against null input before dereferencing.", Severity.Warning)]));
         fixture.ReviewPoster.PostAsync(default!, default!, default, default!, Arg.Do<ReviewResult>(r => postedResult = r), default!, default!, default)
             .ReturnsForAnyArgs(_ =>
@@ -253,7 +254,48 @@ public class ReviewWorkerTests
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         postedResult.Should().NotBeNull();
-        postedResult!.Summary.Should().Contain("Found 1 actionable issue").And.Contain("highest severity: warning");
+        postedResult!.Summary.Should().Contain("one nullable path still looks unguarded");
+        postedResult.Summary.Should().Contain("Found 1 actionable issue").And.Contain("highest severity: warning");
+        postedResult.Summary.IndexOf("Tightens disposal", StringComparison.Ordinal)
+            .Should().BeLessThan(postedResult.Summary.IndexOf("Found 1 actionable issue", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// When nothing survived filtering, the model's prose is dropped rather than posted:
+    /// it would be describing findings that are not on the page.
+    /// </summary>
+    [Fact]
+    public async Task SummaryDropsModelProseWhenNoFindingsSurvive()
+    {
+        await using var fixture = new WorkerFixture();
+        var files = new[] { CreateFile("src/A.cs") };
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with { SelfCritique = false }
+        };
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default).ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default, default).ReturnsForAnyArgs(files);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new ReviewResult(
+                "This PR has a critical flaw in the disposal logic that leaks processes everywhere.",
+                []));
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, Arg.Do<ReviewResult>(r => postedResult = r), default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult.Should().NotBeNull();
+        postedResult!.Summary.Should().Contain("No actionable issues were found");
         postedResult.Summary.Should().NotContain("critical flaw").And.NotContain("disposal logic");
     }
 
@@ -772,7 +814,12 @@ public class ReviewWorkerTests
     }
 
     [Fact]
-    public async Task FullFileContextUsesRemainingPromptBudgetToLimitFetchRequests()
+    /// <summary>
+    /// Every candidate is requested; the prompt budget decides afterwards, once the sizes
+    /// are known. The pre-fetch gate this replaced charged each file its *patch* size,
+    /// which bears no relation to the file size it was guarding.
+    /// </summary>
+    public async Task FullFileContextRequestsEveryCandidateAndBudgetsAfterFetching()
     {
         var estimator = new KeywordTokenEstimator(
             new Dictionary<string, int>(StringComparer.Ordinal)
@@ -829,9 +876,78 @@ public class ReviewWorkerTests
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        fetchedRequests!.Select(request => request.Path).Should().Equal("src/Small.cs");
+        fetchedRequests!.Select(request => request.Path)
+            .Should().Equal("src/Small.cs", "src/Large.cs");
         capturedRequest!.FullFileContents.Should().ContainSingle()
             .Which.Key.Should().Be("src/Small.cs");
+    }
+
+    /// <summary>
+    /// A budget that cannot hold everything buys as many files as it can, rather than
+    /// however many happened to precede the large one.
+    /// </summary>
+    [Fact]
+    public async Task FullFileContextIncludesSmallestFilesFirstWhenTheBudgetIsTight()
+    {
+        var estimator = new KeywordTokenEstimator(
+            new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                ["large body"] = 15,
+                ["small body"] = 8
+            });
+        await using var fixture = new WorkerFixture(
+            modelContextRegistry: new FixedModelContextRegistry(20),
+            tokenEstimator: estimator);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                FullFileMaxBytes = 10_000,
+                ResponseReserveTokens = 0
+            }
+        };
+        var files = new[]
+        {
+            CreateFile("src/Large.cs", "@@ -1 +1 @@\n+x", new HashSet<int> { 1 }),
+            CreateFile("src/SmallA.cs", "@@ -1 +1 @@\n+x", new HashSet<int> { 1 }),
+            CreateFile("src/SmallB.cs", "@@ -1 +1 @@\n+x", new HashSet<int> { 1 })
+        };
+        ReviewRequest? capturedRequest = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        // Returned large-first, so only the ordering under test can rescue the small ones.
+        fixture.PullRequestFetcher.GetFileContentsAsync(default!, default!, default!, default!, default, default!, default)
+            .ReturnsForAnyArgs(_ => new[]
+            {
+                ("src/Large.cs", "large body"),
+                ("src/SmallA.cs", "small body"),
+                ("src/SmallB.cs", "small body")
+            });
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                capturedRequest = call.Arg<ReviewRequest>();
+                return new ReviewResult("Reviewed.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ =>
+            {
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        // 8 + 8 fits in 20; taking the 15-token file first would have fitted only itself.
+        capturedRequest!.FullFileContents!.Keys.Should()
+            .BeEquivalentTo(["src/SmallA.cs", "src/SmallB.cs"]);
     }
 
     [Fact]
@@ -966,6 +1082,81 @@ public class ReviewWorkerTests
         selfCritiqueCalls.Should().Be(1);
     }
 
+    /// <summary>
+    /// A chunk whose response is unusable is dropped so the rest of the review can still
+    /// post. The summary must say so, and must not count that chunk's files as reviewed.
+    /// </summary>
+    /// <remarks>
+    /// Caught by dogfooding PR #52: one of two chunks exhausted its output allowance and
+    /// returned nothing, and the bot posted "Reviewed 10 file(s) across 2 chunk(s). No
+    /// actionable issues were found." Five of those files had never been reviewed by any
+    /// model, so a half-failed review read as a clean bill of health.
+    /// </remarks>
+    [Fact]
+    public async Task SummaryReportsPartialCoverageWhenAChunkReturnsNothingUsable()
+    {
+        var estimator = new KeywordTokenEstimator(
+            new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                ["chunk-token"] = 10
+            });
+        await using var fixture = new WorkerFixture(
+            modelContextRegistry: new FixedModelContextRegistry(20),
+            tokenEstimator: estimator);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                ResponseReserveTokens = 0,
+                ChunkHeadroom = 0.5,
+                MaxChunks = 10,
+                SelfCritique = false
+            }
+        };
+        var files = Enumerable.Range(1, 3)
+            .Select(i => CreateFile($"src/File{i}.cs", "@@ -1 +1 @@\n+chunk-token", new HashSet<int> { 1 }))
+            .ToArray();
+        ReviewResult? postedResult = null;
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var file = call.Arg<ReviewRequest>().Files.Single();
+                if (file.Path == "src/File2.cs")
+                {
+                    throw new LlmResponseUnusableException("model exhausted its output allowance");
+                }
+
+                return new ReviewResult($"Reviewed {file.Path}.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(call =>
+            {
+                postedResult = call.ArgAt<ReviewResult>(4);
+                posted.SetResult();
+                return Task.CompletedTask;
+            });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        postedResult.Should().NotBeNull();
+        // Two of three chunks produced a result, so two files were reviewed — not three.
+        postedResult!.Summary.Should().Contain("Reviewed 2 file(s)");
+        postedResult.Summary.Should().NotContain("Reviewed 3 file(s)");
+        postedResult.Summary.Should().Contain("1 of 3 chunk(s) could not be reviewed");
+        postedResult.Summary.Should().Contain("this review is incomplete");
+        // The unqualified all-clear is what made the old summary misleading.
+        postedResult.Summary.Should().NotContain("No actionable issues were found.\n");
+    }
+
     [Fact]
     public async Task PromptBudgetingUsesProviderAwareTokenEstimatorForConfiguredModel()
     {
@@ -1095,12 +1286,69 @@ public class ReviewWorkerTests
         postedResult.Summary.Should().Contain("`src/C.cs`");
     }
 
+    /// <summary>
+    /// A diff that fits the budget but exceeds the headroom fraction still splits.
+    /// Chunking used to trigger only on overflow, which made chunk_headroom unreachable
+    /// on a large context window — the diff always fit, so a review was never split
+    /// however small the operator asked chunks to be.
+    /// </summary>
+    [Fact]
+    public async Task ChunkedReviewSplitsADiffThatFitsTheBudgetButExceedsTheHeadroom()
+    {
+        var estimator = new KeywordTokenEstimator(
+            new Dictionary<string, int>(StringComparer.Ordinal) { ["chunk-token"] = 10 });
+        await using var fixture = new WorkerFixture(
+            modelContextRegistry: new FixedModelContextRegistry(100),
+            tokenEstimator: estimator);
+        var config = ReviewConfig.Default with
+        {
+            Review = ReviewConfig.Default.Review with
+            {
+                ResponseReserveTokens = 0,
+                // 30 tokens of diff fits the 100-token budget outright, but not a quarter of it.
+                ChunkHeadroom = 0.25,
+                MaxChunks = 10,
+                SelfCritique = false
+            }
+        };
+        var files = Enumerable.Range(1, 3)
+            .Select(i => CreateFile($"src/File{i}.cs", "@@ -1 +1 @@\n+chunk-token", new HashSet<int> { 1 }))
+            .ToArray();
+        var chunkIndexes = new List<int?>();
+        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(config);
+        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
+            .ReturnsForAnyArgs(files);
+        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var request = call.Arg<ReviewRequest>();
+                lock (chunkIndexes) { chunkIndexes.Add(request.ChunkIndex); }
+                return new ReviewResult("Reviewed.", []);
+            });
+        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
+            .ReturnsForAnyArgs(_ => { posted.SetResult(); return Task.CompletedTask; });
+
+        await fixture.StartAsync();
+        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        chunkIndexes.Should().HaveCountGreaterThan(1, "the diff exceeded the headroom fraction");
+    }
+
+    /// <summary>
+    /// Chunk dispatch honours the provider's stated concurrency exactly: never more than
+    /// it allows, and — given three chunks and a slow provider — actually reaching it.
+    /// </summary>
     [Theory]
-    [InlineData(false, 1)]
-    [InlineData(true, 2)]
-    public async Task ChunkedReviewDispatchesAccordingToLlmParallelSupport(
-        bool supportsParallelRequests,
-        int expectedMinimumConcurrency)
+    [InlineData(1, 1)]
+    [InlineData(2, 2)]
+    [InlineData(3, 3)]
+    public async Task ChunkedReviewDispatchesAtTheProvidersConcurrencyLimit(
+        int maxConcurrentRequests,
+        int expectedConcurrency)
     {
         var estimator = new KeywordTokenEstimator(
             new Dictionary<string, int>(StringComparer.Ordinal)
@@ -1128,7 +1376,7 @@ public class ReviewWorkerTests
         var maxConcurrency = 0;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        fixture.Llm.SupportsParallelRequests.Returns(supportsParallelRequests);
+        fixture.Llm.MaxConcurrentRequests.Returns(maxConcurrentRequests);
         fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
             .ReturnsForAnyArgs(config);
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
@@ -1163,11 +1411,8 @@ public class ReviewWorkerTests
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        maxConcurrency.Should().BeGreaterThanOrEqualTo(expectedMinimumConcurrency);
-        if (!supportsParallelRequests)
-        {
-            maxConcurrency.Should().Be(1);
-        }
+        // Exactly the stated degree: the gate must neither throttle below it nor leak above it.
+        maxConcurrency.Should().Be(expectedConcurrency);
     }
 
     [Fact]
@@ -1836,9 +2081,11 @@ public class ReviewWorkerTests
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
-        durationMeasurements.Should().ContainSingle()
-            .Which.provider.Should().Be("openai");
-        durationMeasurements[0].value.Should().BeGreaterThanOrEqualTo(0);
+        // Two LLM phases under the default config: the review, then the self-critique
+        // pass that every comment now goes through.
+        durationMeasurements.Should().HaveCount(2);
+        durationMeasurements.Should().OnlyContain(m => m.provider == "openai");
+        durationMeasurements.Should().OnlyContain(m => m.value >= 0);
 
         commentsMeasurements.Should().ContainSingle()
             .Which.Should().Be(1);
@@ -2142,245 +2389,6 @@ public class ReviewWorkerTests
     }
 
     [Fact]
-    public async Task PraiseOnlyCommentsAndCleanSummariesAreDroppedBeforePosting()
-    {
-        await using var fixture = new WorkerFixture();
-        ReviewResult? postedResult = null;
-        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
-            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
-        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ReviewResult(
-                "Looks good.",
-                [
-                    new InlineComment("src/App.cs", 1, "RIGHT", "Nice guard.", Severity.Info, Confidence.High),
-                    new InlineComment("src/App.cs", 2, "RIGHT", "The test correctly validates the important behavior.", Severity.Info, Confidence.Medium),
-                    new InlineComment("src/App.cs", 3, "RIGHT", "This should handle null input before dereferencing the value.", Severity.Warning, Confidence.High)
-                ]));
-        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(call =>
-            {
-                postedResult = call.ArgAt<ReviewResult>(4);
-                posted.SetResult();
-                return Task.CompletedTask;
-            });
-
-        await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
-
-        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-
-        postedResult!.Comments.Should().ContainSingle()
-            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
-        postedResult.Summary.Should().NotContain("Looks good.");
-    }
-
-    [Fact]
-    public async Task SpeculativeMissingContractCommentsAreDroppedBeforePosting()
-    {
-        await using var fixture = new WorkerFixture();
-        ReviewResult? postedResult = null;
-        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
-            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
-        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ReviewResult(
-                "Review complete.",
-                [
-                    new InlineComment(
-                        "src/App.cs",
-                        1,
-                        "RIGHT",
-                        "Transaction signing and execution are performed synchronously without awaiting the sign operation. If _walletManager.SignTransaction() is async, this will block the thread. Verify the signature method's return type and ensure proper async/await usage to avoid deadlocks in hosted environments.",
-                        Severity.Warning,
-                        Confidence.High),
-                    new InlineComment(
-                        "src/App.cs",
-                        2,
-                        "RIGHT",
-                        "This should handle null input before dereferencing the value.",
-                        Severity.Warning,
-                        Confidence.High)
-                ]));
-        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(call =>
-            {
-                postedResult = call.ArgAt<ReviewResult>(4);
-                posted.SetResult();
-                return Task.CompletedTask;
-            });
-
-        await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
-
-        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-
-        postedResult!.Comments.Should().ContainSingle()
-            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
-    }
-
-    [Fact]
-    public async Task ExplicitMissingDiffContextCommentsAreDroppedBeforePosting()
-    {
-        await using var fixture = new WorkerFixture();
-        ReviewResult? postedResult = null;
-        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
-            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
-        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ReviewResult(
-                "Review complete.",
-                [
-                    new InlineComment(
-                        "src/App.cs",
-                        1,
-                        "RIGHT",
-                        "WithRecalculatedConfidence() is called but its implementation isn't visible in this diff. Verify it correctly recalculates confidence scores.",
-                        Severity.Warning,
-                        Confidence.High),
-                    new InlineComment(
-                        "src/App.cs",
-                        2,
-                        "RIGHT",
-                        "This should handle null input before dereferencing the value.",
-                        Severity.Warning,
-                        Confidence.High)
-                ]));
-        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(call =>
-            {
-                postedResult = call.ArgAt<ReviewResult>(4);
-                posted.SetResult();
-                return Task.CompletedTask;
-            });
-
-        await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
-
-        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-
-        postedResult!.Comments.Should().ContainSingle()
-            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
-    }
-
-    [Fact]
-    public async Task NonActionableProcessCommentsAreDroppedBeforePosting()
-    {
-        await using var fixture = new WorkerFixture();
-        ReviewResult? postedResult = null;
-        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
-            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
-        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ReviewResult(
-                "Review complete.",
-                [
-                    new InlineComment(
-                        "src/App.cs",
-                        1,
-                        "RIGHT",
-                        "This is intentional for the chunking path, but consider adding a comment explaining that ApplyPatchBudget is intentionally skipped when chunking is enabled.",
-                        Severity.Info,
-                        Confidence.High),
-                    new InlineComment(
-                        "src/App.cs",
-                        2,
-                        "RIGHT",
-                        "This is the correct behavior to avoid repeating PR overview once per chunk.",
-                        Severity.Info,
-                        Confidence.High),
-                    new InlineComment(
-                        "src/App.cs",
-                        3,
-                        "RIGHT",
-                        "The chunk_headroom config field allows tuning this, but consider whether the headroom could lead to suboptimal packing.",
-                        Severity.Info,
-                        Confidence.High),
-                    new InlineComment(
-                        "src/App.cs",
-                        4,
-                        "RIGHT",
-                        "This should handle null input before dereferencing the value.",
-                        Severity.Warning,
-                        Confidence.High)
-                ]));
-        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(call =>
-            {
-                postedResult = call.ArgAt<ReviewResult>(4);
-                posted.SetResult();
-                return Task.CompletedTask;
-            });
-
-        await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
-
-        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-
-        postedResult!.Comments.Should().ContainSingle()
-            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
-    }
-
-    [Fact]
-    public async Task EvalFixtureMetaCommentsAreDroppedBeforePosting()
-    {
-        await using var fixture = new WorkerFixture();
-        ReviewResult? postedResult = null;
-        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(ReviewConfig.Default);
-        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
-            .ReturnsForAnyArgs([CreateFile("tests/ReviewBot.Evals/Fixtures/001/repo-state/src/App.cs")]);
-        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ReviewResult(
-                "Review complete.",
-                [
-                    new InlineComment(
-                        "tests/ReviewBot.Evals/Fixtures/001/repo-state/src/App.cs",
-                        1,
-                        "RIGHT",
-                        "The fixture correctly models a security boundary leak: returning whether the secret is blank leaks configuration state across the webhook trust boundary. The expected.yaml requires mentioning 'leak', 'trust boundary', or 'secret'.",
-                        Severity.Warning,
-                        Confidence.High),
-                    new InlineComment(
-                        "tests/ReviewBot.Evals/Fixtures/001/repo-state/src/App.cs",
-                        2,
-                        "RIGHT",
-                        "This should handle null input before dereferencing the value.",
-                        Severity.Warning,
-                        Confidence.High)
-                ]));
-        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(call =>
-            {
-                postedResult = call.ArgAt<ReviewResult>(4);
-                posted.SetResult();
-                return Task.CompletedTask;
-            });
-
-        await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
-
-        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-
-        postedResult!.Comments.Should().ContainSingle()
-            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
-    }
-
-    [Fact]
     public async Task AgenticContextDisabledDoesNotFetchRequestedFiles()
     {
         await using var fixture = new WorkerFixture();
@@ -2495,9 +2503,9 @@ public class ReviewWorkerTests
         enrichedPhase.Should().Be("agentic_context");
         enrichedPrompt!.UserPrompt.Should().Contain("public interface IFoo");
         enrichedPrompt.UserPrompt.Should().Contain("Initial comment.");
-        // The summary is synthesized from the final findings, not the model's free-text.
-        postedResult!.Summary.Should().Contain("Found 1 actionable issue").And.Contain("highest severity: error");
-        postedResult.Summary.Should().NotContain("Final summary.");
+        // The second pass's own summary is kept, with the generated facts appended.
+        postedResult!.Summary.Should().Contain("Final summary.");
+        postedResult.Summary.Should().Contain("Found 1 actionable issue").And.Contain("highest severity: error");
         postedResult.Comments.Should().ContainSingle()
             .Which.Body.Should().Be("Final context-informed comment.");
     }
@@ -2511,7 +2519,10 @@ public class ReviewWorkerTests
             Review = ReviewConfig.Default.Review with
             {
                 AgenticContext = true,
-                MaxContextRequests = 2
+                MaxContextRequests = 2,
+                // This test is about agentic context; self-critique shares the same
+                // CompleteRawAsync seam, so it is off to keep the assertions unambiguous.
+                SelfCritique = false
             },
             Ignore = ["docs/**"]
         };
@@ -2571,7 +2582,13 @@ public class ReviewWorkerTests
         await using var fixture = new WorkerFixture();
         var config = ReviewConfig.Default with
         {
-            Review = ReviewConfig.Default.Review with { AgenticContext = true }
+            Review = ReviewConfig.Default.Review with
+            {
+                AgenticContext = true,
+                // This test is about agentic context; self-critique shares the same
+                // CompleteRawAsync seam, so it is off to keep the assertions unambiguous.
+                SelfCritique = false
+            }
         };
         ReviewResult? postedResult = null;
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2837,7 +2854,7 @@ public class ReviewWorkerTests
     }
 
     [Fact]
-    public async Task SelfCritiqueSkipsRawCompletionWhenAllSurvivingCommentsAreHighConfidence()
+    public async Task SelfCritiqueRunsEvenWhenEveryCommentIsHighConfidence()
     {
         await using var fixture = new WorkerFixture();
         var config = ReviewConfig.Default with
@@ -2850,9 +2867,9 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs(config);
         fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
             .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
-        // High-confidence, non-error comments stay exempt from critique. (A
-        // high-confidence *error* comment would be critiqued — see
-        // SelfCritiqueCritiquesHighConfidenceErrorComments.)
+        // A high-confidence, non-error comment used to skip critique entirely. The model
+        // reports high confidence on essentially every comment it writes, so that
+        // exemption let most warnings bypass review; it is gone, and the pass now runs.
         fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ReviewResult(
                 "Review complete.",
@@ -2869,7 +2886,7 @@ public class ReviewWorkerTests
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        await fixture.Llm.DidNotReceiveWithAnyArgs()
+        await fixture.Llm.ReceivedWithAnyArgs()
             .CompleteRawAsync(default!, default, default!);
     }
 
@@ -2911,8 +2928,13 @@ public class ReviewWorkerTests
             .CompleteRawAsync(default!, default, default!);
     }
 
+    /// <summary>
+    /// Every comment that survives the confidence gate is routed to critique. The old
+    /// exemption for high-confidence, sub-error comments rested on a signal the model
+    /// does not vary, so it amounted to letting warnings skip review entirely.
+    /// </summary>
     [Fact]
-    public async Task SelfCritiqueRetainsSelectedLowerConfidenceCommentsAndAllHighConfidenceComments()
+    public async Task SelfCritiqueRoutesEveryCandidateCommentAndKeepsOnlyRetainedIndices()
     {
         ReviewTrace? capturedTrace = null;
         var traceWriter = Substitute.For<IReviewTraceWriter>();
@@ -2944,11 +2966,10 @@ public class ReviewWorkerTests
             .Returns(new ReviewResult(
                 "Mixed confidence.",
                 [
-                    // High-confidence + non-error => exempt from critique (still retained).
-                    new InlineComment("src/App.cs", 1, "RIGHT", "High stays.", Severity.Warning, Confidence.High),
-                    new InlineComment("src/App.cs", 2, "RIGHT", "Medium kept.", Severity.Warning, Confidence.Medium),
-                    new InlineComment("src/App.cs", 3, "RIGHT", "Low dropped.", Severity.Info, Confidence.Low),
-                    new InlineComment("src/App.cs", 4, "RIGHT", "Medium kept too.", Severity.Warning, Confidence.Medium)
+                    new InlineComment("src/App.cs", 1, "RIGHT", "High kept.", Severity.Warning, Confidence.High),
+                    new InlineComment("src/App.cs", 2, "RIGHT", "Medium dropped.", Severity.Warning, Confidence.Medium),
+                    new InlineComment("src/App.cs", 3, "RIGHT", "Low kept.", Severity.Info, Confidence.Low),
+                    new InlineComment("src/App.cs", 4, "RIGHT", "Medium dropped too.", Severity.Warning, Confidence.Medium)
                 ]));
         fixture.Llm.CompleteRawAsync(Arg.Any<PromptPayload>(), Arg.Any<CancellationToken>(), Arg.Any<string>())
             .Returns(call =>
@@ -2972,17 +2993,22 @@ public class ReviewWorkerTests
         await Task.Delay(TimeSpan.FromMilliseconds(100));
 
         postedResult!.Comments.Select(c => c.Body)
-            .Should().Equal("High stays.", "Medium kept.", "Medium kept too.");
+            .Should().Equal("High kept.", "Low kept.");
         capturedTrace.Should().NotBeNull();
-        capturedTrace!.DroppedComments.Should().ContainSingle(c =>
-            c.Body == "Low dropped." &&
-            c.Reason == "self_critique");
+        capturedTrace!.DroppedComments
+            .Where(c => c.Reason == "self_critique")
+            .Select(c => c.Body)
+            .Should().BeEquivalentTo(["Medium dropped.", "Medium dropped too."]);
         critiquePrompt.Should().NotBeNull();
         critiquePhase.Should().Be("self_critique");
-        critiquePrompt!.UserPrompt.Should().Contain("0. src/App.cs:2");
-        critiquePrompt.UserPrompt.Should().Contain("1. src/App.cs:3");
-        critiquePrompt.UserPrompt.Should().Contain("2. src/App.cs:4");
-        critiquePrompt.UserPrompt.Should().NotContain("High stays.");
+
+        // All four candidates are presented, including the high-confidence one that the
+        // old routing would have exempted.
+        critiquePrompt!.UserPrompt.Should().Contain("0. src/App.cs:1");
+        critiquePrompt.UserPrompt.Should().Contain("1. src/App.cs:2");
+        critiquePrompt.UserPrompt.Should().Contain("2. src/App.cs:3");
+        critiquePrompt.UserPrompt.Should().Contain("3. src/App.cs:4");
+        critiquePrompt.UserPrompt.Should().Contain("High kept.");
     }
 
     [Fact]
@@ -3382,7 +3408,12 @@ public class ReviewWorkerTests
         await using var fixture = new WorkerFixture(traceWriter: traceWriter);
         var config = ReviewConfig.Default with
         {
-            Review = ReviewConfig.Default.Review with { MinConfidence = Confidence.High }
+            // Self-critique off so the trace shows only the deterministic drops.
+            Review = ReviewConfig.Default.Review with
+            {
+                MinConfidence = Confidence.High,
+                SelfCritique = false
+            }
         };
         var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -3416,65 +3447,18 @@ public class ReviewWorkerTests
                 "This should handle null input before dereferencing the value.",
                 "Consider extracting this into a helper.",
                 "Nice guard.");
-        capturedTrace.FinalComments.Should().ContainSingle()
-            .Which.Body.Should().Be("This should handle null input before dereferencing the value.");
+        // "Nice guard." now survives the deterministic stage. Judging whether a comment is
+        // praise is a reading task, and the phrase matcher that used to do it here dropped
+        // real defects along with it; the prompt and the critique pass own that call now.
+        capturedTrace.FinalComments.Select(c => c.Body)
+            .Should().Equal(
+                "This should handle null input before dereferencing the value.",
+                "Nice guard.");
         capturedTrace.DroppedComments.Select(c => (c.Body, c.Reason))
             .Should().BeEquivalentTo(
             [
-                ("Consider extracting this into a helper.", "below_min_confidence"),
-                ("Nice guard.", "praise_only")
+                ("Consider extracting this into a helper.", "below_min_confidence")
             ]);
-    }
-
-    [Fact]
-    public async Task DropsConfirmationOnlyCommentsThatEvadeThePraiseFilter()
-    {
-        ReviewTrace? capturedTrace = null;
-        var traceWriter = Substitute.For<IReviewTraceWriter>();
-        traceWriter.WriteAsync(Arg.Any<ReviewTrace>(), Arg.Any<CancellationToken>())
-            .Returns(call =>
-            {
-                capturedTrace = call.Arg<ReviewTrace>();
-                return Task.CompletedTask;
-            });
-
-        await using var fixture = new WorkerFixture(traceWriter: traceWriter);
-        var config = ReviewConfig.Default with
-        {
-            Review = ReviewConfig.Default.Review with { SelfCritique = false }
-        };
-        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default).ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
-            .ReturnsForAnyArgs([CreateFile("src/App.cs")]);
-        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ReviewResult(
-                "Review.",
-                [
-                    // Confirmation phrased with an incidental "should" — defeats the praise
-                    // veto, but identifies no concern, so confirmation_only catches it.
-                    new InlineComment("src/App.cs", 1, "RIGHT", "Appending the notes here is the correct approach; they should always appear regardless.", Severity.Info, Confidence.High),
-                    // A real concern survives.
-                    new InlineComment("src/App.cs", 2, "RIGHT", "Guard against null input before dereferencing the value.", Severity.Warning, Confidence.High)
-                ]));
-        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(_ =>
-            {
-                posted.SetResult();
-                return Task.CompletedTask;
-            });
-
-        await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
-        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        await Task.Delay(TimeSpan.FromMilliseconds(100));
-
-        capturedTrace.Should().NotBeNull();
-        capturedTrace!.DroppedComments.Should().ContainSingle(c =>
-            c.Reason == "confirmation_only" && c.Body.Contains("correct approach"));
-        capturedTrace.FinalComments.Should().ContainSingle()
-            .Which.Body.Should().Contain("Guard against null input");
     }
 
     [Fact]
