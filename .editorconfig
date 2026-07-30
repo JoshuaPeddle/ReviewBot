@@ -18,3 +18,11 @@ dotnet_style_qualification_for_event = false:suggestion
 dotnet_style_qualification_for_field = false:suggestion
 dotnet_style_qualification_for_method = false:suggestion
 dotnet_style_qualification_for_property = false:suggestion
+
+[tests/**/*.cs]
+# xUnit1051 (thread TestContext.Current.CancellationToken through CancellationToken
+# overloads) fires on every pre-existing test the moment xunit.v3 lands, and its code fix
+# has no Fix All support. Relaxed to a suggestion so the framework swap is reviewable on
+# its own; each following change threads the token through the tests it touches, and the
+# rule is restored to an error once the last of them is converted.
+dotnet_diagnostic.xUnit1051.severity = suggestion

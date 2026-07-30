@@ -41,7 +41,7 @@ public sealed class ReviewBotHarness : IAsyncLifetime
 
     public HttpClient CreateClient() => factory.CreateClient();
 
-    public Task InitializeAsync() => Task.CompletedTask;
+    public ValueTask InitializeAsync() => ValueTask.CompletedTask;
 
     public Task ResetAsync()
     {
@@ -50,7 +50,7 @@ public sealed class ReviewBotHarness : IAsyncLifetime
         return Task.CompletedTask;
     }
 
-    public Task DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         factory.Dispose();
         GitHubMock.Stop();
@@ -61,7 +61,7 @@ public sealed class ReviewBotHarness : IAsyncLifetime
         TryDelete(databasePath);
         TryDelete($"{databasePath}-shm");
         TryDelete($"{databasePath}-wal");
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
     private Dictionary<string, string?> CreateConfiguration() => new(StringComparer.OrdinalIgnoreCase)
