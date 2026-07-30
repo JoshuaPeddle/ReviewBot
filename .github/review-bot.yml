@@ -42,6 +42,19 @@ review:
   # Default: 1500
   max_patch_lines: 1500
 
+  # Fraction of the remaining prompt budget a single chunk may fill.
+  # Default: 0.80
+  #
+  # Lowered because one request over this repo's larger PRs does not converge: the model
+  # spends its entire output allowance reasoning and returns nothing, losing the review.
+  # Smaller chunks give it less to hold at once, and they parallelise — with the host's
+  # REVIEWBOT__OpenAi__MaxConcurrentRequests set for a batching server, several chunks
+  # cost little more wall time than one.
+  #
+  # This is the knob that controls chunk *size*. max_files only truncates the file list,
+  # which shrinks the diff and so makes chunking less likely, not more.
+  chunk_headroom: 0.25
+
   # Minimum confidence level for inline comments to be posted. Comments below this
   # threshold are silently dropped before posting. "low" posts everything; "high" posts
   # only comments the model is certain about.
