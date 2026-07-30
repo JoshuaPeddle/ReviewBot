@@ -24,7 +24,7 @@ public sealed class ChannelReviewJobQueue : IReviewJobQueue
 
         channel = Channel.CreateBounded<ReviewJob>(new BoundedChannelOptions(capacity)
         {
-            FullMode = BoundedChannelFullMode.Wait,
+            FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
             SingleWriter = false
         });

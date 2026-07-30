@@ -60,7 +60,7 @@ public sealed class ReviewPoster : IReviewPoster
                 continue;
             }
 
-            if (!commentableLines.Contains(comment.Line))
+            if (!commentableLines.Any(line => line >= comment.Line))
             {
                 droppedCount++;
                 logger.LogInformation(
