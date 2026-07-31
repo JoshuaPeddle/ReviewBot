@@ -3804,6 +3804,9 @@ public class ReviewWorkerTests
     private sealed class FixedModelContextRegistry(int contextWindowTokens) : IModelContextRegistry
     {
         public int GetContextWindowTokens(string modelIdentifier) => contextWindowTokens;
+
+        public int ApplyConfiguredCap(string modelIdentifier, int discoveredTokens) =>
+            Math.Min(contextWindowTokens, discoveredTokens);
     }
 
     private sealed class KeywordTokenEstimator(IReadOnlyDictionary<string, int> tokenMap) : IPromptTokenEstimator
