@@ -78,6 +78,7 @@ public sealed class GitWorkspaceFactory : IWorkspaceFactory
         foreach (var arg in args)
             process.StartInfo.ArgumentList.Add(arg);
 
+        ct.ThrowIfCancellationRequested();
         process.Start();
 
         // Read both streams concurrently to avoid deadlocks on large output
@@ -87,6 +88,10 @@ public sealed class GitWorkspaceFactory : IWorkspaceFactory
         try
         {
             await process.WaitForExitAsync(ct);
+            // WaitForExitAsync returns immediately, without observing the token, when the
+            // child has already exited. A cancelled operation whose process happened to
+            // finish first would otherwise return a normal result as if nothing was wrong.
+            ct.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException)
         {

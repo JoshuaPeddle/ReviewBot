@@ -146,6 +146,29 @@ public class PythonTestRunnerTests : IDisposable
             "external cancellation must propagate, not be swallowed as a timeout");
     }
 
+    [Fact]
+    public async Task RunAsync_AlreadyCancelled_DoesNotExecuteRepositoryCode()
+    {
+        // Cancellation used to be observed only by WaitForExitAsync, so an already-cancelled
+        // run still spawned the repository's test command and merely discarded the result.
+        // The command is repository-controlled and executes on the bot host, so "we cancelled
+        // but ran it anyway" is the part that matters, not just the return value.
+        var dir = CreateWorkspace(
+            ("pytest.ini", "[pytest]\n"),
+            ("run-marker.sh", "touch executed.marker\n"));
+        var markerConfig = DefaultConfig with { TestCommand = "/bin/sh run-marker.sh" };
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var runner = new PythonTestRunner();
+        var act = () => runner.RunAsync(dir, markerConfig, cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        File.Exists(Path.Combine(dir, "executed.marker")).Should().BeFalse(
+            "a cancelled review must not start repository-controlled processes");
+    }
+
     [Theory]
     [InlineData("pytest.ini", "[pytest]\n", true)]
     [InlineData("conftest.py", "", true)]
