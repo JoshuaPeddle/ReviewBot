@@ -248,13 +248,17 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
         var files = new List<FileChange>();
         var consideredFiles = 0;
         var page = 1;
+        // A page number is interpreted relative to PageSize. Shrinking the size on the
+        // final request shifts the offset (page 2 at size 20 starts at item 21, not 31),
+        // which re-reads files already seen and silently drops the tail. Fix it for the
+        // whole walk.
+        var pageSize = Math.Min(PageSize, maxFiles);
 
         while (consideredFiles < maxFiles)
         {
             ct.ThrowIfCancellationRequested();
 
             var remaining = maxFiles - consideredFiles;
-            var pageSize = Math.Min(PageSize, remaining);
             var pageFiles = await OctokitRateLimitRetry
                 .ExecuteAsync(
                     () => client.PullRequest.Files(
@@ -283,18 +287,18 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
                 var patch = file.Patch ?? string.Empty;
                 var commentableLines = UnifiedDiffParser.GetCommentableLines(patch);
 
-                if (string.IsNullOrEmpty(file.Patch) && commentableLines.Count == 0)
-                {
-                    continue;
-                }
-
+                // Keep entries GitHub returned without a patch (binary, too large, or
+                // rename-only) instead of dropping them here. They cannot be reviewed, but
+                // the caller has to know they exist to report honest coverage rather than
+                // silently treating the pull request as fully reviewed.
                 files.Add(new FileChange(
                     file.FileName ?? string.Empty,
                     patch,
                     commentableLines,
                     file.Additions,
                     file.Deletions,
-                    MapStatus(file.Status)));
+                    MapStatus(file.Status),
+                    IsReviewable: file.Patch is not null));
             }
 
             if (pageFiles.Count < pageSize)
@@ -360,18 +364,14 @@ public sealed class PullRequestFetcher : IPullRequestFetcher
                 var patch = file.Patch ?? string.Empty;
                 var commentableLines = UnifiedDiffParser.GetCommentableLines(patch);
 
-                if (string.IsNullOrEmpty(file.Patch) && commentableLines.Count == 0)
-                {
-                    continue;
-                }
-
                 files.Add(new FileChange(
                     path,
                     patch,
                     commentableLines,
                     file.Additions,
                     file.Deletions,
-                    MapStatus(file.Status)));
+                    MapStatus(file.Status),
+                    IsReviewable: file.Patch is not null));
             }
 
             if (pageFiles.Count < PageSize)

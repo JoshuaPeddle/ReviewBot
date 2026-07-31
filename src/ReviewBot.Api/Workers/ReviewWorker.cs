@@ -317,11 +317,19 @@ public sealed class ReviewWorker : BackgroundService
         var rawFiles = await pullRequestFetcher
             .FetchFilesAsync(job.Owner, job.Repo, job.PrNumber, installationToken.Token, config.Review.MaxFiles, allowlist, ct)
             .ConfigureAwait(false);
-        var files = ApplyIgnoreGlobs(rawFiles, config.Ignore);
+        // Files GitHub returned without a patch cannot be reviewed, but they are part of
+        // the change and have to be reported, not silently treated as reviewed.
+        var unreviewablePaths = rawFiles
+            .Where(file => !file.IsReviewable)
+            .Select(file => file.Path)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+        var reviewableFiles = rawFiles.Where(file => file.IsReviewable).ToArray();
+        var files = ApplyIgnoreGlobs(reviewableFiles, config.Ignore);
         files = ApplyMaxFiles(files, config.Review.MaxFiles, job);
         var patchBudgetResult = config.Review.ChunkedReview
-            ? new PatchBudgetResult(files, [])
-            : ApplyPatchBudget(files, config.Review.MaxPatchLines, job);
+            ? new PatchBudgetResult(files, unreviewablePaths)
+            : ApplyPatchBudget(files, config.Review.MaxPatchLines, job, unreviewablePaths);
         files = patchBudgetResult.Files;
 
         if (files.Count == 0)
@@ -1908,11 +1916,12 @@ public sealed class ReviewWorker : BackgroundService
     private PatchBudgetResult ApplyPatchBudget(
         IReadOnlyList<FileChange> files,
         int maxPatchLines,
-        ReviewJob job)
+        ReviewJob job,
+        IReadOnlyList<string> alreadySkippedPaths)
     {
         if (files.Count == 0)
         {
-            return new PatchBudgetResult(files, []);
+            return new PatchBudgetResult(files, alreadySkippedPaths);
         }
 
         var budget = (long)maxPatchLines * 5;
@@ -1923,7 +1932,7 @@ public sealed class ReviewWorker : BackgroundService
 
         if (totalPatchLines <= budget)
         {
-            return new PatchBudgetResult(files, []);
+            return new PatchBudgetResult(files, alreadySkippedPaths);
         }
 
         var selected = new List<FileChange>();
@@ -1947,6 +1956,8 @@ public sealed class ReviewWorker : BackgroundService
         var skippedPaths = files
             .Where(file => !selectedPaths.Contains(file.Path))
             .Select(file => file.Path)
+            .Concat(alreadySkippedPaths)
+            .Distinct(StringComparer.Ordinal)
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToArray();
 
