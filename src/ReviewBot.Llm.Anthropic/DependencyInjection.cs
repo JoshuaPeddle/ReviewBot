@@ -16,6 +16,7 @@ public static class DependencyInjection
 
         var options = new AnthropicLlmOptions();
         configure(options);
+        AnthropicLlmOptionsValidator.Validate(options);
 
         services.AddSingleton(options);
         services.TryAddSingleton<IPromptTokenEstimator, HeuristicTokenEstimator>();
