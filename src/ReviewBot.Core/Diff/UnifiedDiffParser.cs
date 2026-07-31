@@ -73,6 +73,27 @@ public static class UnifiedDiffParser
             CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// Drops the "function context" suffix git appends to a hunk header, keeping the
+    /// line ranges.
+    /// </summary>
+    /// <remarks>
+    /// That suffix is produced by a per-language regex guess at the enclosing member, and
+    /// for C# it is wrong often enough to matter: a tuple or generic return type does not
+    /// match git's pattern, so it walks back and names an unrelated earlier method.
+    ///
+    /// The model reads the suffix as a statement of where the change lives. Handed
+    /// "RunCompileAllAsync" for a hunk that actually edits CaptureAsync, it concluded the
+    /// edit had been applied to the wrong method and reported a confident, entirely wrong
+    /// finding — reasoning correctly from a premise we supplied. The line numbers are
+    /// computed rather than guessed, so they stay; the guess does not.
+    /// </remarks>
+    internal static string StripHunkFunctionContext(string hunkHeader)
+    {
+        var closing = hunkHeader.IndexOf("@@", 2, StringComparison.Ordinal);
+        return closing < 0 ? hunkHeader : hunkHeader[..(closing + 2)];
+    }
+
     public static string[] AnnotateWithLineNumbers(string? patch)
     {
         if (string.IsNullOrWhiteSpace(patch))
@@ -94,7 +115,7 @@ public static class UnifiedDiffParser
             if (line.StartsWith("@@", StringComparison.Ordinal))
             {
                 nextNewLine = ParseNewStartLine(line);
-                result[i] = line;
+                result[i] = StripHunkFunctionContext(line);
                 continue;
             }
 

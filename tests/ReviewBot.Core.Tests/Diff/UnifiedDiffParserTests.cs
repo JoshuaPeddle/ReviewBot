@@ -200,4 +200,36 @@ public class UnifiedDiffParserTests
         UnifiedDiffParser.TryReconstructAddedFileContent(patch).Should().Be("last line\n");
     }
 
+    [Theory]
+    // Real headers GitHub produced for this repository. In each case git's C# regex
+    // named a method that does not contain the change, because a tuple or generic
+    // return type does not match its pattern and it walked back to an earlier member.
+    [InlineData(
+        "@@ -135,6 +135,7 @@ private async Task<BuildResult> RunCompileAllAsync(string workspacePath, Cancell",
+        "@@ -135,6 +135,7 @@")]
+    [InlineData(
+        "@@ -122,6 +122,7 @@ internal static bool HasPytestConfig(string workspacePath)",
+        "@@ -122,6 +122,7 @@")]
+    [InlineData("@@ -1,2 +1,3 @@", "@@ -1,2 +1,3 @@")]
+    [InlineData("@@ -0,0 +1 @@ class Foo", "@@ -0,0 +1 @@")]
+    public void AnnotateWithLineNumbersDropsTheGuessedFunctionContext(string header, string expected)
+    {
+        var annotated = UnifiedDiffParser.AnnotateWithLineNumbers(header + "\n+added\n");
+
+        annotated[0].Should().Be(
+            expected,
+            "the enclosing-member name is a regex guess the model would otherwise read as fact");
+    }
+
+    [Fact]
+    public void AnnotateWithLineNumbersStillNumbersLinesAfterStrippingContext()
+    {
+        const string patch = "@@ -10,2 +10,3 @@ private static async Task<(string A, int B)> CaptureAsync(\n context\n+added\n";
+
+        var annotated = UnifiedDiffParser.AnnotateWithLineNumbers(patch);
+
+        annotated[0].Should().Be("@@ -10,2 +10,3 @@");
+        annotated[2].Should().Contain("11").And.Contain("added");
+    }
 }
+
