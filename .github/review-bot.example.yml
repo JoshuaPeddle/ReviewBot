@@ -14,12 +14,12 @@ model:
   # "openai" also works for any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
   # Configure OpenAI-compatible response formatting on the ReviewBot host with
   # REVIEWBOT__OpenAi__ResponseFormat=json_object|json_schema|text.
-  # Default: anthropic
-  provider: anthropic
+  # Default: openai
+  provider: openai
 
-  # Model name passed to the provider API.
-  # Default: claude-opus-4-7 (anthropic) / gpt-5.1 (openai)
-  name: claude-opus-4-7
+  # Model name passed to the provider API. Omit it to use the model configured
+  # by the operator on the ReviewBot host.
+  # name: Qwen/Qwen3.6-27B-FP8
 
 review:
   # Post inline comments on individual diff lines.
@@ -35,12 +35,18 @@ review:
   # Default: 50
   max_files: 50
 
-  # Maximum diff lines per individual file before the patch is truncated with a note.
-  # When the total patch lines across all files exceed max_patch_lines * 5, the
-  # smallest-diff files are prioritised and larger ones are skipped. A note is appended
-  # to the review summary listing the skipped files.
+  # Maximum diff lines included per file. Larger per-file diffs are truncated;
+  # pull requests are split into bounded review chunks automatically.
   # Default: 1500
   max_patch_lines: 1500
+
+  # Maximum number of bounded review passes for one pull request.
+  # Default: 10
+  max_chunks: 10
+
+  # Fraction of the remaining prompt budget available to each chunk.
+  # Default: 0.80
+  chunk_headroom: 0.80
 
   trigger:
     # Review when the bot is explicitly added as a reviewer on the PR.
@@ -52,16 +58,18 @@ review:
     on_push: false
 
 retrieval:
-    # Deterministic repository-context retrieval. The config and prompt lane are
-    # present for Phase 22, but the worker does not fetch retrieval snippets yet.
-    # Default: false until the retrieval provider is wired end-to-end.
-    enabled: false
+  # Deterministic repository context from the host-owned SQLite symbol index.
+  # Default: true
+  enabled: true
 
-    # Maximum retrieved context bytes to include in a review once retrieval is active.
-    max_bytes: 102400
+  # Maximum retrieved context bytes to include in a review.
+  max_bytes: 102400
 
-    # Symbol lookup mode: callers, definitions, or both.
-    symbol_lookup_depth: callers
+  # Symbol lookup mode: callers, definitions, or both.
+  symbol_lookup_depth: both
+
+  # Follow references found inside retrieved definitions.
+  max_hops: 2
 
 # Glob patterns for files to exclude from the review.
 # Uses Microsoft.Extensions.FileSystemGlobbing syntax (forward slashes, ** for any depth).
@@ -100,9 +108,7 @@ grounding:
   # Default: true
   enabled: true
 
-  # Clone the PR branch and run a build/type-check command. Proves syntax validity.
-  # Tier 2. Adds clone + build time to the review latency.
-  # Recommended only when running ReviewBot in a resource-limited container (see docs).
+  # Clone the PR branch and run a build/type-check command. This executes PR code.
   # Default: false
   build: false
 
@@ -114,13 +120,18 @@ grounding:
   # Default: 120
   build_timeout_seconds: 120
 
-  # Run the test suite during grounding. Proves behavioral correctness. Tier 3 (future).
+  # Read completed GitHub Checks for the head SHA. This does not execute
+  # repository code locally.
   # Default: false
   tests: false
 
-  # Test command to run. null = auto-detect from language.
-  # Default: null
-  # test_command: "dotnet test --no-build"
+  # Execute local tests after a successful local build. Requires build: true plus
+  # both host execution gates and an isolated worker image with the toolchain.
+  # Default: false
+  local_tests: false
+
+  # Local test command. null = auto-detect from language.
+  # test_command: "dotnet test --no-build --no-restore -c Release"
 
   # Timeout for the test command in seconds.
   # Default: 300

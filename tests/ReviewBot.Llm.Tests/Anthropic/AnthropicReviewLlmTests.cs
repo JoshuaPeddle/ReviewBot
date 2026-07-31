@@ -317,7 +317,7 @@ public sealed class AnthropicReviewLlmTests
             thresholdTokens: 10,
             heuristicTokens: 9);
 
-        var tokens = estimator.EstimateTokens(new ModelConfig("anthropic", "claude-test", null), "large-ish");
+        var tokens = estimator.EstimateTokens(new ModelConfig("anthropic", "claude-test"), "large-ish");
 
         tokens.Should().Be(9);
         client.TokenCountRequests.Should().BeEmpty();
@@ -332,7 +332,7 @@ public sealed class AnthropicReviewLlmTests
             thresholdTokens: 10,
             heuristicTokens: 10);
 
-        var tokens = estimator.EstimateTokens(new ModelConfig("anthropic", "claude-override", null), "large prompt");
+        var tokens = estimator.EstimateTokens(new ModelConfig("anthropic", "claude-override"), "large prompt");
 
         tokens.Should().Be(123);
         client.TokenCountRequests.Should().ContainSingle()
@@ -351,7 +351,7 @@ public sealed class AnthropicReviewLlmTests
             thresholdTokens: 10,
             heuristicTokens: 10);
 
-        var tokens = estimator.EstimateTokens(new ModelConfig("anthropic", "claude-test", null), "large prompt");
+        var tokens = estimator.EstimateTokens(new ModelConfig("anthropic", "claude-test"), "large prompt");
 
         tokens.Should().Be(10);
         client.TokenCountRequests.Should().ContainSingle();

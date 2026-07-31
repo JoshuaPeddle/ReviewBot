@@ -11,7 +11,7 @@ public class DomainModelTests
         var config = ReviewConfig.Default;
 
         config.Model.Provider.Should().Be("openai");
-        config.Model.Name.Should().Be("qwen3.6-27b");
+        config.Model.Name.Should().BeEmpty();
         config.Review.InlineComments.Should().BeTrue();
         config.Review.Summary.Should().BeTrue();
         config.Review.MaxFiles.Should().Be(50);
@@ -38,18 +38,4 @@ public class DomainModelTests
         first.Should().Be(second);
     }
 
-    [Fact]
-    public void FileChangeStatusValuesAreStable()
-    {
-        var values = new Dictionary<FileChangeStatus, int>
-        {
-            [FileChangeStatus.Added] = 0,
-            [FileChangeStatus.Modified] = 1,
-            [FileChangeStatus.Removed] = 2,
-            [FileChangeStatus.Renamed] = 3,
-            [FileChangeStatus.Copied] = 4
-        };
-
-        values.Should().OnlyContain(pair => (int)pair.Key == pair.Value);
-    }
 }

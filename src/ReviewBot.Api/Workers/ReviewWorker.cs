@@ -327,9 +327,7 @@ public sealed class ReviewWorker : BackgroundService
         var reviewableFiles = rawFiles.Where(file => file.IsReviewable).ToArray();
         var files = ApplyIgnoreGlobs(reviewableFiles, config.Ignore);
         files = ApplyMaxFiles(files, config.Review.MaxFiles, job);
-        var patchBudgetResult = config.Review.ChunkedReview
-            ? new PatchBudgetResult(files, unreviewablePaths)
-            : ApplyPatchBudget(files, config.Review.MaxPatchLines, job, unreviewablePaths);
+        var patchBudgetResult = new PatchBudgetResult(files, unreviewablePaths);
         files = patchBudgetResult.Files;
 
         if (files.Count == 0)
@@ -842,7 +840,7 @@ public sealed class ReviewWorker : BackgroundService
         // overflow. At the 0.80 default this splits slightly earlier than before.
         var chunkTargetTokens = Math.Max(1, (int)Math.Floor(
             promptBudget.RemainingContentTokens * config.Review.ChunkHeadroom));
-        if (!config.Review.ChunkedReview || estimatedDiffTokens <= chunkTargetTokens)
+        if (estimatedDiffTokens <= chunkTargetTokens)
         {
             return [new ReviewChunk(1, 1, files, estimatedDiffTokens)];
         }
@@ -1555,8 +1553,7 @@ public sealed class ReviewWorker : BackgroundService
     }
 
     private static bool CanUseIncrementalRetrievalIndex(IReadOnlySet<string> changedPaths) =>
-        !changedPaths.Contains(".github/review-bot.yml") &&
-        !changedPaths.Contains(".github/review-bot.yaml");
+        !changedPaths.Contains(".github/review-bot.yml");
 
     /// <summary>
     /// Resolves the model's context window, preferring a value probed from the
@@ -1911,89 +1908,6 @@ public sealed class ReviewWorker : BackgroundService
             .OrderBy(file => file.Path, StringComparer.Ordinal)
             .Take(maxFiles)
             .ToArray();
-    }
-
-    private PatchBudgetResult ApplyPatchBudget(
-        IReadOnlyList<FileChange> files,
-        int maxPatchLines,
-        ReviewJob job,
-        IReadOnlyList<string> alreadySkippedPaths)
-    {
-        if (files.Count == 0)
-        {
-            return new PatchBudgetResult(files, alreadySkippedPaths);
-        }
-
-        var budget = (long)maxPatchLines * 5;
-        var fileLineCounts = files
-            .Select(file => new FilePatchLineCount(file, CountPatchLines(file.Patch)))
-            .ToArray();
-        var totalPatchLines = fileLineCounts.Sum(file => file.LineCount);
-
-        if (totalPatchLines <= budget)
-        {
-            return new PatchBudgetResult(files, alreadySkippedPaths);
-        }
-
-        var selected = new List<FileChange>();
-        var selectedPaths = new HashSet<string>(StringComparer.Ordinal);
-        var accumulatedLines = 0L;
-
-        foreach (var fileLineCount in fileLineCounts
-            .OrderBy(file => file.LineCount)
-            .ThenBy(file => file.File.Path, StringComparer.Ordinal))
-        {
-            if (accumulatedLines + fileLineCount.LineCount > budget)
-            {
-                continue;
-            }
-
-            selected.Add(fileLineCount.File);
-            selectedPaths.Add(fileLineCount.File.Path);
-            accumulatedLines += fileLineCount.LineCount;
-        }
-
-        var skippedPaths = files
-            .Where(file => !selectedPaths.Contains(file.Path))
-            .Select(file => file.Path)
-            .Concat(alreadySkippedPaths)
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(path => path, StringComparer.Ordinal)
-            .ToArray();
-
-        logger.LogWarning(
-            "Review job {DeliveryId} for {Owner}/{Repo}#{PrNumber} has {TotalPatchLines} patch lines; keeping {KeptFileCount} files within budget {PatchLineBudget} and skipping {SkippedFileCount} files",
-            job.DeliveryId,
-            job.Owner,
-            job.Repo,
-            job.PrNumber,
-            totalPatchLines,
-            selected.Count,
-            budget,
-            skippedPaths.Length);
-
-        return new PatchBudgetResult(selected.ToArray(), skippedPaths);
-    }
-
-    private static long CountPatchLines(string patch)
-    {
-        if (patch.Length == 0)
-        {
-            return 0;
-        }
-
-        var normalizedPatch = patch.Replace("\r\n", "\n", StringComparison.Ordinal)
-            .Replace('\r', '\n');
-        var count = 1L;
-        foreach (var character in normalizedPatch)
-        {
-            if (character == '\n')
-            {
-                count++;
-            }
-        }
-
-        return normalizedPatch.EndsWith('\n') ? count - 1 : count;
     }
 
     private static ReviewResult AppendFilesSkippedNote(
@@ -2750,10 +2664,6 @@ public sealed class ReviewWorker : BackgroundService
     private sealed record PatchBudgetResult(
         IReadOnlyList<FileChange> Files,
         IReadOnlyList<string> SkippedPaths);
-
-    private sealed record FilePatchLineCount(
-        FileChange File,
-        long LineCount);
 
     private sealed record ContextRequestValidationResult(
         IReadOnlyList<ContextRequest> Requests,

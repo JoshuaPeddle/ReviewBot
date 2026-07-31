@@ -626,102 +626,6 @@ public class ReviewWorkerTests
     }
 
     [Fact]
-    public async Task BigPrPatchBudgetPrioritizesSmallestFilesAndPostsSkippedNote()
-    {
-        await using var fixture = new WorkerFixture();
-        var config = ReviewConfig.Default with
-        {
-            Review = ReviewConfig.Default.Review with { MaxPatchLines = 2, ChunkedReview = false }
-        };
-        var threeFiles = new[]
-        {
-            CreateFile("src/Large.cs", patchLines: 8),
-            CreateFile("src/Small.cs", patchLines: 3),
-            CreateFile("src/Medium.cs", patchLines: 5)
-        };
-        ReviewRequest? capturedRequest = null;
-        ReviewResult? postedResult = null;
-        IReadOnlyList<FileChange>? postedFiles = null;
-        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
-            .ReturnsForAnyArgs(threeFiles);
-        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
-            .Returns(call =>
-            {
-                capturedRequest = call.Arg<ReviewRequest>();
-                return new ReviewResult("Reviewed the selected files.", []);
-            });
-        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(call =>
-            {
-                postedResult = call.ArgAt<ReviewResult>(4);
-                postedFiles = call.ArgAt<IReadOnlyList<FileChange>>(5);
-                posted.SetResult();
-                return Task.CompletedTask;
-            });
-
-        await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
-
-        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-
-        capturedRequest!.Files.Select(file => file.Path).Should().Equal("src/Small.cs", "src/Medium.cs");
-        postedFiles!.Select(file => file.Path).Should().Equal("src/Small.cs", "src/Medium.cs");
-        // No findings survived, so the synthesized summary is cleared (quiet on clean),
-        // but the skipped-files note still posts and the model's free-text is discarded.
-        postedResult!.Summary.Should().NotContain("Reviewed the selected files.");
-        postedResult.Summary.Should().Contain("files_skipped:");
-        postedResult.Summary.Should().Contain("`src/Large.cs`");
-    }
-
-    [Fact]
-    public async Task BigPrPatchBudgetKeepsAllFilesWhenTotalIsAtHeuristicCeiling()
-    {
-        await using var fixture = new WorkerFixture();
-        var config = ReviewConfig.Default with
-        {
-            Review = ReviewConfig.Default.Review with { MaxPatchLines = 2, ChunkedReview = false }
-        };
-        var twoFiles = new[]
-        {
-            CreateFile("src/A.cs", patchLines: 4),
-            CreateFile("src/B.cs", patchLines: 6)
-        };
-        ReviewRequest? capturedRequest = null;
-        ReviewResult? postedResult = null;
-        var posted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
-            .ReturnsForAnyArgs(twoFiles);
-        fixture.Llm.ReviewAsync(Arg.Any<ReviewRequest>(), Arg.Any<CancellationToken>())
-            .Returns(call =>
-            {
-                capturedRequest = call.Arg<ReviewRequest>();
-                return new ReviewResult("Within budget.", []);
-            });
-        fixture.ReviewPoster.PostAsync(default!, default!, default, default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(call =>
-            {
-                postedResult = call.ArgAt<ReviewResult>(4);
-                posted.SetResult();
-                return Task.CompletedTask;
-            });
-
-        await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
-
-        await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-
-        capturedRequest!.Files.Select(file => file.Path).Should().Equal("src/A.cs", "src/B.cs");
-        postedResult!.Summary.Should().NotContain("files_skipped:");
-    }
-
-    [Fact]
     public async Task OutputConfigDropsInlineCommentsAndSummaryBeforePosting()
     {
         await using var fixture = new WorkerFixture();
@@ -1171,7 +1075,7 @@ public class ReviewWorkerTests
             reviewTokenEstimator: reviewTokenEstimator);
         var config = ReviewConfig.Default with
         {
-            Model = new ModelConfig("anthropic", "claude-test", null),
+            Model = new ModelConfig("anthropic", "claude-test"),
             Review = ReviewConfig.Default.Review with
             {
                 ResponseReserveTokens = 0,
@@ -2253,44 +2157,6 @@ public class ReviewWorkerTests
             {
                 filesFetched.SetResult();
                 return new[] { CreateFile("src/App.cs"), CreateFile("docs/readme.md") };
-            });
-
-        await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
-
-        await filesFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        await Task.Delay(TimeSpan.FromMilliseconds(50));
-
-        await fixture.GroundingProvider.DidNotReceiveWithAnyArgs()
-            .GetContextAsync(default!, default);
-        fixture.LlmFactory.DidNotReceiveWithAnyArgs().Create(default!);
-        await fixture.ReviewPoster.DidNotReceiveWithAnyArgs()
-            .PostAsync(default!, default!, default, default!, default!, default!, default!, default);
-    }
-
-    [Fact]
-    public async Task PatchBudgetRemovesAllFilesSkipsGroundingAndLlmAndPost()
-    {
-        await using var fixture = new WorkerFixture();
-        // MaxPatchLines=1 means budget=5 chars; two 6-line files both exceed the budget individually,
-        // so the greedy selection loop picks neither.
-        var config = ReviewConfig.Default with
-        {
-            Review = ReviewConfig.Default.Review with { MaxPatchLines = 1, ChunkedReview = false }
-        };
-        var filesFetched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        fixture.RepoConfigFetcher.FetchAsync(default!, default!, default!, default!, default)
-            .ReturnsForAnyArgs(config);
-        fixture.PullRequestFetcher.FetchFilesAsync(default!, default!, default, default!, default, default!, default)
-            .ReturnsForAnyArgs(_ =>
-            {
-                filesFetched.SetResult();
-                return new[]
-                {
-                    CreateFile("src/A.cs", patchLines: 6),
-                    CreateFile("src/B.cs", patchLines: 6)
-                };
             });
 
         await fixture.StartAsync();

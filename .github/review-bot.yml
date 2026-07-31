@@ -14,7 +14,7 @@ model:
   # "openai" also works for any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)
   # Configure OpenAI-compatible response formatting on the ReviewBot host with
   # REVIEWBOT__OpenAi__ResponseFormat=json_object|json_schema|text.
-  # Default: anthropic
+  # Default: openai
   provider: openai
 
   # Model name passed to the provider API.
@@ -35,26 +35,18 @@ review:
   # Default: 50
   max_files: 50
 
-  # Maximum diff lines per individual file before the patch is truncated with a note.
-  # When the total patch lines across all files exceed max_patch_lines * 5, the
-  # smallest-diff files are prioritised and larger ones are skipped. A note is appended
-  # to the review summary listing the skipped files.
+  # Maximum diff lines included per file. Larger per-file diffs are truncated;
+  # pull requests are split into bounded review chunks automatically.
   # Default: 1500
   max_patch_lines: 1500
 
-  # Fraction of the remaining prompt budget a single chunk may fill, and the point at
-  # which a diff is split. Default: 0.80 — left at the default deliberately.
-  #
-  # This was briefly set to 0.25 after several reviews came back empty (the model spent
-  # its whole output allowance reasoning and emitted nothing). Measuring the model rather
-  # than guessing showed no size threshold to tune against: review-shaped prompts of 2.5K,
-  # 5.7K, 10.8K, 16.8K, 26.9K, 34.5K and 43.0K tokens all converged, including the size
-  # that had failed in production. So those failures are variance, not a budget the diff
-  # outgrew, and a hand-picked fraction only lowers the odds of hitting one without
-  # addressing it. Retry/robustness is the right place to fix that.
-  #
-  # If you do change it: this is the knob for chunk *size*. max_files only truncates the
-  # file list, which shrinks the diff and so makes chunking less likely, not more.
+  # Maximum number of bounded review passes for one pull request.
+  # Default: 10
+  max_chunks: 10
+
+  # Fraction of the remaining prompt budget available to each chunk.
+  # Default: 0.80
+  chunk_headroom: 0.80
 
   # Minimum confidence level for inline comments to be posted. Comments below this
   # threshold are silently dropped before posting. "low" posts everything; "high" posts
@@ -84,6 +76,10 @@ retrieval:
 
     # Symbol lookup mode: callers, definitions, or both.
     symbol_lookup_depth: both
+
+    # Follow references found inside retrieved definitions. The host owns the
+    # persistent index path; repository policy cannot redirect filesystem writes.
+    max_hops: 2
 
 # Glob patterns for files to exclude from the review.
 # Uses Microsoft.Extensions.FileSystemGlobbing syntax (forward slashes, ** for any depth).
@@ -130,9 +126,7 @@ grounding:
   # Default: true
   enabled: true
 
-  # Clone the PR branch and run a build/type-check command. Proves syntax validity.
-  # Tier 2. Adds clone + build time to the review latency.
-  # Recommended only when running ReviewBot in a resource-limited container (see docs).
+  # Clone the PR branch and run a build/type-check command. This executes PR code.
   # Default: false
   build: false
 
@@ -144,13 +138,18 @@ grounding:
   # Default: 120
   build_timeout_seconds: 120
 
-  # Run the test suite during grounding. Proves behavioral correctness. Tier 3 (future).
+  # Read completed GitHub Checks for the head SHA. This does not execute
+  # repository code locally.
   # Default: false
   tests: false
 
-  # Test command to run. null = auto-detect from language.
-  # Default: null
-  # test_command: "dotnet test --no-build"
+  # Execute local tests after a successful local build. Requires build: true plus
+  # both host execution gates and an isolated worker image with the toolchain.
+  # Default: false
+  local_tests: false
+
+  # Local test command. null = auto-detect from language.
+  # test_command: "dotnet test --no-build --no-restore -c Release"
 
   # Timeout for the test command in seconds.
   # Default: 300

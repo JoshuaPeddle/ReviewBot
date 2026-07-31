@@ -16,10 +16,9 @@ public sealed record ReviewConfig(
         Enabled: true,
         Model: new ModelConfig(
             Provider: "openai",
-            // Last-resort default when a repo omits model.name and the host has no
-            // configured model to fall back to; the documented reference profile.
-            Name: "qwen3.6-27b",
-            BaseUrlEnvVar: null),
+            // The host owns model deployment. Repository policy may pin a model,
+            // otherwise the worker resolves the configured provider model.
+            Name: string.Empty),
         Review: new ReviewOutputConfig(
             InlineComments: true,
             Summary: true,
@@ -66,9 +65,8 @@ public sealed record RetrievalConfig(
     bool Enabled,
     int MaxBytes,
     string SymbolLookupDepth,
-    bool Embeddings,
     string IndexCacheDir,
-    int MaxHops = 1)
+    int MaxHops = 2)
 {
     public const string DefinitionsDepth = "definitions";
     public const string CallersDepth = "callers";
@@ -82,8 +80,7 @@ public sealed record RetrievalConfig(
         // for cross-file reasoning; "callers" alone returns only one-line
         // usage rows and silently bypasses body extraction.
         SymbolLookupDepth: BothDepth,
-        Embeddings: false,
-        IndexCacheDir: "/var/cache/reviewbot/index",
+        IndexCacheDir: "cache/index",
         // How many times to follow symbol references outward from the diff. 1 fetches the
         // definitions of symbols the diff names. 2 additionally fetches what those bodies
         // themselves refer to, which is where an invariant lives when the direct callee
@@ -93,8 +90,7 @@ public sealed record RetrievalConfig(
 
 public sealed record ModelConfig(
     string Provider,
-    string Name,
-    string? BaseUrlEnvVar);
+    string Name);
 
 public sealed record ReviewOutputConfig(
     bool InlineComments,
@@ -111,7 +107,6 @@ public sealed record ReviewOutputConfig(
     bool ApproveIfClean = false,
     int FullFileMaxBytes = 65_536,
     int ResponseReserveTokens = 4_096,
-    bool ChunkedReview = true,
     int MaxChunks = 10,
     double ChunkHeadroom = 0.80)
 {
