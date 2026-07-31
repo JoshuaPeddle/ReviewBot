@@ -14,6 +14,7 @@ public static class DependencyInjection
 
         var options = new OpenAiLlmOptions();
         configure(options);
+        OpenAiLlmOptionsValidator.Validate(options);
 
         services.AddSingleton(options);
         services.AddSingleton<OpenAiReviewLlm>();
