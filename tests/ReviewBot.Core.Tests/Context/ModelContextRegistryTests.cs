@@ -1,4 +1,5 @@
 using FluentAssertions;
+using FluentAssertions.Extensions;
 using Microsoft.Extensions.DependencyInjection;
 using ReviewBot.Core.Context;
 
@@ -142,4 +143,25 @@ public class ModelContextRegistryTests
         registry.ApplyConfiguredCap("qwen/smaller-model", 128_000).Should().Be(80_000);
         registry.ApplyConfiguredCap("Qwen/Qwen3.6-27B-FP8", 64_000).Should().Be(64_000);
     }
+
+    [Theory]
+    [InlineData("**")]
+    [InlineData("a**b")]
+    [InlineData("***")]
+    [InlineData("*a**b*")]
+    [InlineData("**********")]
+    public void WildcardMatchingTerminatesOnAdjacentWildcards(string pattern)
+    {
+        // Adjacent wildcards produce an empty segment between them, which advances the
+        // value cursor by zero. The pattern cursor still moves past the first wildcard,
+        // so the loop progresses — asserted here because a config-driven pattern that
+        // could hang the matcher would be a denial of service via ModelContext:Limits.
+        var options = new ModelContextOptions { Limits = { [pattern] = 4096 } };
+        var registry = new ModelContextRegistry(options);
+
+        Action match = () => registry.GetContextWindowTokens("some-model-name");
+
+        match.ExecutionTime().Should().BeLessThan(2.Seconds());
+    }
 }
+
