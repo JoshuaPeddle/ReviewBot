@@ -108,8 +108,7 @@ grounding:
   # Default: true
   enabled: true
 
-  # Clone the PR branch and run a build/type-check command. This executes PR code
-  # and is ignored unless the operator also enables Worker__AllowBuildGrounding.
+  # Clone the PR branch and run a build/type-check command. This executes PR code.
   # Default: false
   build: false
 
