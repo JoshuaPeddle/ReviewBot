@@ -18,7 +18,7 @@ public sealed class ReviewLlmFactoryTests
         using var provider = BuildProviderWithRealLlms();
 
         var llm = provider.GetRequiredService<IReviewLlmFactory>()
-            .Create(new ModelConfig("anthropic", "claude-from-config", BaseUrlEnvVar: null));
+            .Create(new ModelConfig("anthropic", "claude-from-config"));
 
         llm.Should().BeOfType<AnthropicReviewLlm>();
     }
@@ -29,7 +29,7 @@ public sealed class ReviewLlmFactoryTests
         using var provider = BuildProviderWithRealLlms();
 
         var llm = provider.GetRequiredService<IReviewLlmFactory>()
-            .Create(new ModelConfig("openai", "gpt-from-config", BaseUrlEnvVar: null));
+            .Create(new ModelConfig("openai", "gpt-from-config"));
 
         llm.Should().BeOfType<OpenAiReviewLlm>();
     }
@@ -40,7 +40,7 @@ public sealed class ReviewLlmFactoryTests
         using var provider = BuildProviderWithRealLlms();
 
         var act = () => provider.GetRequiredService<IReviewLlmFactory>()
-            .Create(new ModelConfig("local", "model", BaseUrlEnvVar: null));
+            .Create(new ModelConfig("local", "model"));
 
         act.Should().Throw<InvalidOperationException>()
             .WithMessage("*Unsupported LLM provider 'local'*anthropic*openai*");
@@ -60,7 +60,7 @@ public sealed class ReviewLlmFactoryTests
         using var provider = services.BuildServiceProvider();
 
         var llm = provider.GetRequiredService<IReviewLlmFactory>()
-            .Create(new ModelConfig("anthropic", "claude-from-config", BaseUrlEnvVar: null));
+            .Create(new ModelConfig("anthropic", "claude-from-config"));
 
         llm.Should().BeSameAs(overridden);
         anthropic.Received(1).WithModelName("claude-from-config");
@@ -78,7 +78,7 @@ public sealed class ReviewLlmFactoryTests
         using var provider = services.BuildServiceProvider();
 
         var llm = provider.GetRequiredService<IReviewLlmFactory>()
-            .Create(new ModelConfig("anthropic", Name: "", BaseUrlEnvVar: null));
+            .Create(new ModelConfig("anthropic", Name: ""));
 
         llm.Should().BeSameAs(anthropic);
         anthropic.DidNotReceiveWithAnyArgs().WithModelName(default!);
@@ -90,7 +90,7 @@ public sealed class ReviewLlmFactoryTests
         using var provider = BuildProviderWithRealLlms();
 
         var resolved = provider.GetRequiredService<IReviewLlmFactory>()
-            .ResolveModelName(new ModelConfig("openai", Name: "", BaseUrlEnvVar: null));
+            .ResolveModelName(new ModelConfig("openai", Name: ""));
 
         resolved.Should().Be("gpt-default");
     }
@@ -101,7 +101,7 @@ public sealed class ReviewLlmFactoryTests
         using var provider = BuildProviderWithRealLlms();
 
         var resolved = provider.GetRequiredService<IReviewLlmFactory>()
-            .ResolveModelName(new ModelConfig("openai", "gpt-from-config", BaseUrlEnvVar: null));
+            .ResolveModelName(new ModelConfig("openai", "gpt-from-config"));
 
         resolved.Should().Be("gpt-from-config");
     }
@@ -126,7 +126,7 @@ public sealed class ReviewLlmFactoryTests
         using var provider = services.BuildServiceProvider();
 
         var llm = provider.GetRequiredService<IReviewLlmFactory>()
-            .Create(new ModelConfig("anthropic", "claude-from-config", BaseUrlEnvVar: null));
+            .Create(new ModelConfig("anthropic", "claude-from-config"));
 
         llm.Should().BeSameAs(overridden);
         unusedWasResolved.Should().BeFalse();

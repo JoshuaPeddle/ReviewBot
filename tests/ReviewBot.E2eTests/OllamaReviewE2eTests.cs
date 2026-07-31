@@ -86,7 +86,7 @@ public class OllamaReviewE2eTests
 
         var ollamaConfig = ReviewConfig.Default with
         {
-            Model = new ModelConfig("openai", OllamaModel!, null),
+            Model = new ModelConfig("openai", OllamaModel!),
             Grounding = GroundingConfig.Default with { Enabled = false }
         };
 

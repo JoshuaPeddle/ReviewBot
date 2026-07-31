@@ -24,9 +24,11 @@ public class RepoConfigFetcherTests
 
         var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
 
-        config.Should().BeEquivalentTo(ReviewConfig.Default);
+        config.Should().BeEquivalentTo(ReviewConfig.Default with
+        {
+            Model = ReviewConfig.Default.Model with { Name = string.Empty }
+        });
         await contents.Received(1).GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha");
-        await contents.Received(1).GetAllContentsByRef("octo", "repo", ".github/review-bot.yaml", "head-sha");
         logger.Entries.Should().Contain(entry => entry.Level == LogLevel.Information);
     }
 
@@ -38,7 +40,6 @@ public class RepoConfigFetcherTests
             model:
               provider: openai
               name: gpt-4.1
-              base_url_env_var: REVIEWBOT__OPENAI__BASE_URL
             review:
               inline_comments: false
               summary: true
@@ -51,7 +52,6 @@ public class RepoConfigFetcherTests
               approve_if_clean: true
               full_file_max_bytes: 6789
               response_reserve_tokens: 2048
-              chunked_review: false
               max_chunks: 7
               chunk_headroom: 0.75
               trigger:
@@ -68,8 +68,7 @@ public class RepoConfigFetcherTests
               enabled: true
               max_bytes: 64000
               symbol_lookup_depth: both
-              embeddings: true
-              index_cache_dir: /tmp/reviewbot-index
+              max_hops: 3
             """;
         var contents = Substitute.For<IRepositoryContentsClient>();
         contents
@@ -80,7 +79,7 @@ public class RepoConfigFetcherTests
         var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
 
         config.Enabled.Should().BeFalse();
-        config.Model.Should().Be(new ModelConfig("openai", "gpt-4.1", "REVIEWBOT__OPENAI__BASE_URL"));
+        config.Model.Should().Be(new ModelConfig("openai", "gpt-4.1"));
         config.Review.Should().Be(new ReviewOutputConfig(
             InlineComments: false,
             Summary: true,
@@ -94,7 +93,6 @@ public class RepoConfigFetcherTests
             ApproveIfClean: true,
             FullFileMaxBytes: 6789,
             ResponseReserveTokens: 2048,
-            ChunkedReview: false,
             MaxChunks: 7,
             ChunkHeadroom: 0.75));
         config.Review.AgenticContext.Should().BeTrue();
@@ -107,29 +105,8 @@ public class RepoConfigFetcherTests
             Enabled: true,
             MaxBytes: 64_000,
             SymbolLookupDepth: RetrievalConfig.BothDepth,
-            Embeddings: true,
-            IndexCacheDir: "/tmp/reviewbot-index"));
-    }
-
-    [Fact]
-    public async Task FetchAsyncFallsBackToYamlExtensionWhenYmlIsMissing()
-    {
-        const string yaml = """
-            review:
-              max_files: 7
-            """;
-        var contents = Substitute.For<IRepositoryContentsClient>();
-        contents
-            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
-            .Returns(_ => Task.FromException<IReadOnlyList<RepositoryContent>>(CreateNotFound()));
-        contents
-            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yaml", "head-sha")
-            .Returns([CreateContent(yaml)]);
-        var fetcher = CreateFetcher(contents);
-
-        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
-
-        config.Review.MaxFiles.Should().Be(7);
+            IndexCacheDir: RetrievalConfig.Default.IndexCacheDir,
+            MaxHops: 3));
     }
 
     [Fact]
@@ -170,7 +147,22 @@ public class RepoConfigFetcherTests
 
         var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
 
-        config.Model.Should().Be(new ModelConfig("openai", Name: "", BaseUrlEnvVar: null));
+        config.Model.Should().Be(new ModelConfig("openai", Name: ""));
+    }
+
+    [Fact]
+    public async Task FetchAsyncDisablesReviewWhenModelNameIsPresentButBlank()
+    {
+        const string yaml = "model:\n  name: '   '";
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var fetcher = CreateFetcher(contents);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Enabled.Should().BeFalse();
     }
 
     [Fact]
@@ -185,12 +177,57 @@ public class RepoConfigFetcherTests
 
         var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
 
-        config.Should().BeEquivalentTo(ReviewConfig.Default);
+        config.Enabled.Should().BeFalse();
+        config.Model.Name.Should().BeEmpty();
         logger.Entries.Should().Contain(entry => entry.Level == LogLevel.Warning);
     }
 
     [Fact]
-    public async Task FetchAsyncFallsBackToDefaultProviderWhenProviderIsUnknown()
+    public async Task FetchAsyncDisablesReviewWhenYamlContainsAnUnknownField()
+    {
+        const string yaml = """
+            review:
+              max_files: 25
+              max_fiels: 250
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var logger = new CapturingLogger<RepoConfigFetcher>();
+        var fetcher = CreateFetcher(contents, logger);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Enabled.Should().BeFalse();
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains("disabling review", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("model:\n  base_url_env_var: ENDPOINT")]
+    [InlineData("retrieval:\n  embeddings: true")]
+    [InlineData("retrieval:\n  index_cache_dir: /tmp/reviewbot")]
+    public async Task FetchAsyncDisablesReviewWhenYamlContainsAnUnsupportedField(string yaml)
+    {
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var logger = new CapturingLogger<RepoConfigFetcher>();
+        var fetcher = CreateFetcher(contents, logger);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Enabled.Should().BeFalse();
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains("disabling review", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task FetchAsyncDisablesReviewWhenProviderIsInvalid()
     {
         const string yaml = """
             model:
@@ -206,9 +243,9 @@ public class RepoConfigFetcherTests
 
         var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
 
-        config.Model.Should().Be(ReviewConfig.Default.Model with { Name = "custom-model" });
+        config.Enabled.Should().BeFalse();
         logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning && entry.Message.Contains("Unknown ReviewBot model provider", StringComparison.Ordinal));
+            entry.Level == LogLevel.Warning && entry.Message.Contains("disabling review", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -276,8 +313,6 @@ public class RepoConfigFetcherTests
               enabled: true
               max_bytes: 204800
               symbol_lookup_depth: definitions
-              embeddings: true
-              index_cache_dir: /var/tmp/reviewbot/index
             """;
         var contents = Substitute.For<IRepositoryContentsClient>();
         contents
@@ -290,8 +325,40 @@ public class RepoConfigFetcherTests
         config.Retrieval.Enabled.Should().BeTrue();
         config.Retrieval.MaxBytes.Should().Be(204_800);
         config.Retrieval.SymbolLookupDepth.Should().Be(RetrievalConfig.DefinitionsDepth);
-        config.Retrieval.Embeddings.Should().BeTrue();
-        config.Retrieval.IndexCacheDir.Should().Be("/var/tmp/reviewbot/index");
+        config.Retrieval.IndexCacheDir.Should().Be(RetrievalConfig.Default.IndexCacheDir);
+    }
+
+    [Fact]
+    public async Task FetchAsyncDisablesReviewWhenResourceLimitExceedsHostMaximum()
+    {
+        const string yaml = """
+            review:
+              max_files: 999999
+              max_patch_lines: 999999
+              max_context_requests: 999999
+              max_context_file_bytes: 99999999
+              full_file_max_bytes: 99999999
+              response_reserve_tokens: 999999
+              max_chunks: 999999
+            grounding:
+              build_timeout_seconds: 999999
+              test_timeout_seconds: 999999
+            retrieval:
+              max_bytes: 99999999
+              max_hops: 999999
+            """;
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var logger = new CapturingLogger<RepoConfigFetcher>();
+        var fetcher = CreateFetcher(contents, logger);
+
+        var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
+
+        config.Enabled.Should().BeFalse();
+        logger.Entries.Should().Contain(entry =>
+            entry.Level == LogLevel.Warning && entry.Message.Contains("disabling review", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -312,12 +379,11 @@ public class RepoConfigFetcherTests
         config.Retrieval.Enabled.Should().BeTrue();
         config.Retrieval.MaxBytes.Should().Be(RetrievalConfig.Default.MaxBytes);
         config.Retrieval.SymbolLookupDepth.Should().Be(RetrievalConfig.Default.SymbolLookupDepth);
-        config.Retrieval.Embeddings.Should().Be(RetrievalConfig.Default.Embeddings);
         config.Retrieval.IndexCacheDir.Should().Be(RetrievalConfig.Default.IndexCacheDir);
     }
 
     [Fact]
-    public async Task FetchAsyncLocalTestsImpliesTests()
+    public async Task FetchAsyncDisablesReviewWhenLocalTestsAreEnabledWithoutBuild()
     {
         const string yaml = """
             grounding:
@@ -331,8 +397,7 @@ public class RepoConfigFetcherTests
 
         var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
 
-        config.Grounding.LocalTests.Should().BeTrue();
-        config.Grounding.Tests.Should().BeTrue();
+        config.Enabled.Should().BeFalse();
     }
 
     [Fact]
@@ -513,7 +578,7 @@ public class RepoConfigFetcherTests
     }
 
     [Fact]
-    public async Task FetchAsyncLogsWarningAndDefaultsToDefaultOnUnknownMinConfidence()
+    public async Task FetchAsyncDisablesReviewWhenMinConfidenceIsInvalid()
     {
         const string yaml = """
             review:
@@ -528,14 +593,14 @@ public class RepoConfigFetcherTests
 
         var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
 
-        config.Review.MinConfidence.Should().Be(Confidence.Medium);
+        config.Enabled.Should().BeFalse();
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning &&
-            entry.Message.Contains("Unknown ReviewBot min_confidence value", StringComparison.Ordinal));
+            entry.Message.Contains("disabling review", StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task FetchAsyncFallsBackToDefaultsWhenNumericLimitsAreInvalid()
+    public async Task FetchAsyncDisablesReviewWhenNumericLimitIsInvalid()
     {
         const string yaml = """
             review:
@@ -559,37 +624,13 @@ public class RepoConfigFetcherTests
 
         var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
 
-        config.Review.MaxFiles.Should().Be(ReviewConfig.Default.Review.MaxFiles);
-        config.Review.MaxPatchLines.Should().Be(ReviewConfig.Default.Review.MaxPatchLines);
-        config.Review.MaxContextRequests.Should().Be(ReviewConfig.Default.Review.MaxContextRequests);
-        config.Review.MaxContextFileBytes.Should().Be(ReviewConfig.Default.Review.MaxContextFileBytes);
-        config.Review.FullFileMaxBytes.Should().Be(ReviewConfig.Default.Review.FullFileMaxBytes);
-        config.Review.ResponseReserveTokens.Should().Be(ReviewConfig.Default.Review.ResponseReserveTokens);
-        config.Review.MaxChunks.Should().Be(ReviewConfig.Default.Review.MaxChunks);
-        config.Review.ChunkHeadroom.Should().Be(ReviewConfig.Default.Review.ChunkHeadroom);
-        config.Retrieval.MaxBytes.Should().Be(RetrievalConfig.Default.MaxBytes);
+        config.Enabled.Should().BeFalse();
         logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_files=0", StringComparison.Ordinal));
-        logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_patch_lines=-1", StringComparison.Ordinal));
-        logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_context_requests=0", StringComparison.Ordinal));
-        logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_context_file_bytes=-10", StringComparison.Ordinal));
-        logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning && entry.Message.Contains("review.full_file_max_bytes=-20", StringComparison.Ordinal));
-        logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning && entry.Message.Contains("review.response_reserve_tokens=-30", StringComparison.Ordinal));
-        logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning && entry.Message.Contains("review.max_chunks=0", StringComparison.Ordinal));
-        logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning && entry.Message.Contains("review.chunk_headroom=1.25", StringComparison.Ordinal));
-        logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning && entry.Message.Contains("retrieval.max_bytes=0", StringComparison.Ordinal));
+            entry.Level == LogLevel.Warning && entry.Message.Contains("disabling review", StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task FetchAsyncLogsWarningAndDefaultsOnUnknownRetrievalDepth()
+    public async Task FetchAsyncDisablesReviewWhenRetrievalDepthIsInvalid()
     {
         const string yaml = """
             retrieval:
@@ -604,10 +645,10 @@ public class RepoConfigFetcherTests
 
         var config = await fetcher.FetchAsync("octo", "repo", "head-sha", "ghs_token", CancellationToken.None);
 
-        config.Retrieval.SymbolLookupDepth.Should().Be(RetrievalConfig.Default.SymbolLookupDepth);
+        config.Enabled.Should().BeFalse();
         logger.Entries.Should().Contain(entry =>
             entry.Level == LogLevel.Warning &&
-            entry.Message.Contains("retrieval.symbol_lookup_depth", StringComparison.Ordinal));
+            entry.Message.Contains("disabling review", StringComparison.Ordinal));
     }
 
     private static RepoConfigFetcher CreateFetcher(

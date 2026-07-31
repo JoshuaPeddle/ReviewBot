@@ -370,7 +370,7 @@ public sealed class LiveEvalRunner
     {
         var config = ReviewConfig.Default with
         {
-            Model = new ModelConfig("openai", options.Model, null),
+            Model = new ModelConfig("openai", options.Model),
             Retrieval = ReviewConfig.Default.Retrieval with
             {
                 Enabled = options.RetrievalEnabled,
@@ -403,7 +403,6 @@ public sealed class LiveEvalRunner
                 MaxFiles = PositiveOrDefault(file.Review?.MaxFiles, config.Review.MaxFiles),
                 MaxPatchLines = PositiveOrDefault(file.Review?.MaxPatchLines, config.Review.MaxPatchLines),
                 ResponseReserveTokens = NonNegativeOrDefault(file.Review?.ResponseReserveTokens, config.Review.ResponseReserveTokens),
-                ChunkedReview = file.Review?.ChunkedReview ?? config.Review.ChunkedReview,
                 MaxChunks = PositiveOrDefault(file.Review?.MaxChunks, config.Review.MaxChunks),
                 ChunkHeadroom = UnitIntervalOrDefault(file.Review?.ChunkHeadroom, config.Review.ChunkHeadroom)
             },
@@ -417,7 +416,6 @@ public sealed class LiveEvalRunner
                 SymbolLookupDepth = string.IsNullOrWhiteSpace(file.Retrieval?.SymbolLookupDepth)
                     ? config.Retrieval.SymbolLookupDepth
                     : file.Retrieval.SymbolLookupDepth.Trim(),
-                Embeddings = file.Retrieval?.Embeddings ?? config.Retrieval.Embeddings,
                 IndexCacheDir = options.IndexCacheDir
             }
         };
@@ -466,8 +464,6 @@ public sealed class LiveEvalRunner
 
         public int? ResponseReserveTokens { get; set; }
 
-        public bool? ChunkedReview { get; set; }
-
         public int? MaxChunks { get; set; }
 
         public double? ChunkHeadroom { get; set; }
@@ -478,8 +474,6 @@ public sealed class LiveEvalRunner
         public int? MaxBytes { get; set; }
 
         public string? SymbolLookupDepth { get; set; }
-
-        public bool? Embeddings { get; set; }
     }
 }
 
