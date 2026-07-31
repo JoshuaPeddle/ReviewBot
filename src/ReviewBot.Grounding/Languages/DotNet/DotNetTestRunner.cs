@@ -93,6 +93,7 @@ public sealed class DotNetTestRunner : ITestRunner
         foreach (var arg in command.Arguments)
             process.StartInfo.ArgumentList.Add(arg);
 
+        ct.ThrowIfCancellationRequested();
         process.Start();
 
         // Read both streams without cancellation to capture whatever the process emits before we kill it.
@@ -102,6 +103,10 @@ public sealed class DotNetTestRunner : ITestRunner
         try
         {
             await process.WaitForExitAsync(ct);
+            // WaitForExitAsync returns immediately, without observing the token, when the
+            // child has already exited. A cancelled operation whose process happened to
+            // finish first would otherwise return a normal result as if nothing was wrong.
+            ct.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException)
         {

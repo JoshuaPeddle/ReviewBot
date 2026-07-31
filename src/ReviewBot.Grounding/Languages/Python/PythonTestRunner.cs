@@ -122,6 +122,7 @@ public sealed class PythonTestRunner : ITestRunner
 
         process.StartInfo.Environment["PYTHONDONTWRITEBYTECODE"] = "1";
 
+        ct.ThrowIfCancellationRequested();
         process.Start();
 
         var stdoutTask = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
@@ -130,6 +131,10 @@ public sealed class PythonTestRunner : ITestRunner
         try
         {
             await process.WaitForExitAsync(ct);
+            // WaitForExitAsync returns immediately, without observing the token, when the
+            // child has already exited. A cancelled operation whose process happened to
+            // finish first would otherwise return a normal result as if nothing was wrong.
+            ct.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException)
         {
