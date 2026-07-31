@@ -1,5 +1,6 @@
 using FluentAssertions;
-using Microsoft.Extensions.Logging;
+using FluentAssertions.Extensions;
+using Microsoft.Extensions.DependencyInjection;
 using ReviewBot.Core.Context;
 
 namespace ReviewBot.Core.Tests.Context;
@@ -45,29 +46,62 @@ public class ModelContextRegistryTests
     }
 
     [Fact]
-    public void ConstructorLogsWarningAndIgnoresInvalidConfiguredLimits()
+    public void ConstructorRejectsInvalidConfiguredLimits()
     {
-        var logger = new CapturingLogger<ModelContextRegistry>();
-        var registry = new ModelContextRegistry(
+        var act = () => new ModelContextRegistry(
             new ModelContextOptions
             {
                 Limits =
                 {
-                    ["qwen2.5:9b-q4_K_M"] = 0,
-                    [" "] = 16_384
+                    ["qwen2.5:9b-q4_K_M"] = 0
                 }
-            },
-            logger);
+            });
 
-        var tokens = registry.GetContextWindowTokens("qwen2.5:9b-q4_K_M");
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*ModelContext:Limits:qwen2.5:9b-q4_K_M*between 1 and 2000000*");
+    }
 
-        tokens.Should().Be(32_768);
-        logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning &&
-            entry.Message.Contains("Ignoring invalid ModelContext limit", StringComparison.Ordinal));
-        logger.Entries.Should().Contain(entry =>
-            entry.Level == LogLevel.Warning &&
-            entry.Message.Contains("blank model pattern", StringComparison.Ordinal));
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("qwen model")]
+    [InlineData(" qwen*")]
+    public void ConstructorRejectsInvalidConfiguredPatterns(string pattern)
+    {
+        var act = () => new ModelContextRegistry(new ModelContextOptions
+        {
+            Limits = { [pattern] = 16_384 }
+        });
+
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*ModelContext:Limits*");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(2_000_001)]
+    public void ConstructorRejectsInvalidGlobalCap(int tokens)
+    {
+        var act = () => new ModelContextRegistry(new ModelContextOptions
+        {
+            MaxContextWindowTokens = tokens
+        });
+
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*ModelContext:MaxContextWindowTokens*between 1 and 2000000*");
+    }
+
+    [Fact]
+    public void AddPromptBudgetingValidatesConfigurationEagerly()
+    {
+        var services = new ServiceCollection();
+
+        var act = () => services.AddPromptBudgeting(options =>
+            options.MaxContextWindowTokens = 0);
+
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*ModelContext:MaxContextWindowTokens*");
     }
 
     [Fact]
@@ -96,24 +130,38 @@ public class ModelContextRegistryTests
         registry.GetContextWindowTokens("").Should().Be(ModelContextRegistry.FallbackContextTokens);
     }
 
-    private sealed class CapturingLogger<T> : ILogger<T>
+    [Fact]
+    public void ApplyConfiguredCapLimitsLiveProviderValue()
     {
-        public List<(LogLevel Level, string Message)> Entries { get; } = [];
-
-        public IDisposable? BeginScope<TState>(TState state)
-            where TState : notnull =>
-            null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(
-            LogLevel logLevel,
-            EventId eventId,
-            TState state,
-            Exception? exception,
-            Func<TState, Exception?, string> formatter)
+        var registry = new ModelContextRegistry(new ModelContextOptions
         {
-            Entries.Add((logLevel, formatter(state, exception)));
-        }
+            MaxContextWindowTokens = 100_000,
+            Limits = { ["qwen/smaller*"] = 80_000 }
+        });
+
+        registry.ApplyConfiguredCap("Qwen/Qwen3.6-27B-FP8", 128_000).Should().Be(100_000);
+        registry.ApplyConfiguredCap("qwen/smaller-model", 128_000).Should().Be(80_000);
+        registry.ApplyConfiguredCap("Qwen/Qwen3.6-27B-FP8", 64_000).Should().Be(64_000);
+    }
+
+    [Theory]
+    [InlineData("**")]
+    [InlineData("a**b")]
+    [InlineData("***")]
+    [InlineData("*a**b*")]
+    [InlineData("**********")]
+    public void WildcardMatchingTerminatesOnAdjacentWildcards(string pattern)
+    {
+        // Adjacent wildcards produce an empty segment between them, which advances the
+        // value cursor by zero. The pattern cursor still moves past the first wildcard,
+        // so the loop progresses — asserted here because a config-driven pattern that
+        // could hang the matcher would be a denial of service via ModelContext:Limits.
+        var options = new ModelContextOptions { Limits = { [pattern] = 4096 } };
+        var registry = new ModelContextRegistry(options);
+
+        Action match = () => registry.GetContextWindowTokens("some-model-name");
+
+        match.ExecutionTime().Should().BeLessThan(2.Seconds());
     }
 }
+

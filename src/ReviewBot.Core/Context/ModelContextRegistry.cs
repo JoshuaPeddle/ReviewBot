@@ -1,5 +1,3 @@
-using Microsoft.Extensions.Logging;
-
 namespace ReviewBot.Core.Context;
 
 public sealed class ModelContextRegistry : IModelContextRegistry
@@ -29,31 +27,18 @@ public sealed class ModelContextRegistry : IModelContextRegistry
     ];
 
     private readonly IReadOnlyList<ModelContextPattern> patterns;
+    private readonly int? globalCap;
 
-    public ModelContextRegistry(
-        ModelContextOptions? options = null,
-        ILogger<ModelContextRegistry>? logger = null)
+    public ModelContextRegistry(ModelContextOptions? options = null)
     {
+        options ??= new ModelContextOptions();
+        ModelContextOptionsValidator.Validate(options);
+
+        globalCap = options.MaxContextWindowTokens;
         var configured = new List<ModelContextPattern>();
-        foreach (var pair in options?.Limits ?? [])
+        foreach (var pair in options.Limits)
         {
-            if (string.IsNullOrWhiteSpace(pair.Key))
-            {
-                logger?.LogWarning(
-                    "Ignoring ModelContext limit with a blank model pattern; limits must have a model name or wildcard pattern.");
-                continue;
-            }
-
-            if (pair.Value <= 0)
-            {
-                logger?.LogWarning(
-                    "Ignoring invalid ModelContext limit {ModelPattern}={ContextTokens}; limits must be positive.",
-                    pair.Key,
-                    pair.Value);
-                continue;
-            }
-
-            configured.Add(new ModelContextPattern(pair.Key.Trim(), pair.Value, IsConfigured: true));
+            configured.Add(new ModelContextPattern(pair.Key, pair.Value, IsConfigured: true));
         }
 
         patterns = configured.Concat(Defaults).ToArray();
@@ -73,6 +58,28 @@ public sealed class ModelContextRegistry : IModelContextRegistry
             .ThenByDescending(pattern => pattern.Pattern.Length)
             .Select(pattern => pattern.ContextTokens)
             .FirstOrDefault(FallbackContextTokens);
+    }
+
+    public int ApplyConfiguredCap(string modelIdentifier, int discoveredTokens)
+    {
+        if (discoveredTokens <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(discoveredTokens), discoveredTokens, "Discovered context tokens must be positive.");
+        }
+
+        var modelCap = patterns
+            .Where(pattern => pattern.IsConfigured && pattern.IsMatch(modelIdentifier))
+            .OrderByDescending(pattern => pattern.LiteralPrefixLength)
+            .ThenByDescending(pattern => pattern.Pattern.Length)
+            .Select(pattern => (int?)pattern.ContextTokens)
+            .FirstOrDefault();
+        var cap = new[] { globalCap, modelCap }
+            .Where(value => value is > 0)
+            .Select(value => value!.Value)
+            .DefaultIfEmpty(discoveredTokens)
+            .Min();
+        return Math.Min(discoveredTokens, cap);
     }
 
     private sealed record ModelContextPattern(string Pattern, int ContextTokens, bool IsConfigured)

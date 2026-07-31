@@ -13,6 +13,7 @@ public static class DependencyInjection
 
         var options = new ModelContextOptions();
         configure?.Invoke(options);
+        ModelContextOptionsValidator.Validate(options);
 
         services.TryAddSingleton(options);
         services.TryAddSingleton<IModelContextRegistry, ModelContextRegistry>();
