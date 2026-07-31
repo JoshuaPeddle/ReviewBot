@@ -121,7 +121,11 @@ Writes per-review JSON traces for local debugging and observability. Tracing is 
 
 ## Per-repo YAML reference
 
-Place `.github/review-bot.yml` (or `.github/review-bot.yaml`) in any repository where ReviewBot is installed. Missing fields fall back to the defaults shown below. Malformed YAML is logged as a warning and the default config is used so reviews are not blocked by config mistakes.
+Place `.github/review-bot.yml` in any repository where ReviewBot is installed. Missing fields inherit the defaults shown below.
+
+Invalid policy disables that repository's reviews until it is fixed: malformed YAML, unknown fields, unknown enum values, and out-of-range numeric limits all stop the review rather than silently substituting a different value. Repository policy decides what gets executed and what gets published, so quietly reviewing under a policy nobody wrote is worse than not reviewing. The rejection is logged with the offending field.
+
+Note that policy is read from the pull request's **base** commit, so the copy on your default branch governs every review — a stale key there disables the bot repo-wide, including on the pull request that would remove it.
 
 ```yaml
 # .github/review-bot.yml
@@ -156,12 +160,6 @@ review:
   # Lower this only if the configured model reliably returns short reviews.
   # Default: 4096
   response_reserve_tokens: 4096
-
-  # Split oversized pull request diffs into multiple LLM review passes instead
-  # of dropping files before review. Disable to fall back to the legacy patch
-  # budget behavior for very large PRs.
-  # Default: true
-  chunked_review: true
 
   # Safety cap for chunked review. If a PR needs more chunks than this, only the
   # first max_chunks worth of files after directory/path ordering are reviewed.
@@ -239,8 +237,8 @@ retrieval:
   # symbol index, and injects definitions plus top-3 callers as snippets
   # under `## Repository context`. Symbol-aware budget capping prevents
   # retrieval from consuming more than 20% of the content budget.
-  # Default: false. Set to true once you have a writable index_cache_dir.
-  enabled: false
+  # Default: true
+  enabled: true
 
   # Maximum retrieved context bytes to include in a review.
   max_bytes: 102400
@@ -248,11 +246,12 @@ retrieval:
   # Symbol lookup mode: callers, definitions, or both.
   symbol_lookup_depth: callers
 
-  # Embedding retrieval lane. Reserved for the post-v0 retrieval pass.
-  embeddings: false
-
-  # Disk location for the per-SHA repository index cache.
-  index_cache_dir: /var/cache/reviewbot/index
+  # How many times to follow symbol references outward from the diff. 1 fetches the
+  # definitions of symbols the diff names; 2 additionally fetches what those bodies
+  # themselves refer to, which is where an invariant lives when the direct callee only
+  # delegates.
+  # Default: 2
+  max_hops: 2
 
 # Glob patterns for files to exclude from the review.
 # Uses Microsoft.Extensions.FileSystemGlobbing syntax (forward slashes, ** for any depth).
