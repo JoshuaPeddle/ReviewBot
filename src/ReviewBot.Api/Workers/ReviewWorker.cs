@@ -1567,7 +1567,10 @@ public sealed class ReviewWorker : BackgroundService
             var probed = await probe.TryGetContextWindowTokensAsync(config.Model.Name, ct).ConfigureAwait(false);
             if (probed is > 0)
             {
-                return probed.Value;
+                // A server advertising a huge window is describing what it will accept, not
+                // what the operator wants to pay for or what the model reasons well over.
+                // The configured ceiling wins whenever it is lower.
+                return modelContextRegistry.ApplyConfiguredCap(config.Model.Name, probed.Value);
             }
         }
 
