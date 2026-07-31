@@ -400,6 +400,49 @@ public class RepoConfigFetcherTests
         config.Enabled.Should().BeFalse();
     }
 
+    [Theory]
+    [InlineData(".github/review-bot.yml")]
+    [InlineData(".github/review-bot.example.yml")]
+    public async Task ConfigFilesShippedInThisRepositoryStayParseable(string relativePath)
+    {
+        // Repository policy is read from the pull request's base commit, so this repo's own
+        // committed config governs every review of this repo. A key the strict parser
+        // rejects therefore disables ReviewBot repo-wide — including on the pull request
+        // that would fix it. Catch that here rather than in production.
+        var configPath = Path.Combine(FindRepositoryRoot(), relativePath);
+        File.Exists(configPath).Should().BeTrue($"{relativePath} is expected to exist");
+
+        // Read before touching the substitute: awaiting inside Returns(...) breaks
+        // NSubstitute's last-call tracking and makes the setup order-dependent.
+        var yaml = await File.ReadAllTextAsync(configPath, TestContext.Current.CancellationToken);
+        var contents = Substitute.For<IRepositoryContentsClient>();
+        contents
+            .GetAllContentsByRef("octo", "repo", ".github/review-bot.yml", "head-sha")
+            .Returns([CreateContent(yaml)]);
+        var logger = new CapturingLogger<RepoConfigFetcher>();
+        var fetcher = CreateFetcher(contents, logger);
+
+        var config = await fetcher.FetchAsync(
+            "octo", "repo", "head-sha", "ghs_token", TestContext.Current.CancellationToken);
+
+        config.Enabled.Should().BeTrue(
+            "an unparseable shipped config disables reviews for the whole repository");
+        logger.Entries.Should().NotContain(entry => entry.Level >= LogLevel.Warning);
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, ".github")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName
+            ?? throw new DirectoryNotFoundException(
+                "Could not locate the repository root from the test output directory.");
+    }
+
     [Fact]
     public async Task FetchAsyncMapsMinConfidenceHigh()
     {
