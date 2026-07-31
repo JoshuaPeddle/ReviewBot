@@ -13,7 +13,7 @@ public sealed class ReviewPromptTokenEstimatorTests
             new FixedTokenEstimator(3),
             [new FixedProviderTokenEstimator("anthropic", 17)]);
 
-        var tokens = estimator.EstimateTokens(new ModelConfig("anthropic", "claude-test", null), "hello");
+        var tokens = estimator.EstimateTokens(new ModelConfig("anthropic", "claude-test"), "hello");
 
         tokens.Should().Be(17);
     }
@@ -25,7 +25,7 @@ public sealed class ReviewPromptTokenEstimatorTests
             new FixedTokenEstimator(3),
             [new FixedProviderTokenEstimator("anthropic", 17)]);
 
-        var tokens = estimator.EstimateTokens(new ModelConfig("openai", "qwen-test", null), "hello");
+        var tokens = estimator.EstimateTokens(new ModelConfig("openai", "qwen-test"), "hello");
 
         tokens.Should().Be(3);
     }

@@ -13,11 +13,19 @@ namespace ReviewBot.GitHub.Config;
 public sealed class RepoConfigFetcher : IRepoConfigFetcher
 {
     private const string YmlPath = ".github/review-bot.yml";
-    private const string YamlPath = ".github/review-bot.yaml";
+    private const int MaxReviewFiles = 300;
+    private const int MaxPatchLines = 20_000;
+    private const int MaxContextRequests = 20;
+    private const int MaxContextFileBytes = 1_048_576;
+    private const int MaxResponseReserveTokens = 32_768;
+    private const int MaxReviewChunks = 50;
+    private const int MaxBuildTimeoutSeconds = 600;
+    private const int MaxTestTimeoutSeconds = 1_800;
+    private const int MaxRetrievalBytes = 1_048_576;
+    private const int MaxRetrievalHops = 5;
 
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
         .WithNamingConvention(UnderscoredNamingConvention.Instance)
-        .IgnoreUnmatchedProperties()
         .Build();
 
     private readonly IGitHubClientFactory clientFactory;
@@ -46,17 +54,26 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
 
         var client = clientFactory.CreateForInstallation(installationToken);
 
-        foreach (var path in new[] { YmlPath, YamlPath })
+        string? yaml;
+        try
         {
-            ct.ThrowIfCancellationRequested();
+            yaml = await TryFetchConfigFileAsync(client, owner, repo, sha, YmlPath, ct).ConfigureAwait(false);
+        }
+        catch (InvalidDataException ex)
+        {
+            logger.LogWarning(
+                ex,
+                "Invalid ReviewBot repo config {Path} for {Owner}/{Repo} at {Sha}; disabling review until the config is fixed",
+                YmlPath,
+                owner,
+                repo,
+                sha);
+            return ReviewConfig.Default with { Enabled = false };
+        }
 
-            var yaml = await TryFetchConfigFileAsync(client, owner, repo, sha, path, ct).ConfigureAwait(false);
-            if (yaml is null)
-            {
-                continue;
-            }
-
-            return ParseConfig(yaml, owner, repo, sha, path);
+        if (yaml is not null)
+        {
+            return ParseConfig(yaml, owner, repo, sha, YmlPath);
         }
 
         logger.LogInformation(
@@ -88,16 +105,17 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
 
             if (file?.EncodedContent is null)
             {
-                logger.LogWarning(
-                    "ReviewBot repo config {Path} for {Owner}/{Repo} at {Sha} was not a single base64-encoded file; using defaults",
-                    path,
-                    owner,
-                    repo,
-                    sha);
-                return string.Empty;
+                throw new InvalidDataException("The config was not returned as one base64-encoded file.");
             }
 
-            return Encoding.UTF8.GetString(Convert.FromBase64String(file.EncodedContent));
+            try
+            {
+                return Encoding.UTF8.GetString(Convert.FromBase64String(file.EncodedContent));
+            }
+            catch (FormatException ex)
+            {
+                throw new InvalidDataException("The config content was not valid base64.", ex);
+            }
         }
         catch (NotFoundException)
         {
@@ -110,27 +128,22 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         try
         {
             var fileConfig = Deserializer.Deserialize<RepoConfigFile>(yaml);
-            return MergeWithDefault(fileConfig, owner, repo, sha, path);
+            return MergeWithDefault(fileConfig);
         }
         catch (Exception ex) when (ex is YamlException or FormatException or ArgumentException)
         {
             logger.LogWarning(
                 ex,
-                "Failed to parse ReviewBot repo config {Path} for {Owner}/{Repo} at {Sha}; using defaults",
+                "Invalid ReviewBot repo config {Path} for {Owner}/{Repo} at {Sha}; disabling review until the config is fixed",
                 path,
                 owner,
                 repo,
                 sha);
-            return ReviewConfig.Default;
+            return ReviewConfig.Default with { Enabled = false };
         }
     }
 
-    private ReviewConfig MergeWithDefault(
-        RepoConfigFile? fileConfig,
-        string owner,
-        string repo,
-        string sha,
-        string path)
+    private static ReviewConfig MergeWithDefault(RepoConfigFile? fileConfig)
     {
         var defaults = ReviewConfig.Default;
         if (fileConfig is null)
@@ -138,13 +151,12 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
             return defaults;
         }
 
-        var provider = MergeProvider(fileConfig.Model?.Provider, owner, repo, sha, path);
+        var provider = MergeProvider(fileConfig.Model?.Provider);
         var model = new ModelConfig(
             provider,
             // An omitted model name stays empty so the LLM factory falls back to the provider's
             // configured model (e.g. REVIEWBOT__OpenAi__ModelName) instead of a hardcoded default.
-            (fileConfig.Model?.Name ?? string.Empty).Trim(),
-            MergeNullableString(fileConfig.Model?.BaseUrlEnvVar, defaults.Model.BaseUrlEnvVar));
+            MergeModelName(fileConfig.Model?.Name));
 
         var trigger = new TriggerConfig(
             fileConfig.Review?.Trigger?.OnReviewRequest ?? defaults.Review.Trigger.OnReviewRequest,
@@ -152,83 +164,57 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         var review = new ReviewOutputConfig(
             fileConfig.Review?.InlineComments ?? defaults.Review.InlineComments,
             fileConfig.Review?.Summary ?? defaults.Review.Summary,
-            MergePositiveInt(
+            MergeBoundedPositiveInt(
                 fileConfig.Review?.MaxFiles,
                 defaults.Review.MaxFiles,
-                "review.max_files",
-                owner,
-                repo,
-                sha,
-                path),
-            MergePositiveInt(
+                MaxReviewFiles,
+                "review.max_files"),
+            MergeBoundedPositiveInt(
                 fileConfig.Review?.MaxPatchLines,
                 defaults.Review.MaxPatchLines,
-                "review.max_patch_lines",
-                owner,
-                repo,
-                sha,
-                path),
+                MaxPatchLines,
+                "review.max_patch_lines"),
             trigger,
-            ParseMinConfidence(fileConfig.Review?.MinConfidence, owner, repo, sha, path),
+            ParseMinConfidence(fileConfig.Review?.MinConfidence),
             fileConfig.Review?.SelfCritique ?? defaults.Review.SelfCritique,
             fileConfig.Review?.AgenticContext ?? defaults.Review.AgenticContext,
-            MergePositiveInt(
+            MergeBoundedPositiveInt(
                 fileConfig.Review?.MaxContextRequests,
                 defaults.Review.MaxContextRequests,
-                "review.max_context_requests",
-                owner,
-                repo,
-                sha,
-                path),
-            MergePositiveInt(
+                MaxContextRequests,
+                "review.max_context_requests"),
+            MergeBoundedPositiveInt(
                 fileConfig.Review?.MaxContextFileBytes,
                 defaults.Review.MaxContextFileBytes,
-                "review.max_context_file_bytes",
-                owner,
-                repo,
-                sha,
-                path),
+                MaxContextFileBytes,
+                "review.max_context_file_bytes"),
             fileConfig.Review?.RequestChangesOnError ?? defaults.Review.RequestChangesOnError,
             fileConfig.Review?.ApproveIfClean ?? defaults.Review.ApproveIfClean,
-            MergeNonNegativeInt(
+            MergeBoundedNonNegativeInt(
                 fileConfig.Review?.FullFileMaxBytes,
                 defaults.Review.FullFileMaxBytes,
-                "review.full_file_max_bytes",
-                owner,
-                repo,
-                sha,
-                path),
-            MergeNonNegativeInt(
+                MaxContextFileBytes,
+                "review.full_file_max_bytes"),
+            MergeBoundedNonNegativeInt(
                 fileConfig.Review?.ResponseReserveTokens,
                 defaults.Review.ResponseReserveTokens,
-                "review.response_reserve_tokens",
-                owner,
-                repo,
-                sha,
-                path),
-            fileConfig.Review?.ChunkedReview ?? defaults.Review.ChunkedReview,
-            MergePositiveInt(
+                MaxResponseReserveTokens,
+                "review.response_reserve_tokens"),
+            MergeBoundedPositiveInt(
                 fileConfig.Review?.MaxChunks,
                 defaults.Review.MaxChunks,
-                "review.max_chunks",
-                owner,
-                repo,
-                sha,
-                path),
+                MaxReviewChunks,
+                "review.max_chunks"),
             MergeUnitInterval(
                 fileConfig.Review?.ChunkHeadroom,
                 defaults.Review.ChunkHeadroom,
-                "review.chunk_headroom",
-                owner,
-                repo,
-                sha,
-                path))
+                "review.chunk_headroom"))
         {
             Verification = MergeVerification(fileConfig.Review?.Verification, defaults.Review.Verification)
         };
 
         var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
-        var retrieval = MergeRetrieval(fileConfig.Retrieval, defaults.Retrieval, owner, repo, sha, path);
+        var retrieval = MergeRetrieval(fileConfig.Retrieval, defaults.Retrieval);
 
         return new ReviewConfig(
             fileConfig.Enabled ?? defaults.Enabled,
@@ -251,7 +237,7 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         return new VerificationConfig(file.Enabled ?? defaults.Enabled);
     }
 
-    private GroundingConfig MergeGrounding(GroundingConfigFile? file, GroundingConfig defaults)
+    private static GroundingConfig MergeGrounding(GroundingConfigFile? file, GroundingConfig defaults)
     {
         if (file is null)
         {
@@ -259,25 +245,34 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         }
 
         var localTests = file.LocalTests ?? defaults.LocalTests;
+        var build = file.Build ?? defaults.Build;
+        if (localTests && !build)
+        {
+            throw new ArgumentException(
+                "grounding.local_tests requires grounding.build to be true.",
+                nameof(file));
+        }
 
         return new GroundingConfig(
             file.Enabled ?? defaults.Enabled,
-            file.Build ?? defaults.Build,
+            build,
             localTests || (file.Tests ?? defaults.Tests),
             localTests,
-            file.BuildTimeoutSeconds ?? defaults.BuildTimeoutSeconds,
-            file.TestTimeoutSeconds ?? defaults.TestTimeoutSeconds,
+            MergeBoundedPositiveInt(
+                file.BuildTimeoutSeconds,
+                defaults.BuildTimeoutSeconds,
+                MaxBuildTimeoutSeconds,
+                "grounding.build_timeout_seconds"),
+            MergeBoundedPositiveInt(
+                file.TestTimeoutSeconds,
+                defaults.TestTimeoutSeconds,
+                MaxTestTimeoutSeconds,
+                "grounding.test_timeout_seconds"),
             file.BuildCommand ?? defaults.BuildCommand,
             file.TestCommand ?? defaults.TestCommand);
     }
 
-    private RetrievalConfig MergeRetrieval(
-        RetrievalConfigFile? file,
-        RetrievalConfig defaults,
-        string owner,
-        string repo,
-        string sha,
-        string path)
+    private static RetrievalConfig MergeRetrieval(RetrievalConfigFile? file, RetrievalConfig defaults)
     {
         if (file is null)
         {
@@ -286,113 +281,106 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
 
         return new RetrievalConfig(
             file.Enabled ?? defaults.Enabled,
-            MergePositiveInt(
+            MergeBoundedPositiveInt(
                 file.MaxBytes,
                 defaults.MaxBytes,
-                "retrieval.max_bytes",
-                owner,
-                repo,
-                sha,
-                path),
-            ParseSymbolLookupDepth(file.SymbolLookupDepth, owner, repo, sha, path),
-            file.Embeddings ?? defaults.Embeddings,
-            MergeString(file.IndexCacheDir, defaults.IndexCacheDir));
+                MaxRetrievalBytes,
+                "retrieval.max_bytes"),
+            ParseSymbolLookupDepth(file.SymbolLookupDepth),
+            // Cache placement is a host concern. Never allow repository YAML to
+            // choose a writable path in the ReviewBot container.
+            defaults.IndexCacheDir,
+            MergeBoundedPositiveInt(
+                file.MaxHops,
+                defaults.MaxHops,
+                MaxRetrievalHops,
+                "retrieval.max_hops"));
     }
 
-    private string MergeProvider(string? provider, string owner, string repo, string sha, string path)
+    private static string MergeProvider(string? provider)
     {
-        var normalized = provider?.Trim().ToLowerInvariant();
-        if (string.IsNullOrEmpty(normalized))
+        if (provider is null)
         {
             return ReviewConfig.Default.Model.Provider;
         }
 
+        var normalized = provider.Trim().ToLowerInvariant();
         if (normalized is "anthropic" or "openai")
         {
             return normalized;
         }
 
-        logger.LogWarning(
-            "Unknown ReviewBot model provider {Provider} in {Path} for {Owner}/{Repo} at {Sha}; using default provider {DefaultProvider}",
-            provider,
-            path,
-            owner,
-            repo,
-            sha,
-            ReviewConfig.Default.Model.Provider);
-        return ReviewConfig.Default.Model.Provider;
+        throw new ArgumentException(
+            $"model.provider must be 'anthropic' or 'openai', but was '{provider}'.",
+            nameof(provider));
     }
 
-    private int MergePositiveInt(
+    private static string MergeModelName(string? modelName)
+    {
+        if (modelName is null)
+        {
+            return string.Empty;
+        }
+
+        var normalized = modelName.Trim();
+        if (normalized.Length == 0)
+        {
+            throw new ArgumentException(
+                "model.name must be omitted to use the host model, or contain a non-empty model identifier.",
+                nameof(modelName));
+        }
+
+        return normalized;
+    }
+
+    private static int MergeBoundedPositiveInt(
         int? value,
         int defaultValue,
-        string fieldName,
-        string owner,
-        string repo,
-        string sha,
-        string path)
+        int maximumValue,
+        string fieldName)
     {
         if (value is null)
         {
             return defaultValue;
         }
 
-        if (value > 0)
+        if (value > 0 && value <= maximumValue)
         {
             return value.Value;
         }
 
-        logger.LogWarning(
-            "Invalid ReviewBot config value {FieldName}={Value} in {Path} for {Owner}/{Repo} at {Sha}; using default {DefaultValue}",
+        throw new ArgumentOutOfRangeException(
             fieldName,
             value,
-            path,
-            owner,
-            repo,
-            sha,
-            defaultValue);
-        return defaultValue;
+            $"{fieldName} must be between 1 and {maximumValue}.");
     }
 
-    private int MergeNonNegativeInt(
+    private static int MergeBoundedNonNegativeInt(
         int? value,
         int defaultValue,
-        string fieldName,
-        string owner,
-        string repo,
-        string sha,
-        string path)
+        int maximumValue,
+        string fieldName)
     {
         if (value is null)
         {
             return defaultValue;
         }
 
-        if (value >= 0)
+        if (value >= 0 && value <= maximumValue)
         {
             return value.Value;
         }
 
-        logger.LogWarning(
-            "Invalid ReviewBot config value {FieldName}={Value} in {Path} for {Owner}/{Repo} at {Sha}; using default {DefaultValue}",
+        throw new ArgumentOutOfRangeException(
             fieldName,
             value,
-            path,
-            owner,
-            repo,
-            sha,
-            defaultValue);
-        return defaultValue;
+            $"{fieldName} must be between 0 and {maximumValue}.");
     }
 
-    private double MergeUnitInterval(
+    private static double MergeUnitInterval(
         double? value,
         double defaultValue,
-        string fieldName,
-        string owner,
-        string repo,
-        string sha,
-        string path)
+        string fieldName)
     {
         if (value is null)
         {
@@ -404,21 +392,12 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
             return value.Value;
         }
 
-        logger.LogWarning(
-            "Invalid ReviewBot config value {FieldName}={Value} in {Path} for {Owner}/{Repo} at {Sha}; using default {DefaultValue}",
-            fieldName,
-            value,
-            path,
-            owner,
-            repo,
-            sha,
-            defaultValue);
-        return defaultValue;
+        throw new ArgumentOutOfRangeException(fieldName, value, $"{fieldName} must be greater than 0 and at most 1.");
     }
 
-    private Confidence ParseMinConfidence(string? value, string owner, string repo, string sha, string path)
+    private static Confidence ParseMinConfidence(string? value)
     {
-        if (string.IsNullOrWhiteSpace(value))
+        if (value is null)
         {
             return ReviewConfig.Default.Review.MinConfidence;
         }
@@ -428,26 +407,15 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
             "low" => Confidence.Low,
             "medium" => Confidence.Medium,
             "high" => Confidence.High,
-            _ => LogUnknownMinConfidence(value, owner, repo, sha, path)
+            _ => throw new ArgumentException(
+                $"review.min_confidence must be 'low', 'medium', or 'high', but was '{value}'.",
+                nameof(value))
         };
     }
 
-    private Confidence LogUnknownMinConfidence(string value, string owner, string repo, string sha, string path)
+    private static string ParseSymbolLookupDepth(string? value)
     {
-        logger.LogWarning(
-            "Unknown ReviewBot min_confidence value {Value} in {Path} for {Owner}/{Repo} at {Sha}; using default {Default}",
-            value,
-            path,
-            owner,
-            repo,
-            sha,
-            ReviewConfig.Default.Review.MinConfidence);
-        return ReviewConfig.Default.Review.MinConfidence;
-    }
-
-    private string ParseSymbolLookupDepth(string? value, string owner, string repo, string sha, string path)
-    {
-        if (string.IsNullOrWhiteSpace(value))
+        if (value is null)
         {
             return RetrievalConfig.Default.SymbolLookupDepth;
         }
@@ -458,21 +426,12 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
             return normalized;
         }
 
-        logger.LogWarning(
-            "Unknown ReviewBot retrieval.symbol_lookup_depth value {Value} in {Path} for {Owner}/{Repo} at {Sha}; using default {DefaultValue}",
-            value,
-            path,
-            owner,
-            repo,
-            sha,
-            RetrievalConfig.Default.SymbolLookupDepth);
-        return RetrievalConfig.Default.SymbolLookupDepth;
+        throw new ArgumentException(
+            $"retrieval.symbol_lookup_depth must be 'definitions', 'callers', or 'both', but was '{value}'.",
+            nameof(value));
     }
 
     private static string MergeString(string? value, string defaultValue) =>
-        string.IsNullOrWhiteSpace(value) ? defaultValue : value;
-
-    private static string? MergeNullableString(string? value, string? defaultValue) =>
         string.IsNullOrWhiteSpace(value) ? defaultValue : value;
 
     private static void ValidateInputs(string owner, string repo, string sha, string installationToken)
@@ -530,8 +489,6 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public string? Provider { get; set; }
 
         public string? Name { get; set; }
-
-        public string? BaseUrlEnvVar { get; set; }
     }
 
     private sealed class ReviewConfigFile
@@ -567,8 +524,6 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public int? FullFileMaxBytes { get; set; }
 
         public int? ResponseReserveTokens { get; set; }
-
-        public bool? ChunkedReview { get; set; }
 
         public int? MaxChunks { get; set; }
 
@@ -632,8 +587,6 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
 
         public string? SymbolLookupDepth { get; set; }
 
-        public bool? Embeddings { get; set; }
-
-        public string? IndexCacheDir { get; set; }
+        public int? MaxHops { get; set; }
     }
 }
