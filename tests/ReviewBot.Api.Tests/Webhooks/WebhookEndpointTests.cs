@@ -10,7 +10,6 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using ReviewBot.Api.Webhooks;
-using ReviewBot.Core.Idempotency;
 using ReviewBot.Core.Jobs;
 
 namespace ReviewBot.Api.Tests.Webhooks;
@@ -54,8 +53,7 @@ public class WebhookEndpointTests
     public async Task OpenedPrReturnsAcceptedAndEnqueuesJob()
     {
         using var queue = new CapturingReviewJobQueue();
-        var store = new CapturingDeliveryStore();
-        await using var factory = CreateFactory(queue, store);
+        await using var factory = CreateFactory(queue);
         using var client = factory.CreateClient();
         var payload = CreatePullRequestPayload("opened", requestedReviewer: null);
         using var request = CreateWebhookRequest(payload);
@@ -71,7 +69,6 @@ public class WebhookEndpointTests
             PrNumber: 42,
             HeadSha: "head-sha-abc",
             Reason: "opened"));
-        store.RecordedDeliveryIds.Should().Equal("delivery-123");
     }
 
     [Fact]
@@ -93,8 +90,7 @@ public class WebhookEndpointTests
     public async Task ReviewCommentReturnsAcceptedAndEnqueuesJobWithNullSha()
     {
         using var queue = new CapturingReviewJobQueue();
-        var store = new CapturingDeliveryStore();
-        await using var factory = CreateFactory(queue, store);
+        await using var factory = CreateFactory(queue);
         using var client = factory.CreateClient();
         var payload = CreateIssueCommentPayload("created", "/review", isPr: true);
         using var request = CreateWebhookRequest(payload, eventName: "issue_comment");
@@ -110,7 +106,6 @@ public class WebhookEndpointTests
             PrNumber: 42,
             HeadSha: null,
             Reason: "review_comment"));
-        store.RecordedDeliveryIds.Should().Equal("delivery-123");
     }
 
     [Fact]
@@ -212,11 +207,12 @@ public class WebhookEndpointTests
     }
 
     [Fact]
-    public async Task DuplicateAcceptedDeliveryReturnsOkWithoutEnqueueingJob()
+    public async Task DeliveryTheQueueRejectsReturnsOkWithoutEnqueueingJob()
     {
-        using var queue = new CapturingReviewJobQueue();
-        var store = new CapturingDeliveryStore(recordAsNew: false);
-        await using var factory = CreateFactory(queue, store);
+        // Duplicate suppression moved into the durable queue, the only place that can
+        // decide it atomically. The endpoint's job is to report the outcome honestly.
+        using var queue = new CapturingReviewJobQueue(acceptEnqueue: false);
+        await using var factory = CreateFactory(queue);
         using var client = factory.CreateClient();
         var payload = CreatePullRequestPayload("opened", requestedReviewer: null);
         using var request = CreateWebhookRequest(payload);
@@ -225,12 +221,9 @@ public class WebhookEndpointTests
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         queue.Jobs.Should().BeEmpty();
-        store.RecordedDeliveryIds.Should().Equal("delivery-123");
     }
 
-    private static WebApplicationFactory<Program> CreateFactory(
-        CapturingReviewJobQueue queue,
-        IDeliveryStore? deliveryStore = null)
+    private static WebApplicationFactory<Program> CreateFactory(CapturingReviewJobQueue queue)
     {
         return new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
@@ -250,10 +243,7 @@ public class WebhookEndpointTests
                 builder.ConfigureTestServices(services =>
                 {
                     services.RemoveAll<IReviewJobQueue>();
-                    services.RemoveAll<ChannelReviewJobQueue>();
-                    services.RemoveAll<IDeliveryStore>();
                     services.AddSingleton<IReviewJobQueue>(queue);
-                    services.AddSingleton(deliveryStore ?? new CapturingDeliveryStore());
                     services.Configure<WebhookOptions>(options =>
                     {
                         options.Secret = Secret;
@@ -366,17 +356,36 @@ public class WebhookEndpointTests
             """;
     }
 
-    private sealed class CapturingReviewJobQueue : IReviewJobQueue, IDisposable
+    private sealed class CapturingReviewJobQueue(bool acceptEnqueue = true) : IReviewJobQueue, IDisposable
     {
         private readonly List<ReviewJob> jobs = [];
 
         public IReadOnlyList<ReviewJob> Jobs => jobs;
 
-        public ValueTask EnqueueAsync(ReviewJob job, CancellationToken ct)
+        public ValueTask<bool> TryEnqueueAsync(ReviewJob job, CancellationToken ct)
         {
+            if (!acceptEnqueue)
+            {
+                return ValueTask.FromResult(false);
+            }
+
             jobs.Add(job);
-            return ValueTask.CompletedTask;
+            return ValueTask.FromResult(true);
         }
+
+        public ValueTask<bool> CompleteAsync(ReviewJob job, CancellationToken ct) =>
+            ValueTask.FromResult(true);
+
+        public ValueTask<ReviewJobFailureDisposition> FailAsync(
+            ReviewJob job,
+            string error,
+            CancellationToken ct) => ValueTask.FromResult(ReviewJobFailureDisposition.DeadLettered);
+
+        public ValueTask<bool> ReleaseAsync(ReviewJob job, CancellationToken ct) =>
+            ValueTask.FromResult(true);
+
+        public ValueTask<bool> RenewLeaseAsync(ReviewJob job, CancellationToken ct) =>
+            ValueTask.FromResult(true);
 
         public async IAsyncEnumerable<ReviewJob> DequeueAllAsync([EnumeratorCancellation] CancellationToken ct)
         {
@@ -397,21 +406,4 @@ public class WebhookEndpointTests
         }
     }
 
-    private sealed class CapturingDeliveryStore(bool recordAsNew = true) : IDeliveryStore
-    {
-        private readonly List<string> recordedDeliveryIds = [];
-
-        public IReadOnlyList<string> RecordedDeliveryIds => recordedDeliveryIds;
-
-        public Task<bool> TryRecordAsync(string deliveryId, CancellationToken ct)
-        {
-            recordedDeliveryIds.Add(deliveryId);
-            return Task.FromResult(recordAsNew);
-        }
-
-        public Task CleanupAsync(DateTimeOffset olderThan, CancellationToken ct)
-        {
-            throw new NotSupportedException();
-        }
-    }
 }

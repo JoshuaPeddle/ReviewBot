@@ -86,11 +86,16 @@ builder.Services.AddSingleton<IReviewPoster>(provider => provider.GetRequiredSer
 builder.Services.AddSingleton<RepoConfigFetcher>();
 builder.Services.AddSingleton<IRepoConfigFetcher>(provider => provider.GetRequiredService<RepoConfigFetcher>());
 
-var persistenceOptions = builder.Configuration
-    .GetSection(PersistenceOptions.SectionName)
-    .Get<PersistenceOptions>() ?? new PersistenceOptions();
-builder.Services.AddReviewBotPersistence(options => options.UseSqlite(persistenceOptions.ConnectionString));
-builder.Services.AddChannelReviewJobQueue();
+builder.Services.AddReviewBotPersistence(options =>
+{
+    // Resolve this when EF builds its options, after host and test configuration
+    // callbacks have run. Snapshotting it here made a late override silently fall back
+    // to the working-directory reviewbot.db.
+    var persistence = builder.Configuration
+        .GetSection(PersistenceOptions.SectionName)
+        .Get<PersistenceOptions>() ?? new PersistenceOptions();
+    options.UseSqlite(persistence.ConnectionString);
+});
 builder.Services.AddGrounding()
     .AddLanguageDetector<DotNetLanguageDetector>()
     .AddLanguageDetector<PythonLanguageDetector>()
@@ -113,7 +118,6 @@ builder.Services.AddOpenTelemetry()
         .AddMeter(ReviewBotMetrics.MeterName)
         .AddPrometheusExporter());
 builder.Services.AddHostedService<ReviewWorker>();
-builder.Services.AddHostedService<DeliveryStoreCleanupService>();
 builder.Services.AddHealthChecks()
     .AddCheck("self", () => HealthCheckResult.Healthy())
     .AddDbContextCheck<ReviewBotDbContext>("db");

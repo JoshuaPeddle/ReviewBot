@@ -7,4 +7,5 @@ public sealed record ReviewJob(
     string Repo,
     int PrNumber,
     string? HeadSha,
-    string Reason);
+    string Reason,
+    string? LeaseToken = null);
