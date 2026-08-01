@@ -1,6 +1,5 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
-using ReviewBot.Core.Idempotency;
 using ReviewBot.Core.Jobs;
 
 namespace ReviewBot.Api.Webhooks;
@@ -10,6 +9,7 @@ public static class WebhookEndpoint
     // GitHub caps webhook payloads at 25 MiB. Reject anything larger to bound
     // memory use and avoid trivial DoS via lying about ContentLength.
     private const int MaxWebhookBodyBytes = 26_214_400;
+    private const int MaxDeliveryIdLength = 64;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public static IEndpointRouteBuilder MapWebhookEndpoint(this IEndpointRouteBuilder endpoints)
@@ -25,11 +25,16 @@ public static class WebhookEndpoint
         HttpRequest request,
         IOptions<WebhookOptions> options,
         IReviewJobQueue queue,
-        IDeliveryStore deliveryStore,
         ILogger<WebhookEndpointMarker> logger,
         CancellationToken ct)
     {
         var deliveryId = request.Headers["X-GitHub-Delivery"].ToString();
+        if (!IsValidDeliveryId(deliveryId))
+        {
+            logger.LogWarning("Rejected webhook: X-GitHub-Delivery was missing or invalid");
+            return Results.BadRequest();
+        }
+
         var body = await ReadBodyAsync(request, MaxWebhookBodyBytes, ct);
         if (body is null)
         {
@@ -52,8 +57,8 @@ public static class WebhookEndpoint
         var eventName = request.Headers["X-GitHub-Event"].ToString();
         return eventName switch
         {
-            "pull_request" => await HandlePullRequestAsync(body, deliveryId, queue, deliveryStore, logger, ct),
-            "issue_comment" => await HandleIssueCommentAsync(body, deliveryId, options.Value, queue, deliveryStore, logger, ct),
+            "pull_request" => await HandlePullRequestAsync(body, deliveryId, queue, logger, ct),
+            "issue_comment" => await HandleIssueCommentAsync(body, deliveryId, options.Value, queue, logger, ct),
             _ => Results.NoContent()
         };
     }
@@ -62,7 +67,6 @@ public static class WebhookEndpoint
         byte[] body,
         string deliveryId,
         IReviewJobQueue queue,
-        IDeliveryStore deliveryStore,
         ILogger<WebhookEndpointMarker> logger,
         CancellationToken ct)
     {
@@ -88,12 +92,6 @@ public static class WebhookEndpoint
             return Results.NoContent();
         }
 
-        if (!await deliveryStore.TryRecordAsync(deliveryId, ct).ConfigureAwait(false))
-        {
-            logger.LogInformation("Skipped duplicate webhook delivery {DeliveryId}", deliveryId);
-            return Results.Ok();
-        }
-
         var job = new ReviewJob(
             DeliveryId: deliveryId,
             InstallationId: payload.Installation.Id,
@@ -103,7 +101,12 @@ public static class WebhookEndpoint
             HeadSha: payload.PullRequest.Head.Sha,
             Reason: payload.Action);
 
-        await queue.EnqueueAsync(job, ct);
+        if (!await queue.TryEnqueueAsync(job, ct).ConfigureAwait(false))
+        {
+            logger.LogInformation("Skipped duplicate or coalesced webhook delivery {DeliveryId}", deliveryId);
+            return Results.Ok();
+        }
+
         logger.LogInformation(
             "Accepted webhook delivery {DeliveryId} for {Owner}/{Repo}#{PrNumber} because of {Reason}",
             job.DeliveryId,
@@ -120,7 +123,6 @@ public static class WebhookEndpoint
         string deliveryId,
         WebhookOptions options,
         IReviewJobQueue queue,
-        IDeliveryStore deliveryStore,
         ILogger<WebhookEndpointMarker> logger,
         CancellationToken ct)
     {
@@ -155,12 +157,6 @@ public static class WebhookEndpoint
             return Results.NoContent();
         }
 
-        if (!await deliveryStore.TryRecordAsync(deliveryId, ct).ConfigureAwait(false))
-        {
-            logger.LogInformation("Skipped duplicate webhook delivery {DeliveryId}", deliveryId);
-            return Results.Ok();
-        }
-
         var job = new ReviewJob(
             DeliveryId: deliveryId,
             InstallationId: payload.Installation.Id,
@@ -170,7 +166,13 @@ public static class WebhookEndpoint
             HeadSha: null,
             Reason: "review_comment");
 
-        await queue.EnqueueAsync(job, ct);
+        if (!await queue.TryEnqueueAsync(job, ct).ConfigureAwait(false))
+        {
+            logger.LogInformation(
+                "Skipped duplicate, coalesced, or rate-limited webhook delivery {DeliveryId}", deliveryId);
+            return Results.Ok();
+        }
+
         logger.LogInformation(
             "Accepted webhook delivery {DeliveryId} for {Owner}/{Repo}#{PrNumber} because of review_comment",
             job.DeliveryId,
@@ -219,6 +221,28 @@ public static class WebhookEndpoint
         !string.IsNullOrWhiteSpace(botSlug) &&
         !string.IsNullOrWhiteSpace(payload.Comment.User.Login) &&
         string.Equals(payload.Comment.User.Login, botSlug, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsValidDeliveryId(string deliveryId)
+    {
+        if (deliveryId.Length is 0 or > MaxDeliveryIdLength)
+        {
+            return false;
+        }
+
+        // GitHub delivery IDs are GUID-style. This value is now the durable queue's
+        // primary key and part of a trace filename, so keep the accepted alphabet
+        // path-safe and bounded rather than trusting the header.
+        foreach (var character in deliveryId)
+        {
+            var isAsciiLetter = character is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
+            if (!isAsciiLetter && !char.IsAsciiDigit(character) && character != '-')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static bool HasRequiredFields(PullRequestEvent payload) =>
         payload.Installation.Id > 0 &&

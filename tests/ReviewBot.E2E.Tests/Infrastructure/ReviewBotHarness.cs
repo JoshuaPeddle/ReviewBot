@@ -43,11 +43,49 @@ public sealed class ReviewBotHarness : IAsyncLifetime
 
     public ValueTask InitializeAsync() => ValueTask.CompletedTask;
 
-    public Task ResetAsync()
+    public async Task ResetAsync()
     {
+        // The queue is durable now, so its duplicate suppression and coalescing outlive a
+        // single test. Wait for the previous job to reach a terminal state before clearing,
+        // or a still-running review races the next test's stubs.
+        await WaitForReviewJobsToSettleAsync();
+
+        await using (var db = await factory.Services
+                         .GetRequiredService<IDbContextFactory<ReviewBotDbContext>>()
+                         .CreateDbContextAsync())
+        {
+            await db.ReviewJobs.ExecuteDeleteAsync();
+        }
+
         GitHubMock.Reset();
         LlmMock.Reset();
-        return Task.CompletedTask;
+    }
+
+    private async Task WaitForReviewJobsToSettleAsync()
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(15);
+        while (true)
+        {
+            await using var db = await factory.Services
+                .GetRequiredService<IDbContextFactory<ReviewBotDbContext>>()
+                .CreateDbContextAsync();
+            var hasPendingJobs = await db.ReviewJobs
+                .AsNoTracking()
+                .AnyAsync(record =>
+                    record.Status != "completed" &&
+                    record.Status != "dead_letter");
+            if (!hasPendingJobs)
+            {
+                return;
+            }
+
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                throw new TimeoutException("Timed out waiting for the previous E2E review job to settle.");
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+        }
     }
 
     public ValueTask DisposeAsync()

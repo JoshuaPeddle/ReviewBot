@@ -17,22 +17,6 @@ namespace ReviewBot.Persistence.Migrations
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.8");
 
-            modelBuilder.Entity("ReviewBot.Persistence.Entities.DeliveryRecord", b =>
-                {
-                    b.Property<string>("DeliveryId")
-                        .HasMaxLength(64)
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset>("ProcessedAt")
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("DeliveryId");
-
-                    b.HasIndex("ProcessedAt");
-
-                    b.ToTable("Deliveries");
-                });
-
             modelBuilder.Entity("ReviewBot.Persistence.Entities.PrReviewStateRecord", b =>
                 {
                     b.Property<long>("InstallationId")
@@ -56,6 +40,81 @@ namespace ReviewBot.Persistence.Migrations
                     b.HasKey("InstallationId", "RepoFullName", "PullNumber");
 
                     b.ToTable("PrReviewStates");
+                });
+
+            modelBuilder.Entity("ReviewBot.Persistence.Entities.ReviewJobRecord", b =>
+                {
+                    b.Property<string>("DeliveryId")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTimeOffset>("AvailableAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("HeadSha")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("InstallationId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(4000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset?>("LeaseExpiresAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LeaseToken")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Owner")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("PrNumber")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Repo")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset?>("StartedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("TEXT");
+
+
+                    b.HasKey("DeliveryId");
+
+                    b.HasIndex("LeaseToken")
+                        .IsUnique();
+
+                    b.HasIndex("Status", "AvailableAt", "CreatedAt");
+
+                    b.HasIndex("InstallationId", "Owner", "Repo", "PrNumber", "HeadSha");
+
+                    b.ToTable("ReviewJobs");
                 });
 #pragma warning restore 612, 618
         }

@@ -29,6 +29,7 @@ namespace ReviewBot.Api.Workers;
 public sealed class ReviewWorker : BackgroundService
 {
     private const string SynchronizeReason = "synchronize";
+    private static readonly TimeSpan LeaseRenewalInterval = TimeSpan.FromMinutes(1);
 
     private readonly IReviewJobQueue queue;
     private readonly IInstallationTokenProvider tokenProvider;
@@ -125,6 +126,8 @@ public sealed class ReviewWorker : BackgroundService
     {
         // Yield so the dispatch loop continues dequeuing the next job before this one begins.
         await Task.Yield();
+        using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var leaseRenewal = RenewLeaseUntilCancelledAsync(job, jobCts);
         try
         {
             using var scope = logger.BeginScope(new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -139,12 +142,38 @@ public sealed class ReviewWorker : BackgroundService
             var metricStatus = "failure";
             try
             {
-                var status = await ProcessAsync(job, ct).ConfigureAwait(false);
-                metricStatus = status == JobProcessStatus.Skipped ? "skipped" : "success";
+                var status = await ProcessAsync(job, jobCts.Token).ConfigureAwait(false);
+                if (await queue.CompleteAsync(job, CancellationToken.None).ConfigureAwait(false))
+                {
+                    metricStatus = status == JobProcessStatus.Skipped ? "skipped" : "success";
+                }
+                else
+                {
+                    // Another worker owns the record now. Do not report this attempt as a
+                    // success: the current owner decides the durable outcome.
+                    logger.LogWarning(
+                        "Review delivery {DeliveryId} finished but no longer owns its durable queue lease",
+                        job.DeliveryId);
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                return;
+                // Shutdown says nothing about whether this review can succeed. Give the job
+                // back without charging an attempt, so ordinary restarts cannot dead-letter
+                // a healthy review.
+                metricStatus = "interrupted";
+                await ReleaseForRetryAsync(job).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (jobCts.IsCancellationRequested)
+            {
+                await FailAsync(job, "Review stopped because this worker lost its job lease.")
+                    .ConfigureAwait(false);
+            }
+            catch (ReviewJobLeaseLostException)
+            {
+                jobCts.Cancel();
+                await FailAsync(job, "Review stopped because this worker lost its job lease.")
+                    .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -155,15 +184,123 @@ public sealed class ReviewWorker : BackgroundService
                     job.Owner,
                     job.Repo,
                     job.PrNumber);
+                await FailAsync(job, ex.ToString()).ConfigureAwait(false);
             }
 
             metrics.RecordJobProcessed(metricStatus);
         }
         finally
         {
+            jobCts.Cancel();
+            try
+            {
+                await leaseRenewal.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (jobCts.IsCancellationRequested)
+            {
+                // Expected once the job finishes or the host stops.
+            }
+
             semaphore.Release();
         }
     }
+
+    /// <summary>
+    /// Holds the durable lease for as long as this worker is still working on the job.
+    /// </summary>
+    /// <remarks>
+    /// Renewal is what distinguishes a slow review from a dead worker. Losing the lease
+    /// means another worker has taken the job over, so this one stops immediately rather
+    /// than racing it to post a review.
+    /// </remarks>
+    private async Task RenewLeaseUntilCancelledAsync(ReviewJob job, CancellationTokenSource jobCts)
+    {
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(LeaseRenewalInterval, clock, jobCts.Token).ConfigureAwait(false);
+                try
+                {
+                    if (await queue.RenewLeaseAsync(job, jobCts.Token).ConfigureAwait(false))
+                    {
+                        continue;
+                    }
+
+                    logger.LogError(
+                        "Stopping review delivery {DeliveryId} because its durable queue lease was lost",
+                        job.DeliveryId);
+                    await jobCts.CancelAsync().ConfigureAwait(false);
+                    return;
+                }
+                catch (OperationCanceledException) when (jobCts.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    // The lease has ample margin over this renewal cadence, so a transient
+                    // database error is not proof of loss. Only a definitive false is.
+                    logger.LogWarning(ex, "Could not renew review lease for {DeliveryId}; will retry", job.DeliveryId);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (jobCts.IsCancellationRequested)
+        {
+            // Expected when processing finishes.
+        }
+    }
+
+    /// <summary>
+    /// Confirms this worker still owns the job immediately before an externally visible,
+    /// non-atomic action. A resumed process can otherwise race its own successor.
+    /// </summary>
+    private async Task EnsureLeaseOwnershipAsync(ReviewJob job, CancellationToken ct)
+    {
+        if (await queue.RenewLeaseAsync(job, ct).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        logger.LogError(
+            "Stopping review delivery {DeliveryId} before an external mutation because its lease was lost",
+            job.DeliveryId);
+        throw new ReviewJobLeaseLostException(job.DeliveryId);
+    }
+
+    private async Task ReleaseForRetryAsync(ReviewJob job)
+    {
+        try
+        {
+            await queue.ReleaseAsync(job, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Leave it running; lease recovery reclaims it once the lease expires.
+            logger.LogWarning(ex, "Could not release review delivery {DeliveryId}", job.DeliveryId);
+        }
+    }
+
+    private async Task FailAsync(ReviewJob job, string error)
+    {
+        try
+        {
+            var disposition = await queue.FailAsync(job, error, CancellationToken.None).ConfigureAwait(false);
+            if (disposition == ReviewJobFailureDisposition.LeaseLost)
+            {
+                logger.LogWarning(
+                    "Review delivery {DeliveryId} no longer owns its lease; leaving the outcome to the current owner",
+                    job.DeliveryId);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Could not persist failure for review delivery {DeliveryId}", job.DeliveryId);
+        }
+    }
+
+    private sealed class ReviewJobLeaseLostException(string deliveryId)
+        : Exception($"The durable lease for review delivery {deliveryId} was lost.");
 
     private async Task<JobProcessStatus> ProcessAsync(ReviewJob job, CancellationToken ct)
     {

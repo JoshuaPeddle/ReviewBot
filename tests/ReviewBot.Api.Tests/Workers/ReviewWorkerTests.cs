@@ -1,3 +1,5 @@
+using System.Threading.Channels;
+using System.Runtime.CompilerServices;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using DiagActivity = System.Diagnostics.Activity;
@@ -69,7 +71,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -115,7 +117,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -162,7 +164,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -210,7 +212,7 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs(Task.CompletedTask);
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await traceWritten.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -249,7 +251,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -290,7 +292,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -331,7 +333,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -356,7 +358,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await configFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
@@ -388,7 +390,7 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs(metadata.Task);
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await configFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
         metadata.SetException(new InvalidOperationException("metadata failed"));
@@ -412,7 +414,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(reason: "synchronize"), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(reason: "synchronize"), CancellationToken.None);
 
         await configFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
@@ -455,7 +457,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
     }
@@ -499,7 +501,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await fileContentFetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -528,7 +530,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await groundingStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var logEntry = await logger.ErrorLogged.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -575,7 +577,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -618,7 +620,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -657,7 +659,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -707,7 +709,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -776,7 +778,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -845,7 +847,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -900,7 +902,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -968,7 +970,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -1047,7 +1049,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -1109,7 +1111,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -1178,7 +1180,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -1236,7 +1238,7 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs(_ => { posted.SetResult(); return Task.CompletedTask; });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         chunkIndexes.Should().HaveCountGreaterThan(1, "the diff exceeded the headroom fraction");
@@ -1311,7 +1313,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -1348,7 +1350,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -1454,7 +1456,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         var request = await capturedRequest.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -1548,7 +1550,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         await fixture.RepoIndex.Received(1).IndexChangesAsync(
@@ -1613,7 +1615,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         await fixture.RepoIndex.Received(1).IndexAsync(
@@ -1651,7 +1653,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -1686,7 +1688,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -1719,7 +1721,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -1748,7 +1750,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -1784,8 +1786,8 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob("delivery-1"), CancellationToken.None);
-        await fixture.Queue.EnqueueAsync(CreateJob("delivery-2"), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob("delivery-1"), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob("delivery-2"), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -1830,7 +1832,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         // Give the metric recording (which happens after PostAsync returns) a moment to land
@@ -1872,7 +1874,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await configFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
@@ -1925,8 +1927,8 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob("delivery-fail"), CancellationToken.None);
-        await fixture.Queue.EnqueueAsync(CreateJob("delivery-ok"), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob("delivery-fail"), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob("delivery-ok"), CancellationToken.None);
         await secondJobPosted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
@@ -1981,7 +1983,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
@@ -2033,7 +2035,7 @@ public class ReviewWorkerTests
         await fixture.StartAsync();
         for (var i = 0; i < concurrency; i++)
         {
-            await fixture.Queue.EnqueueAsync(CreateJob($"delivery-{i}"), CancellationToken.None);
+            await fixture.Queue.TryEnqueueAsync(CreateJob($"delivery-{i}"), CancellationToken.None);
         }
 
         await allPosted.Task.WaitAsync(TimeSpan.FromSeconds(10));
@@ -2068,7 +2070,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         capturedGroundingRequest.Should().NotBeNull();
@@ -2109,7 +2111,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         capturedRequest!.Grounding.Should().BeSameAs(expectedGrounding);
@@ -2131,7 +2133,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await filesFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
@@ -2160,7 +2162,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await filesFetched.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
@@ -2204,7 +2206,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2246,7 +2248,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2282,7 +2284,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2360,7 +2362,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2431,7 +2433,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2479,7 +2481,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2522,7 +2524,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2591,7 +2593,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
     }
@@ -2676,7 +2678,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await initialCritiqueStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -2711,7 +2713,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2748,7 +2750,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2785,7 +2787,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2853,7 +2855,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(100));
@@ -2910,7 +2912,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2942,7 +2944,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -2972,7 +2974,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         await fixture.ReviewPoster.ReceivedWithAnyArgs(1)
@@ -2999,7 +3001,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
@@ -3043,7 +3045,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
@@ -3076,7 +3078,7 @@ public class ReviewWorkerTests
             .ReturnsForAnyArgs(ReviewConfig.Default);
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
 
         await compareReturned.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(50));
@@ -3114,7 +3116,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         await fixture.ReviewPoster.ReceivedWithAnyArgs(1)
@@ -3154,7 +3156,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         // Must use null allowlist (full file list) when compare is truncated
@@ -3197,7 +3199,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         capturedAllowlist.Should().BeEquivalentTo(new[] { "src/Deep/PageTwoFile.cs" });
@@ -3238,7 +3240,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         // Give trace write (which runs after post) time to execute
         await Task.Delay(TimeSpan.FromMilliseconds(100));
@@ -3303,7 +3305,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(100));
 
@@ -3357,7 +3359,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         // Before this change the comment would skip critique entirely (high-confidence,
@@ -3410,7 +3412,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(100));
 
@@ -3463,7 +3465,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(100));
 
@@ -3503,7 +3505,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(100));
 
@@ -3590,7 +3592,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(100));
 
@@ -3651,7 +3653,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(100));
 
@@ -3693,7 +3695,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Task.Delay(TimeSpan.FromMilliseconds(100));
 
@@ -3730,7 +3732,7 @@ public class ReviewWorkerTests
             });
 
         await fixture.StartAsync();
-        await fixture.Queue.EnqueueAsync(CreateJob(), CancellationToken.None);
+        await fixture.Queue.TryEnqueueAsync(CreateJob(), CancellationToken.None);
         await posted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await Task.Delay(TimeSpan.FromMilliseconds(100));
 
@@ -3879,7 +3881,7 @@ public class ReviewWorkerTests
             IEnumerable<IDiagnosticProvider>? diagnosticProviders = null)
         {
             DiagnosticProviders = diagnosticProviders?.ToArray() ?? [];
-            Queue = new ChannelReviewJobQueue();
+            Queue = new TestReviewJobQueue();
             TokenProvider = Substitute.For<IInstallationTokenProvider>();
             PullRequestFetcher = Substitute.For<IPullRequestFetcher>();
             RepoConfigFetcher = Substitute.For<IRepoConfigFetcher>();
@@ -3949,7 +3951,7 @@ public class ReviewWorkerTests
                 logger ?? NullLogger<ReviewWorker>.Instance);
         }
 
-        public ChannelReviewJobQueue Queue { get; }
+        public TestReviewJobQueue Queue { get; }
 
         public IInstallationTokenProvider TokenProvider { get; }
 
@@ -4034,4 +4036,46 @@ public class ReviewWorkerTests
             }
         }
     }
+
+    /// <summary>
+    /// In-memory stand-in for the durable queue. These tests exercise the worker's review
+    /// pipeline, not lease bookkeeping; EfCoreReviewJobQueueTests covers that against real
+    /// SQLite.
+    /// </summary>
+    private sealed class TestReviewJobQueue : IReviewJobQueue
+    {
+        private readonly Channel<ReviewJob> channel = Channel.CreateUnbounded<ReviewJob>(
+            new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+
+        public async ValueTask<bool> TryEnqueueAsync(ReviewJob job, CancellationToken ct)
+        {
+            await channel.Writer.WriteAsync(job, ct);
+            return true;
+        }
+
+        public async IAsyncEnumerable<ReviewJob> DequeueAllAsync(
+            [EnumeratorCancellation] CancellationToken ct)
+        {
+            await foreach (var job in channel.Reader.ReadAllAsync(ct))
+            {
+                yield return job;
+            }
+        }
+
+        public ValueTask<bool> CompleteAsync(ReviewJob job, CancellationToken ct) =>
+            ValueTask.FromResult(true);
+
+        public ValueTask<ReviewJobFailureDisposition> FailAsync(
+            ReviewJob job,
+            string error,
+            CancellationToken ct) =>
+            ValueTask.FromResult(ReviewJobFailureDisposition.DeadLettered);
+
+        public ValueTask<bool> ReleaseAsync(ReviewJob job, CancellationToken ct) =>
+            ValueTask.FromResult(true);
+
+        public ValueTask<bool> RenewLeaseAsync(ReviewJob job, CancellationToken ct) =>
+            ValueTask.FromResult(true);
+    }
 }
+
