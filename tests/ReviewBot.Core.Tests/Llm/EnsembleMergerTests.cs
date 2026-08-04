@@ -1,6 +1,7 @@
 using FluentAssertions;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Llm;
+using ReviewBot.Core.Prompting;
 
 namespace ReviewBot.Core.Tests.Llm;
 
@@ -229,5 +230,68 @@ public class EnsembleMergerTests
 
         merged.Result.TokenUsage!.PromptTokens.Should().Be(300);
         merged.Result.TokenUsage.CompletionTokens.Should().Be(120);
+    }
+}
+
+public class EnsembleReviewLlmTests
+{
+    private sealed class StubLlm(Func<int, ReviewResult> factory) : IReviewLlm
+    {
+        private int calls;
+
+        public int MaxConcurrentRequests => 4;
+
+        public Task<ReviewResult> ReviewAsync(ReviewRequest request, CancellationToken ct) =>
+            Task.FromResult(factory(Interlocked.Increment(ref calls) - 1));
+
+        public Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review") =>
+            Task.FromResult(string.Empty);
+    }
+
+    private static ReviewRequest Request() =>
+        new("title", "body", "base", "head", [], ReviewConfig.Default);
+
+    [Fact]
+    public async Task WhenEverySampleFailsTheCauseIsNamedRatherThanJustTheCount()
+    {
+        // "All 5 ensemble samples failed" with no reason is undiagnosable, and the reason
+        // (context overflow vs non-convergence vs transport) is what determines the fix.
+        var llm = new StubLlm(_ => throw new InvalidOperationException("model did not converge"));
+        var ensemble = new EnsembleReviewLlm(llm, samples: 3, minAgreement: 2);
+
+        var act = async () => await ensemble.ReviewAsync(Request(), CancellationToken.None);
+
+        var thrown = await act.Should().ThrowAsync<InvalidOperationException>();
+        thrown.Which.Message.Should().Contain("model did not converge");
+        thrown.Which.InnerException.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task ASingleFailedSampleDoesNotFailTheReview()
+    {
+        var llm = new StubLlm(index => index == 0
+            ? throw new InvalidOperationException("transient")
+            : new ReviewResult("ok", [new InlineComment("a.cs", 10, "RIGHT", "finding", Severity.Warning)]));
+        var ensemble = new EnsembleReviewLlm(llm, samples: 3, minAgreement: 2);
+
+        var result = await ensemble.ReviewAsync(Request(), CancellationToken.None);
+
+        result.Comments.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task TheMergedResultCarriesTheAgreementTallyForTheTrace()
+    {
+        var llm = new StubLlm(index => new ReviewResult(
+            "ok",
+            index < 2
+                ? [new InlineComment("a.cs", 10, "RIGHT", "agreed", Severity.Warning)]
+                : [new InlineComment("z.cs", 99, "RIGHT", "lone", Severity.Warning)]));
+        var ensemble = new EnsembleReviewLlm(llm, samples: 3, minAgreement: 2);
+
+        var result = await ensemble.ReviewAsync(Request(), CancellationToken.None);
+
+        result.RawLlmResponse.Should().NotBeNullOrEmpty();
+        result.RawLlmResponse.Should().Contain("below_threshold").And.Contain("z.cs");
     }
 }

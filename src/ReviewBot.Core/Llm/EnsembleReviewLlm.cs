@@ -60,6 +60,7 @@ public sealed class EnsembleReviewLlm : IReviewLlm
         }
 
         var results = new ReviewResult?[Samples];
+        var failures = new Exception?[Samples];
         var parallelism = Math.Max(1, Math.Min(Samples, inner.MaxConcurrentRequests));
 
         await Parallel.ForAsync(
@@ -74,7 +75,11 @@ public sealed class EnsembleReviewLlm : IReviewLlm
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
+                    // Kept rather than discarded: when every sample fails, "all 5 samples
+                    // failed" without a cause is undiagnosable, and the reason (context
+                    // overflow, non-convergence, transport) determines the fix.
                     results[index] = null;
+                    failures[index] = ex;
                 }
             })
             .ConfigureAwait(false);
@@ -83,9 +88,17 @@ public sealed class EnsembleReviewLlm : IReviewLlm
         if (succeeded.Length == 0)
         {
             // Every sample failed: surface that as an error rather than an empty review, which
-            // would score as "the model found nothing".
+            // would score as "the model found nothing". The distinct causes are named, and the
+            // first is chained, so the log says *why* rather than just how many.
+            var observed = failures.OfType<Exception>().ToArray();
+            var distinct = observed
+                .Select(failure => failure.GetBaseException().Message)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
             throw new InvalidOperationException(
-                $"All {Samples} ensemble samples failed for the review request.");
+                $"All {Samples} ensemble samples failed for the review request. " +
+                $"Distinct cause(s): {string.Join(" | ", distinct)}",
+                observed.FirstOrDefault());
         }
 
         // Agreement is relative to the samples that came back. Holding the threshold against
