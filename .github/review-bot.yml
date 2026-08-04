@@ -48,6 +48,25 @@ review:
   # Default: 0.80
   chunk_headroom: 0.80
 
+  # Self-consistency: review the same diff several times and keep only the findings that
+  # enough samples independently report. Costs samples× the tokens of a single review,
+  # which is affordable on self-hosted inference and is much of the reason to run your own.
+  #
+  # Measured on the 27-fixture eval corpus (3 runs, paired against the 15 individual
+  # samples from those runs): 5 samples at min_agreement 3 gives P 0.984 / R 0.955 / F1
+  # 0.969, against 0.899 / 0.879 / 0.887 for a single sample. It gains on both axes rather
+  # than trading one for the other — extra draws find bugs one draw misses, while
+  # hallucinations fail to reproduce and are filtered out.
+  #
+  # It also makes reviews survive a generation that does not converge. A reasoning model
+  # occasionally burns its whole output allowance emitting nothing; with one sample that
+  # fails the entire review, which is what happened to PR #63 before this was enabled.
+  # A failed sample is dropped and the rest still merge.
+  # Default: samples 1 (disabled)
+  ensemble:
+    samples: 5
+    min_agreement: 3
+
   # Minimum confidence level for inline comments to be posted. Comments below this
   # threshold are silently dropped before posting. "low" posts everything; "high" posts
   # only comments the model is certain about.
