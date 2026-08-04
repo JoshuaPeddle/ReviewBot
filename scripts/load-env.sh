@@ -8,17 +8,22 @@
 # nobody notices. Sourcing has to happen before the values are read (the file is where they
 # come from), so the fix is to re-apply the caller's overrides afterwards.
 #
-# Only the handful of knobs a caller legitimately aims at are overridable. Secrets are
-# deliberately excluded: a stale exported token silently masking a rotated one in the file is
-# the same class of bug pointing the other way.
+# Every REVIEWBOT* variable already set in the environment is preserved, not a fixed list.
+# The first version of this allowlisted three names on the theory that secrets should stay
+# file-only, and that immediately caused the bug it was written to prevent: pointing a test
+# instance at a different LLM endpoint with REVIEWBOT__OpenAi__BaseUrl was silently ignored,
+# so three review runs went to a decommissioned endpoint and 404'd while the log insisted the
+# override had been applied. An override that is quietly dropped is worse than one that
+# shadows a rotated secret, because nothing tells you it happened.
 
 reviewbot_load_env() {
-  local overridable=(REVIEWBOT_LOCAL_URL REVIEWBOT_OWNER REVIEWBOT_REPO)
   local name saved=()
 
-  for name in "${overridable[@]}"; do
-    saved+=("$name=${!name-}")
-  done
+  # Snapshot every REVIEWBOT* variable the caller set. Restricting to that prefix keeps the
+  # restore away from PATH and friends, which the env file has no business setting anyway.
+  while IFS= read -r name; do
+    [[ -n "$name" ]] && saved+=("$name=${!name-}")
+  done < <(compgen -v | grep '^REVIEWBOT' || true)
 
   if [[ ! -f .env.local ]]; then
     echo "missing .env.local (see scripts/reviewbot-serve.sh header)" >&2
