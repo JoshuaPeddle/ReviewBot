@@ -112,7 +112,7 @@ public static class EvalCli
             }
 
             var fixtureKey = Path.GetFileName(sampleFile)[..^".samples.json".Length];
-            var merged = EnsembleMerger.Merge(samples, minAgreement, lineWindow);
+            var merged = EnsembleMerger.Merge(samples, minAgreement, lineWindow).Result;
             await File.WriteAllTextAsync(
                 Path.Combine(outDir, $"{fixtureKey}.json"),
                 JsonSerializer.Serialize(merged, JsonOptions))

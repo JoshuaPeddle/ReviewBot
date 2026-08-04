@@ -28,7 +28,7 @@ public class EnsembleMergerTests
             ],
             minAgreement: 2);
 
-        merged.Comments.Should().ContainSingle().Which.Line.Should().Be(10);
+        merged.Result.Comments.Should().ContainSingle().Which.Line.Should().Be(10);
     }
 
     [Fact]
@@ -42,7 +42,7 @@ public class EnsembleMergerTests
             ],
             minAgreement: 2);
 
-        merged.Comments.Should().BeEmpty();
+        merged.Result.Comments.Should().BeEmpty();
     }
 
     [Fact]
@@ -56,7 +56,7 @@ public class EnsembleMergerTests
             ],
             minAgreement: 1);
 
-        merged.Comments.Should().HaveCount(3);
+        merged.Result.Comments.Should().HaveCount(3);
     }
 
     [Fact]
@@ -72,7 +72,7 @@ public class EnsembleMergerTests
             minAgreement: 2,
             lineWindow: 3);
 
-        merged.Comments.Should().ContainSingle();
+        merged.Result.Comments.Should().ContainSingle();
     }
 
     [Fact]
@@ -86,7 +86,7 @@ public class EnsembleMergerTests
             minAgreement: 1,
             lineWindow: 3);
 
-        merged.Comments.Should().HaveCount(2);
+        merged.Result.Comments.Should().HaveCount(2);
     }
 
     [Fact]
@@ -101,7 +101,7 @@ public class EnsembleMergerTests
             ],
             minAgreement: 2);
 
-        merged.Comments.Should().BeEmpty();
+        merged.Result.Comments.Should().BeEmpty();
     }
 
     [Fact]
@@ -114,7 +114,7 @@ public class EnsembleMergerTests
             ],
             minAgreement: 1);
 
-        merged.Comments.Should().HaveCount(2);
+        merged.Result.Comments.Should().HaveCount(2);
     }
 
     [Fact]
@@ -125,7 +125,7 @@ public class EnsembleMergerTests
 
         var merged = EnsembleMerger.Merge([Sample(left), Sample(right)], minAgreement: 1);
 
-        merged.Comments.Should().HaveCount(2);
+        merged.Result.Comments.Should().HaveCount(2);
     }
 
     [Fact]
@@ -138,7 +138,7 @@ public class EnsembleMergerTests
             ],
             minAgreement: 2);
 
-        var comment = merged.Comments.Should().ContainSingle().Subject;
+        var comment = merged.Result.Comments.Should().ContainSingle().Subject;
         comment.Severity.Should().Be(Severity.Error);
         comment.Body.Should().Be("real bug");
     }
@@ -155,7 +155,59 @@ public class EnsembleMergerTests
             ],
             minAgreement: 99);
 
-        merged.Comments.Should().ContainSingle();
+        merged.Result.Comments.Should().ContainSingle();
+    }
+
+    [Fact]
+    public void SubThresholdFindingsAreReportedRatherThanSilentlyDiscarded()
+    {
+        // Without this the trace cannot distinguish "the model found nothing" from "consensus
+        // rejected everything" — both show zero candidates and zero drops. Dogfooding PR #63
+        // produced exactly that: 45k completion tokens spent, an empty trace.
+        var merged = EnsembleMerger.Merge(
+            [
+                Sample(Comment("a.cs", 10, body: "rejected")),
+                Sample(Comment("a.cs", 10, body: "rejected")),
+                Sample(Comment("b.cs", 50, body: "kept")),
+                Sample(Comment("b.cs", 50, body: "kept")),
+                Sample(Comment("b.cs", 50, body: "kept"))
+            ],
+            minAgreement: 3);
+
+        merged.Result.Comments.Should().ContainSingle().Which.Path.Should().Be("b.cs");
+
+        var rejection = merged.BelowThreshold.Should().ContainSingle().Subject;
+        rejection.Comment.Path.Should().Be("a.cs");
+        rejection.Support.Should().Be(2);
+        rejection.Required.Should().Be(3);
+    }
+
+    [Fact]
+    public void NothingIsReportedBelowThresholdWhenEverySampleAgrees()
+    {
+        var merged = EnsembleMerger.Merge(
+            [Sample(Comment("a.cs", 10)), Sample(Comment("a.cs", 10))],
+            minAgreement: 2);
+
+        merged.BelowThreshold.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void RejectionsAreOrderedBySupportSoTheNearMissesReadFirst()
+    {
+        var merged = EnsembleMerger.Merge(
+            [
+                Sample(Comment("a.cs", 10), Comment("b.cs", 50)),
+                Sample(Comment("b.cs", 50)),
+                Sample(Comment("c.cs", 90)),
+                Sample(),
+                Sample()
+            ],
+            minAgreement: 4);
+
+        merged.BelowThreshold.Select(rejection => rejection.Comment.Path)
+            .Should().Equal("b.cs", "a.cs", "c.cs");
+        merged.BelowThreshold[0].Support.Should().Be(2);
     }
 
     [Fact]
@@ -163,8 +215,8 @@ public class EnsembleMergerTests
     {
         var merged = EnsembleMerger.Merge([], minAgreement: 1);
 
-        merged.Comments.Should().BeEmpty();
-        merged.Summary.Should().BeEmpty();
+        merged.Result.Comments.Should().BeEmpty();
+        merged.Result.Summary.Should().BeEmpty();
     }
 
     [Fact]
@@ -175,7 +227,7 @@ public class EnsembleMergerTests
 
         var merged = EnsembleMerger.Merge([first, second], minAgreement: 1);
 
-        merged.TokenUsage!.PromptTokens.Should().Be(300);
-        merged.TokenUsage.CompletionTokens.Should().Be(120);
+        merged.Result.TokenUsage!.PromptTokens.Should().Be(300);
+        merged.Result.TokenUsage.CompletionTokens.Should().Be(120);
     }
 }

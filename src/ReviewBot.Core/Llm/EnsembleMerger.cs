@@ -25,7 +25,23 @@ public static class EnsembleMerger
     /// <summary>How far apart two comments can sit and still be treated as the same finding.</summary>
     public const int DefaultLineWindow = 3;
 
-    public static ReviewResult Merge(
+    /// <summary>
+    /// A finding that was reported but by too few samples to survive.
+    /// </summary>
+    /// <remarks>
+    /// These are reported rather than silently dropped because the per-review trace is the
+    /// instrument used to judge the bot, and a merge that filters findings before they ever
+    /// become candidates makes "the model found nothing" and "consensus rejected everything"
+    /// indistinguishable in that trace. Dogfooding PR #63 hit exactly that: a review that
+    /// spent 45k completion tokens recorded zero candidates and zero drops.
+    /// </remarks>
+    public sealed record EnsembleRejection(InlineComment Comment, int Support, int Required);
+
+    public sealed record EnsembleMergeResult(
+        ReviewResult Result,
+        IReadOnlyList<EnsembleRejection> BelowThreshold);
+
+    public static EnsembleMergeResult Merge(
         IReadOnlyList<ReviewResult> samples,
         int minAgreement,
         int lineWindow = DefaultLineWindow)
@@ -35,7 +51,7 @@ public static class EnsembleMerger
 
         if (samples.Count == 0)
         {
-            return new ReviewResult(string.Empty, []);
+            return new EnsembleMergeResult(new ReviewResult(string.Empty, []), []);
         }
 
         // A threshold above the sample count would silently drop everything, which reads as a
@@ -49,6 +65,14 @@ public static class EnsembleMerger
             .OrderBy(comment => comment.Path, StringComparer.Ordinal)
             .ThenBy(comment => comment.Line)
             .ThenBy(comment => comment.Side, StringComparer.Ordinal)
+            .ToArray();
+        var belowThreshold = clusters
+            .Where(cluster => cluster.SampleIndices.Count < required)
+            .Select(cluster => new EnsembleRejection(
+                cluster.Representative(), cluster.SampleIndices.Count, required))
+            .OrderByDescending(rejection => rejection.Support)
+            .ThenBy(rejection => rejection.Comment.Path, StringComparer.Ordinal)
+            .ThenBy(rejection => rejection.Comment.Line)
             .ToArray();
 
         var contextRequests = samples
@@ -68,7 +92,9 @@ public static class EnsembleMerger
             .Select(sample => sample.Summary)
             .FirstOrDefault(text => !string.IsNullOrWhiteSpace(text)) ?? string.Empty;
 
-        return new ReviewResult(summary, comments, contextRequests) { TokenUsage = tokenUsage };
+        return new EnsembleMergeResult(
+            new ReviewResult(summary, comments, contextRequests) { TokenUsage = tokenUsage },
+            belowThreshold);
     }
 
     private static List<Cluster> BuildClusters(IReadOnlyList<ReviewResult> samples, int lineWindow)

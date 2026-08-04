@@ -277,7 +277,7 @@ public sealed class LiveEvalRunner
         return EnsembleMerger.Merge(
             succeeded,
             Math.Min(options.EnsembleMinAgreement, succeeded.Length),
-            options.EnsembleLineWindow);
+            options.EnsembleLineWindow).Result;
     }
 
     // TextWriter is not thread-safe, so progress lines from concurrent fixtures are

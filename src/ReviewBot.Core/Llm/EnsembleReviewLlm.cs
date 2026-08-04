@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using ReviewBot.Core.Domain;
 using ReviewBot.Core.Prompting;
 
@@ -15,6 +17,11 @@ namespace ReviewBot.Core.Llm;
 /// </remarks>
 public sealed class EnsembleReviewLlm : IReviewLlm
 {
+    private static readonly JsonSerializerOptions DiagnosticJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() }
+    };
+
     private readonly IReviewLlm inner;
 
     public EnsembleReviewLlm(IReviewLlm inner, int samples, int minAgreement, int lineWindow = EnsembleMerger.DefaultLineWindow)
@@ -84,7 +91,52 @@ public sealed class EnsembleReviewLlm : IReviewLlm
         // Agreement is relative to the samples that came back. Holding the threshold against
         // the requested k would make a dropped sample silently raise the bar.
         var required = Math.Min(MinAgreement, succeeded.Length);
-        return EnsembleMerger.Merge(succeeded, required, LineWindow);
+        var merged = EnsembleMerger.Merge(succeeded, required, LineWindow);
+
+        // The merged result is synthetic — it has no single raw response of its own — so
+        // without this the trace records an empty raw_llm_response and zero dropped comments
+        // for a review that may have spent tens of thousands of completion tokens and
+        // rejected findings on consensus. The trace is how the bot is judged, so the
+        // agreement tally and the per-sample responses have to reach it.
+        return merged.Result with
+        {
+            RawLlmResponse = BuildDiagnostic(succeeded, merged, results.Length, required)
+        };
+    }
+
+    private string BuildDiagnostic(
+        IReadOnlyList<ReviewResult> succeeded,
+        EnsembleMerger.EnsembleMergeResult merged,
+        int requested,
+        int required)
+    {
+        var diagnostic = new
+        {
+            ensemble = new
+            {
+                samples_requested = requested,
+                samples_succeeded = succeeded.Count,
+                min_agreement = MinAgreement,
+                min_agreement_applied = required,
+                line_window = LineWindow
+            },
+            kept = merged.Result.Comments
+                .Select(comment => new { comment.Path, comment.Line, comment.Severity })
+                .ToArray(),
+            below_threshold = merged.BelowThreshold
+                .Select(rejection => new
+                {
+                    rejection.Comment.Path,
+                    rejection.Comment.Line,
+                    rejection.Support,
+                    rejection.Required,
+                    rejection.Comment.Body
+                })
+                .ToArray(),
+            sample_raw_responses = succeeded.Select(sample => sample.RawLlmResponse).ToArray()
+        };
+
+        return JsonSerializer.Serialize(diagnostic, DiagnosticJsonOptions);
     }
 
     public Task<string> CompleteRawAsync(PromptPayload prompt, CancellationToken ct, string phase = "review") =>
