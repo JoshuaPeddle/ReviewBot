@@ -75,7 +75,9 @@ public sealed class EvalFixtureLoader
             RequiredString(file.Name, path, "name"),
             RequiredString(file.Category, path, "category"),
             RequiredString(file.Difficulty, path, "difficulty"),
-            RequiredString(file.Description, path, "description"));
+            RequiredString(file.Description, path, "description"),
+            OptionalString(file.PrTitle),
+            OptionalString(file.PrBody));
     }
 
     private static ExpectedFindings ConvertExpected(ExpectedFindingsFile? file, string path)
@@ -219,6 +221,9 @@ public sealed class EvalFixtureLoader
         };
     }
 
+    private static string? OptionalString(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
     private static string RequiredString(string? value, string path, string field)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -238,6 +243,10 @@ public sealed class EvalFixtureLoader
         public string? Difficulty { get; set; }
 
         public string? Description { get; set; }
+
+        public string? PrTitle { get; set; }
+
+        public string? PrBody { get; set; }
     }
 
     private sealed class ExpectedFindingsFile

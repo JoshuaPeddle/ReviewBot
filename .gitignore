@@ -21,6 +21,9 @@ riderModule.iml
 # These are local-state directories, not source code.
 src/ReviewBot.Api/cache/
 src/ReviewBot.Api/traces/
+# The trace writer resolves its directory relative to the working directory, so running the
+# host or the worker eval from the repo root drops traces here instead.
+/traces/
 src/ReviewBot.Api/reviewbot.db
 src/ReviewBot.Api/reviewbot-dev.db
 
