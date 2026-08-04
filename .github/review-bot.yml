@@ -45,16 +45,8 @@ review:
   max_chunks: 10
 
   # Fraction of the remaining prompt budget available to each chunk.
-  #
-  # Lowered from the 0.80 default. With a 128K context window a large PR fits in a single
-  # chunk, and a single chunk is exactly what this model fails to reason about: reviewing
-  # PR #63 it consumed its entire output allowance emitting nothing, on all 5 ensemble
-  # samples. Non-convergence is a function of how much one request has to hold at once, not
-  # of the output cap, so the fix is smaller chunks rather than a bigger allowance. Chunk
-  # failures are tolerated individually, so splitting also means one bad chunk costs its
-  # own findings instead of the whole review.
   # Default: 0.80
-  chunk_headroom: 0.35
+  chunk_headroom: 0.80
 
   # Self-consistency: review the same diff several times and keep only the findings that
   # enough samples independently report. Costs samples× the tokens of a single review,

@@ -99,7 +99,7 @@ public sealed class LiveEvalRunner
         // Results are collected by index and assembled in fixture order afterwards, so the
         // manifest and the score are identical whatever order the requests finish in.
         var completed = new (LiveEvalFixtureResult Result, LiveEvalFixtureManifest Manifest)[prepared.Length];
-        var outputLock = new SemaphoreSlim(1, 1);
+        using var outputLock = new SemaphoreSlim(1, 1);
 
         await Parallel.ForAsync(
             0,
@@ -246,10 +246,17 @@ public sealed class LiveEvalRunner
         CancellationToken ct)
     {
         var samples = new ReviewResult?[options.EnsembleSamples];
+        var failures = new Exception?[options.EnsembleSamples];
         await Parallel.ForAsync(
             0,
             options.EnsembleSamples,
-            new ParallelOptions { MaxDegreeOfParallelism = options.EnsembleSamples, CancellationToken = ct },
+            new ParallelOptions
+            {
+                // Fixtures already run concurrently, so sampling k times per fixture multiplies
+                // load; honouring the provider's own limit keeps that product bounded.
+                MaxDegreeOfParallelism = Math.Max(1, Math.Min(options.EnsembleSamples, llm.MaxConcurrentRequests)),
+                CancellationToken = ct
+            },
             async (index, loopCt) =>
             {
                 try
@@ -259,6 +266,7 @@ public sealed class LiveEvalRunner
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     samples[index] = null;
+                    failures[index] = ex;
                 }
             })
             .ConfigureAwait(false);
@@ -266,8 +274,17 @@ public sealed class LiveEvalRunner
         var succeeded = samples.OfType<ReviewResult>().ToArray();
         if (succeeded.Length == 0)
         {
+            // Same reasoning as EnsembleReviewLlm: a bare count is undiagnosable, and the cause
+            // is what tells you whether to shrink the request or fix the endpoint.
+            var observed = failures.OfType<Exception>().ToArray();
+            var distinct = observed
+                .Select(failure => failure.GetBaseException().Message)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
             throw new InvalidOperationException(
-                $"All {options.EnsembleSamples} ensemble samples failed for {fixtureKey}.");
+                $"All {options.EnsembleSamples} ensemble samples failed for {fixtureKey}. " +
+                $"Distinct cause(s): {string.Join(" | ", distinct)}",
+                observed.FirstOrDefault());
         }
 
         var samplesPath = Path.Combine(options.ResultsDirectory, $"{fixtureKey}.samples.json");

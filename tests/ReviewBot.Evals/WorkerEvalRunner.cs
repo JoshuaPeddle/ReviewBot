@@ -109,7 +109,7 @@ public sealed class WorkerEvalRunner
             .ConfigureAwait(false);
 
         var completed = new (LiveEvalFixtureResult Result, LiveEvalFixtureManifest Manifest)[fixtures.Length];
-        var outputLock = new SemaphoreSlim(1, 1);
+        using var outputLock = new SemaphoreSlim(1, 1);
 
         await Parallel.ForAsync(
             0,
