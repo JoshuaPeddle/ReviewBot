@@ -58,14 +58,16 @@ review:
   # than trading one for the other — extra draws find bugs one draw misses, while
   # hallucinations fail to reproduce and are filtered out.
   #
-  # It also makes reviews survive a generation that does not converge. A reasoning model
-  # occasionally burns its whole output allowance emitting nothing; with one sample that
-  # fails the entire review, which is what happened to PR #63 before this was enabled.
-  # A failed sample is dropped and the rest still merge.
+  # LEFT DISABLED FOR THIS REPOSITORY. Dogfooding PR #63 found that reviews of this repo
+  # fail to converge at a high rate: one review had 4 of 5 samples burn their entire output
+  # allowance emitting nothing, leaving agreement degraded to 1 — 5× the token cost for a
+  # review carrying none of the consensus filtering the numbers above describe. Enable it
+  # once the non-convergence is fixed; the trace records `degraded` and `failure_causes`,
+  # so the sample success rate is the thing to check first.
   # Default: samples 1 (disabled)
-  ensemble:
-    samples: 5
-    min_agreement: 3
+  # ensemble:
+  #   samples: 5
+  #   min_agreement: 3
 
   # Minimum confidence level for inline comments to be posted. Comments below this
   # threshold are silently dropped before posting. "low" posts everything; "high" posts
