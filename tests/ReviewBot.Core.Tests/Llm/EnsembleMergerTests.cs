@@ -309,6 +309,37 @@ public class EnsembleReviewLlmTests
         result.Comments.Should().ContainSingle();
     }
 
+
+    [Fact]
+    public async Task APartiallyFailedEnsembleRecordsThatItDegradedAndWhy()
+    {
+        // A review built from 1 of 5 samples still posts, and reads exactly like a healthy
+        // consensus-filtered review unless the trace says otherwise. PR #63 hit precisely
+        // this: 5 requested, 1 succeeded, agreement silently degraded to 1.
+        var llm = new StubLlm(index => index == 0
+            ? new ReviewResult("ok", [new InlineComment("a.cs", 10, "RIGHT", "finding", Severity.Warning)])
+            : throw new InvalidOperationException("model consumed its entire output allowance"));
+        var ensemble = new EnsembleReviewLlm(llm, samples: 5, minAgreement: 3);
+
+        var result = await ensemble.ReviewAsync(Request(), CancellationToken.None);
+
+        result.RawLlmResponse.Should().Contain("\"degraded\":true");
+        result.RawLlmResponse.Should().Contain("\"consensus_possible\":false");
+        result.RawLlmResponse.Should().Contain("output allowance");
+    }
+
+    [Fact]
+    public async Task AHealthyEnsembleIsNotMarkedDegraded()
+    {
+        var llm = new StubLlm(_ => new ReviewResult(
+            "ok", [new InlineComment("a.cs", 10, "RIGHT", "finding", Severity.Warning)]));
+        var ensemble = new EnsembleReviewLlm(llm, samples: 3, minAgreement: 2);
+
+        var result = await ensemble.ReviewAsync(Request(), CancellationToken.None);
+
+        result.RawLlmResponse.Should().Contain("\"degraded\":false");
+    }
+
     [Fact]
     public async Task TheMergedResultCarriesTheAgreementTallyForTheTrace()
     {

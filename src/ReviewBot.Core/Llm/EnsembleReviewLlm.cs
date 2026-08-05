@@ -115,7 +115,7 @@ public sealed class EnsembleReviewLlm : IReviewLlm
         // agreement tally and the per-sample responses have to reach it.
         return merged.Result with
         {
-            RawLlmResponse = BuildDiagnostic(succeeded, merged, results.Length, required)
+            RawLlmResponse = BuildDiagnostic(succeeded, merged, results.Length, required, failures)
         };
     }
 
@@ -123,7 +123,8 @@ public sealed class EnsembleReviewLlm : IReviewLlm
         IReadOnlyList<ReviewResult> succeeded,
         EnsembleMerger.EnsembleMergeResult merged,
         int requested,
-        int required)
+        int required,
+        IReadOnlyList<Exception?> failures)
     {
         var diagnostic = new
         {
@@ -133,7 +134,20 @@ public sealed class EnsembleReviewLlm : IReviewLlm
                 samples_succeeded = succeeded.Count,
                 min_agreement = MinAgreement,
                 min_agreement_applied = required,
-                line_window = LineWindow
+                line_window = LineWindow,
+                // A partially-failed ensemble still returns a review, so without this a run
+                // where 4 of 5 samples died is indistinguishable from a healthy one — the
+                // review reads as consensus-filtered when it had no consensus to apply.
+                // Observed on PR #63: 5 requested, 1 succeeded, agreement degraded to 1.
+                degraded = succeeded.Count < requested,
+                consensus_possible = succeeded.Count >= 2,
+                failure_causes = failures
+                    .OfType<Exception>()
+                    .Select(failure => failure.GetBaseException().Message)
+                    .GroupBy(message => message, StringComparer.Ordinal)
+                    .Select(group => new { cause = group.Key, count = group.Count() })
+                    .OrderByDescending(entry => entry.count)
+                    .ToArray()
             },
             kept = merged.Result.Comments
                 .Select(comment => new { comment.Path, comment.Line, comment.Severity })
