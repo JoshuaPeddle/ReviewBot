@@ -1,0 +1,12 @@
+{
+ "summary": "The PR multiplies the discount rate by 100 before passing it to `ApplyDiscount`, but `ApplyDiscount` expects a decimal fraction (e.g., 0.1 for 10%), not a percentage. This multiplication causes the discount calculation to produce wildly incorrect results \u2014 typically negative totals \u2014 because `total - (total * 10)` instead of `total - (total * 0.1)`.",
+ "comments": [
+  {
+   "path": "src/Handlers/CheckoutHandler.cs",
+   "line": 14,
+   "severity": "Error",
+   "confidence": "High",
+   "body": "Multiplying `rate` by 100 breaks the discount calculation. `ApplyDiscount` computes `total - (total * rate)`, which expects `rate` as a decimal fraction (e.g., 0.1 for 10%). Passing `rate * 100` (e.g., 10) produces `total - (total * 10)`, yielding negative or nonsensical results. Remove the multiplication and pass `rate` directly as before."
+  }
+ ]
+}

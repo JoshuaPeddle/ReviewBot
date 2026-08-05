@@ -1,0 +1,13 @@
+diff --git a/src/Demo/Counter.cs b/src/Demo/Counter.cs
+index 3333333..4444444 100644
+--- a/src/Demo/Counter.cs
++++ b/src/Demo/Counter.cs
+@@ -4,7 +4,7 @@ public static class Counter
+ {
+     public static int Next(int current)
+     {
+-        var next = current + 1;
++        var next = current + 1
+         return next;
+     }
+ }

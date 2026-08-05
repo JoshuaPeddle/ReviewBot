@@ -1,0 +1,12 @@
+{
+ "summary": "The PR removes the semicolon from the variable declaration in `Counter.cs`, introducing a syntax error that will prevent the project from compiling.",
+ "comments": [
+  {
+   "path": "src/Demo/Counter.cs",
+   "line": 7,
+   "severity": "Error",
+   "confidence": "High",
+   "body": "The semicolon is missing at the end of the statement, which will cause a C# compilation error. Append a semicolon to resolve it."
+  }
+ ]
+}

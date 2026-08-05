@@ -1,0 +1,12 @@
+{
+ "summary": "The PR introduces a syntax error by removing the closing quote from a string literal, which will prevent the project from compiling.",
+ "comments": [
+  {
+   "path": "src/Demo/Greeter.cs",
+   "line": 7,
+   "severity": "Error",
+   "confidence": "High",
+   "body": "The string literal is missing a closing quote, which will cause a compilation error. Restore the missing quote to fix the syntax."
+  }
+ ]
+}

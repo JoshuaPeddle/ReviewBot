@@ -1,0 +1,14 @@
+must_flag:
+  - path: src/Handlers/CheckoutHandler.cs
+    line_range: [14, 15]
+    severity_at_least: warning
+    topic: unit_mismatch
+    # The finding must show it followed the chain, not merely that a multiplication exists.
+    # Any of these means it understood the fraction-vs-percentage contract.
+    must_mention_any:
+      - fraction
+      - percent
+      - 0.15
+      - "100"
+      - rate
+max_total_comments: 4

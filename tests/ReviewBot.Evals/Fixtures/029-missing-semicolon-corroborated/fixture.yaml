@@ -1,0 +1,11 @@
+name: Adjust Counter increment statement
+category: correctness
+difficulty: low
+description: |
+  Counter.Next changes how the incremented value is assigned.
+notes: |
+  Corroboration fixture (precision), sibling of 021. The head file omits a statement
+  terminator, so RoslynDiagnosticProvider emits a real parser diagnostic. Distinct from
+  021 and 028 in that the parser reports the error at the END of the offending line,
+  which is where a line_range assertion is most likely to drift if attribution changes.
+  Uses must_be_verified so corroboration is measured, not just refutation.
