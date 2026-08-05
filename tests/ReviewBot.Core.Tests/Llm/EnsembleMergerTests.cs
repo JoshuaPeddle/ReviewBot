@@ -211,6 +211,36 @@ public class EnsembleMergerTests
         merged.BelowThreshold[0].Support.Should().Be(2);
     }
 
+
+    [Fact]
+    public void AgreementScalesWithSurvivingSamplesInsteadOfCollapsingToOne()
+    {
+        // Clamping to the survivor count turns 3-of-5 into 1-of-1 when four samples drop out:
+        // no consensus at all, while the review still presents as an ensemble. A real run of
+        // PR #63 returned only 3 of 5 samples, so this is not hypothetical.
+        EnsembleMerger.ScaleAgreement(configured: 3, requested: 5, succeeded: 3).Should().Be(2);
+        EnsembleMerger.ScaleAgreement(configured: 3, requested: 5, succeeded: 5).Should().Be(3);
+        EnsembleMerger.ScaleAgreement(configured: 5, requested: 5, succeeded: 2).Should().Be(2);
+    }
+
+    [Fact]
+    public void ScaledAgreementNeverExceedsTheSurvivingSamples()
+    {
+        // Otherwise a degraded run would demand more agreement than it can possibly observe
+        // and drop every finding.
+        foreach (var succeeded in Enumerable.Range(1, 5))
+        {
+            EnsembleMerger.ScaleAgreement(configured: 5, requested: 5, succeeded: succeeded)
+                .Should().BeLessThanOrEqualTo(succeeded).And.BeGreaterThanOrEqualTo(1);
+        }
+    }
+
+    [Fact]
+    public void ScaleAgreementIsSafeWhenNothingSucceeded()
+    {
+        EnsembleMerger.ScaleAgreement(configured: 3, requested: 5, succeeded: 0).Should().Be(1);
+    }
+
     [Fact]
     public void EmptySampleSetProducesEmptyResult()
     {

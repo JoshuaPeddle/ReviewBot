@@ -287,6 +287,16 @@ public sealed class WorkerEvalRunner
         }
     }
 
+    /// <summary>
+    /// Best-effort cleanup of the run's scratch database.
+    /// </summary>
+    /// <remarks>
+    /// The failures are swallowed deliberately: the files live under
+    /// <see cref="Path.GetTempPath"/>, SQLite may still hold the handle briefly after the host
+    /// disposes, and the OS reclaims them regardless. Failing an eval run — or printing noise
+    /// on every invocation — because a temp file outlived it would be worse than the leak. The
+    /// naming makes the intent explicit rather than leaving a bare empty catch.
+    /// </remarks>
     private static void TryDelete(string path)
     {
         try

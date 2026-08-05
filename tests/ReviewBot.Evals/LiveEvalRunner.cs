@@ -293,7 +293,7 @@ public sealed class LiveEvalRunner
 
         return EnsembleMerger.Merge(
             succeeded,
-            Math.Min(options.EnsembleMinAgreement, succeeded.Length),
+            EnsembleMerger.ScaleAgreement(options.EnsembleMinAgreement, options.EnsembleSamples, succeeded.Length),
             options.EnsembleLineWindow).Result;
     }
 

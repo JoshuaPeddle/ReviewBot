@@ -101,9 +101,11 @@ public sealed class EnsembleReviewLlm : IReviewLlm
                 observed.FirstOrDefault());
         }
 
-        // Agreement is relative to the samples that came back. Holding the threshold against
-        // the requested k would make a dropped sample silently raise the bar.
-        var required = Math.Min(MinAgreement, succeeded.Length);
+        // Agreement is relative to the samples that came back — holding the threshold against
+        // the requested k would make a dropped sample silently raise the bar — but scaled
+        // proportionally rather than clamped, so losing samples cannot quietly reduce this to
+        // "keep everything one sample said".
+        var required = EnsembleMerger.ScaleAgreement(MinAgreement, Samples, succeeded.Length);
         var merged = EnsembleMerger.Merge(succeeded, required, LineWindow);
 
         // The merged result is synthetic — it has no single raw response of its own — so

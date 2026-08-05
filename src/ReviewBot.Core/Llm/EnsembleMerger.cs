@@ -26,6 +26,29 @@ public static class EnsembleMerger
     public const int DefaultLineWindow = 3;
 
     /// <summary>
+    /// Scales a configured agreement threshold to the samples that actually returned.
+    /// </summary>
+    /// <remarks>
+    /// Clamping to the surviving count alone (<c>Min(configured, succeeded)</c>) collapses the
+    /// threshold to 1 whenever enough samples drop out — no consensus filtering at all, while
+    /// the review still reports itself as an ensemble. Scaling proportionally keeps the
+    /// *fraction* of agreement the operator asked for: 3-of-5 with three survivors becomes
+    /// 2-of-3, not 1-of-3. Callers should record the applied value, because a threshold that
+    /// silently differs from the configured one is the kind of thing that quietly moves
+    /// precision between runs.
+    /// </remarks>
+    public static int ScaleAgreement(int configured, int requested, int succeeded)
+    {
+        if (succeeded <= 0 || requested <= 0)
+        {
+            return 1;
+        }
+
+        var scaled = (int)Math.Ceiling(configured * (double)succeeded / requested);
+        return Math.Clamp(scaled, 1, succeeded);
+    }
+
+    /// <summary>
     /// A finding that was reported but by too few samples to survive.
     /// </summary>
     /// <remarks>
