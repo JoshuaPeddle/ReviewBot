@@ -8,6 +8,9 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="YamlDotNet" />
+    <!-- run-live-worker boots the real host in-process and drives it through /webhook. -->
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
   </ItemGroup>
 
   <ItemGroup>
@@ -15,6 +18,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Aliased: this CLI uses top-level statements, so it emits its own global::Program
+         that collides with the host's. WorkerEvalRunner reaches the host entry point
+         through the `apihost` alias instead. -->
+    <ProjectReference Include="..\..\src\ReviewBot.Api\ReviewBot.Api.csproj" Aliases="apihost" />
     <ProjectReference Include="..\..\src\ReviewBot.Core\ReviewBot.Core.csproj" />
     <ProjectReference Include="..\..\src\ReviewBot.Grounding\ReviewBot.Grounding.csproj" />
     <ProjectReference Include="..\..\src\ReviewBot.Llm.OpenAi\ReviewBot.Llm.OpenAi.csproj" />

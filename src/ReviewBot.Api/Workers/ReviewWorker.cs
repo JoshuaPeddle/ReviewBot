@@ -367,6 +367,22 @@ public sealed class ReviewWorker : BackgroundService
         var isIncrementalUpdate = changedPathsSinceLastReview is not null;
         var llm = llmFactory.Create(config.Model);
         var contextWindowTokens = await ResolveContextWindowTokensAsync(llm, config, ct).ConfigureAwait(false);
+
+        // Self-consistency: review the diff several times and keep the findings enough samples
+        // agree on. Wrapped after the context-window probe so that still sees the concrete
+        // provider, and after budgeting because every sample reviews the same assembled prompt.
+        var ensemble = config.Review.Ensemble;
+        if (ensemble.Samples > 1)
+        {
+            llm = new EnsembleReviewLlm(llm, ensemble.Samples, ensemble.MinAgreement, ensemble.LineWindow);
+            logger.LogInformation(
+                "Self-consistency enabled for {Owner}/{Repo}#{Pr}: {Samples} samples, keeping findings with >= {MinAgreement} agreement",
+                job.Owner,
+                job.Repo,
+                job.PrNumber,
+                ensemble.Samples,
+                ensemble.MinAgreement);
+        }
         var promptBudget = CreatePromptBudget(config, grounding, metadata, job, contextWindowTokens);
         var retrievalSw = Stopwatch.StartNew();
         RetrievalContextResult retrievalContext;

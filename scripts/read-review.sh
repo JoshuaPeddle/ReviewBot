@@ -5,9 +5,11 @@
 #
 #   scripts/read-review.sh <pr-number>
 #
+# REVIEWBOT_OWNER / REVIEWBOT_REPO can be overridden from the environment.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-set -a; . ./.env.local; set +a
+. scripts/load-env.sh
+reviewbot_load_env
 
 PR="${1:?usage: read-review.sh <pr-number>}"
 OWNER="${REVIEWBOT_OWNER:?}"; REPO="${REVIEWBOT_REPO:?}"

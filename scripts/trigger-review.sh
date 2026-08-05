@@ -7,9 +7,15 @@
 # Prints the delivery id; the worker then fetches the PR, calls the LLM, and
 # posts a review to the PR on GitHub. Re-running on the same head SHA re-reviews
 # the whole PR (the worker only skips when a delta has zero changed files).
+#
+# REVIEWBOT_LOCAL_URL, REVIEWBOT_OWNER and REVIEWBOT_REPO can be overridden from the
+# environment to aim at a second instance, e.g. when 5174 is already taken:
+#
+#   REVIEWBOT_LOCAL_URL=http://127.0.0.1:5175 scripts/trigger-review.sh 63
 set -euo pipefail
 cd "$(dirname "$0")/.."
-set -a; . ./.env.local; set +a
+. scripts/load-env.sh
+reviewbot_load_env
 
 command -v gh >/dev/null  || { echo "error: 'gh' CLI not found on PATH" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "error: 'python3' not found on PATH" >&2; exit 1; }

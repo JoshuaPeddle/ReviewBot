@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using ReviewBot.Core.Domain;
 using ReviewBot.Core.Llm;
 using ReviewBot.Evals;
 using ReviewBot.Llm.OpenAi;
@@ -29,7 +30,7 @@ public static class EvalCli
                 Usage:
                   dotnet run --project tests/ReviewBot.Evals -- score --fixture <dir> --result <llm-result.json> [--out <score.json>]
                   dotnet run --project tests/ReviewBot.Evals -- score --fixtures <dir> --results <dir> [--out <run.json>]
-                  dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>] [--context-tokens 32768] [--per-fixture-timeout 240] [--request-timeout 180] [--max-tokens 4096] [--temperature 0.2] [--top-p 0.95] [--top-k 20] [--min-p 0.0] [--presence-penalty 0.0] [--repetition-penalty 1.0] [--seed 1] [--self-critique true|false] [--index-cache-dir <dir>]
+                  dotnet run --project tests/ReviewBot.Evals -- run-live --fixtures <dir> --results <dir> --base-url <url> --model <model> [--retrieval true|false] [--config <review-bot.yml>] [--api-key-env <env-var>] [--manifest <manifest.json>] [--context-tokens 32768] [--per-fixture-timeout 240] [--request-timeout 180] [--max-tokens 4096] [--temperature 0.2] [--top-p 0.95] [--top-k 20] [--min-p 0.0] [--presence-penalty 0.0] [--repetition-penalty 1.0] [--seed 1] [--self-critique true|false] [--index-cache-dir <dir>] [--concurrency 1]
                   dotnet run --project tests/ReviewBot.Evals -- compare <baseline-run.json> <candidate-run.json> [--out <comparison.json>]
                   dotnet run --project tests/ReviewBot.Evals -- aggregate <run-1.json> <run-2.json> [<run-n.json> ...] [--out <aggregate.json>]
                 """).ConfigureAwait(false);
@@ -41,7 +42,8 @@ public static class EvalCli
             return await RunAggregateAsync(args, output, error).ConfigureAwait(false);
         }
 
-        if (string.Equals(args[0], "run-live", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(args[0], "run-live", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(args[0], "run-live-worker", StringComparison.OrdinalIgnoreCase))
         {
             return await RunLiveAsync(args, output, error).ConfigureAwait(false);
         }
@@ -51,6 +53,11 @@ public static class EvalCli
             return await RunCompareAsync(args, output, error).ConfigureAwait(false);
         }
 
+        if (string.Equals(args[0], "ensemble-rescore", StringComparison.OrdinalIgnoreCase))
+        {
+            return await RunEnsembleRescoreAsync(args, output, error).ConfigureAwait(false);
+        }
+
         if (!string.Equals(args[0], "score", StringComparison.OrdinalIgnoreCase))
         {
             await error.WriteLineAsync($"Unknown eval command '{args[0]}'.").ConfigureAwait(false);
@@ -58,6 +65,65 @@ public static class EvalCli
         }
 
         return await RunScoreAsync(args, output, error).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Re-merges persisted ensemble samples at a different agreement threshold, without calling
+    /// the model again. A k-threshold sweep is therefore one live run plus k cheap re-merges.
+    /// </summary>
+    private static async Task<int> RunEnsembleRescoreAsync(string[] args, TextWriter output, TextWriter error)
+    {
+        var samplesDir = ReadOption(args, "--samples");
+        var outDir = ReadOption(args, "--out");
+        var minAgreement = ParseInt(ReadOption(args, "--min-agreement"), defaultValue: 1);
+        var lineWindow = ParseInt(ReadOption(args, "--line-window"), defaultValue: EnsembleMerger.DefaultLineWindow);
+
+        if (samplesDir is null || outDir is null)
+        {
+            await error.WriteLineAsync("The ensemble-rescore command requires --samples and --out.")
+                .ConfigureAwait(false);
+            return 2;
+        }
+
+        if (!Directory.Exists(samplesDir))
+        {
+            await error.WriteLineAsync($"Samples directory '{samplesDir}' does not exist.").ConfigureAwait(false);
+            return 2;
+        }
+
+        Directory.CreateDirectory(outDir);
+        var sampleFiles = Directory.EnumerateFiles(samplesDir, "*.samples.json").Order(StringComparer.Ordinal).ToArray();
+        if (sampleFiles.Length == 0)
+        {
+            await error.WriteLineAsync(
+                $"No *.samples.json files in '{samplesDir}'. Run run-live with --ensemble-k greater than 1 first.")
+                .ConfigureAwait(false);
+            return 2;
+        }
+
+        var rewritten = 0;
+        foreach (var sampleFile in sampleFiles)
+        {
+            var samples = JsonSerializer.Deserialize<ReviewResult[]>(
+                await File.ReadAllTextAsync(sampleFile).ConfigureAwait(false), JsonOptions);
+            if (samples is null || samples.Length == 0)
+            {
+                continue;
+            }
+
+            var fixtureKey = Path.GetFileName(sampleFile)[..^".samples.json".Length];
+            var merged = EnsembleMerger.Merge(samples, minAgreement, lineWindow).Result;
+            await File.WriteAllTextAsync(
+                Path.Combine(outDir, $"{fixtureKey}.json"),
+                JsonSerializer.Serialize(merged, JsonOptions))
+                .ConfigureAwait(false);
+            rewritten++;
+        }
+
+        await output.WriteLineAsync(
+            $"Re-merged {rewritten} fixture(s) at min-agreement={minAgreement}, line-window={lineWindow} into {outDir}.")
+            .ConfigureAwait(false);
+        return 0;
     }
 
     private static async Task<int> RunLiveAsync(string[] args, TextWriter output, TextWriter error)
@@ -76,6 +142,11 @@ public static class EvalCli
         var requestTimeoutSeconds = ParseInt(ReadOption(args, "--request-timeout"), defaultValue: 180);
         var maxTokens = ParseInt(ReadOption(args, "--max-tokens"), defaultValue: 4096);
         var temperature = ParseFloat(ReadOption(args, "--temperature"), defaultValue: 0.2f);
+        var concurrency = ParseInt(ReadOption(args, "--concurrency"), defaultValue: 1);
+        var ensembleSamples = ParseInt(ReadOption(args, "--ensemble-k"), defaultValue: 1);
+        var ensembleMinAgreement = ParseInt(ReadOption(args, "--ensemble-min-agreement"), defaultValue: 1);
+        var ensembleLineWindow = ParseInt(
+            ReadOption(args, "--ensemble-line-window"), defaultValue: EnsembleMerger.DefaultLineWindow);
         var indexCacheDir = ReadOption(args, "--index-cache-dir") ??
             Path.Combine(Path.GetTempPath(), "reviewbot-eval-index", Guid.NewGuid().ToString("N"));
 
@@ -129,27 +200,33 @@ public static class EvalCli
         try
         {
             manifestPath ??= Path.Combine(resultsPath, "manifest.json");
-            var results = await new LiveEvalRunner()
-                .RunAsync(
-                    new LiveEvalOptions(
-                        fixturesPath,
-                        resultsPath,
-                        manifestPath,
-                        parsedBaseUrl,
-                        model,
-                        apiKey,
-                        retrieval,
-                        configPath,
-                        contextTokens,
-                        indexCacheDir,
-                        perFixtureTimeoutSeconds,
-                        requestTimeoutSeconds,
-                        maxTokens,
-                        temperature,
-                        selfCritique,
-                        sampling.HasAnyValue ? sampling : null),
-                    output)
-                .ConfigureAwait(false);
+            var liveOptions = new LiveEvalOptions(
+                fixturesPath,
+                resultsPath,
+                manifestPath,
+                parsedBaseUrl,
+                model,
+                apiKey,
+                retrieval,
+                configPath,
+                contextTokens,
+                indexCacheDir,
+                perFixtureTimeoutSeconds,
+                requestTimeoutSeconds,
+                maxTokens,
+                temperature,
+                selfCritique,
+                sampling.HasAnyValue ? sampling : null,
+                concurrency,
+                ensembleSamples,
+                ensembleMinAgreement,
+                ensembleLineWindow);
+
+            // run-live-worker drives the real ReviewWorker; run-live calls the LLM directly.
+            var useWorker = string.Equals(args[0], "run-live-worker", StringComparison.OrdinalIgnoreCase);
+            var results = useWorker
+                ? await new WorkerEvalRunner().RunAsync(liveOptions, output).ConfigureAwait(false)
+                : await new LiveEvalRunner().RunAsync(liveOptions, output).ConfigureAwait(false);
 
             var promptTokens = results.Sum(result => result.TokenUsage?.PromptTokens ?? 0);
             var completionTokens = results.Sum(result => result.TokenUsage?.CompletionTokens ?? 0);

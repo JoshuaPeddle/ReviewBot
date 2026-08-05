@@ -19,6 +19,10 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
     private const int MaxContextFileBytes = 1_048_576;
     private const int MaxResponseReserveTokens = 32_768;
     private const int MaxReviewChunks = 50;
+    // Each sample is a full review, so the cap bounds a repo's ability to multiply its own
+    // token spend and wall-clock by a config typo.
+    private const int MaxEnsembleSamples = 9;
+    private const int MaxEnsembleLineWindow = 100;
     private const int MaxBuildTimeoutSeconds = 600;
     private const int MaxTestTimeoutSeconds = 1_800;
     private const int MaxRetrievalBytes = 1_048_576;
@@ -210,7 +214,8 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
                 defaults.Review.ChunkHeadroom,
                 "review.chunk_headroom"))
         {
-            Verification = MergeVerification(fileConfig.Review?.Verification, defaults.Review.Verification)
+            Verification = MergeVerification(fileConfig.Review?.Verification, defaults.Review.Verification),
+            Ensemble = MergeEnsemble(fileConfig.Review?.Ensemble, defaults.Review.Ensemble)
         };
 
         var grounding = MergeGrounding(fileConfig.Grounding, defaults.Grounding);
@@ -235,6 +240,33 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         }
 
         return new VerificationConfig(file.Enabled ?? defaults.Enabled);
+    }
+
+    private static EnsembleConfig MergeEnsemble(EnsembleConfigFile? file, EnsembleConfig defaults)
+    {
+        if (file is null)
+        {
+            return defaults;
+        }
+
+        // Each knob is validated rather than silently clamped: a repo asking for 0 samples or a
+        // threshold above the sample count has made a mistake worth surfacing, and quietly
+        // substituting a default is how a repo ends up running a pipeline it did not ask for.
+        var samples = MergeBoundedPositiveInt(
+            file.Samples, defaults.Samples, MaxEnsembleSamples, "review.ensemble.samples");
+        var minAgreement = MergeBoundedPositiveInt(
+            file.MinAgreement, defaults.MinAgreement, MaxEnsembleSamples, "review.ensemble.min_agreement");
+        if (minAgreement > samples)
+        {
+            throw new ArgumentException(
+                $"review.ensemble.min_agreement ({minAgreement}) cannot exceed review.ensemble.samples ({samples}).",
+                nameof(file));
+        }
+
+        var lineWindow = MergeBoundedNonNegativeInt(
+            file.LineWindow, defaults.LineWindow, MaxEnsembleLineWindow, "review.ensemble.line_window");
+
+        return new EnsembleConfig(samples, minAgreement, lineWindow);
     }
 
     private static GroundingConfig MergeGrounding(GroundingConfigFile? file, GroundingConfig defaults)
@@ -530,6 +562,21 @@ public sealed class RepoConfigFetcher : IRepoConfigFetcher
         public double? ChunkHeadroom { get; set; }
 
         public VerificationConfigFile? Verification { get; set; }
+
+        public EnsembleConfigFile? Ensemble { get; set; }
+    }
+
+    private sealed class EnsembleConfigFile
+    {
+        public EnsembleConfigFile()
+        {
+        }
+
+        public int? Samples { get; set; }
+
+        public int? MinAgreement { get; set; }
+
+        public int? LineWindow { get; set; }
     }
 
     private sealed class VerificationConfigFile

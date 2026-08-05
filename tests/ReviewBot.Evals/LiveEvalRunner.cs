@@ -77,82 +77,43 @@ public sealed class LiveEvalRunner
             .Where(directory => File.Exists(Path.Combine(directory, "fixture.yaml")))
             .Order(StringComparer.Ordinal)
             .ToArray();
-        var results = new List<LiveEvalFixtureResult>();
-        var manifestFixtures = new List<LiveEvalFixtureManifest>();
-
-        foreach (var fixtureDirectory in fixtures)
+        // Request building indexes each fixture's repo-state into one SQLite index shared
+        // across the run, so it stays sequential. It is local disk work and rounds to nothing
+        // beside the LLM call — only the LLM stage below is worth fanning out.
+        var prepared = new (string Directory, EvalFixture Fixture, LiveEvalRequestContext Context)[fixtures.Length];
+        for (var index = 0; index < fixtures.Length; index++)
         {
             ct.ThrowIfCancellationRequested();
-
-            var fixture = loader.Load(fixtureDirectory);
-            var requestContext = await BuildRequestAsync(fixture, config, options, ct).ConfigureAwait(false);
-            await output.WriteLineAsync(
-                $"Running {Path.GetFileName(fixtureDirectory)} (retrieval={options.RetrievalEnabled.ToString().ToLowerInvariant()}, snippets={requestContext.Snippets.Count})")
-                .ConfigureAwait(false);
-
-            var fixtureStartedAt = DateTimeOffset.UtcNow;
-            ReviewResult result;
-            string status;
-            using (var fixtureCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
-            {
-                fixtureCts.CancelAfter(TimeSpan.FromSeconds(options.PerFixtureTimeoutSeconds));
-                try
-                {
-                    result = await llm.ReviewAsync(requestContext.Request, fixtureCts.Token).ConfigureAwait(false);
-                    if (options.SelfCritique)
-                    {
-                        // Mirror the worker's precision-pruning stages (MinConfidence gate +
-                        // the self-critique LLM pass) so the corpus measures real product
-                        // precision, not raw model output.
-                        result = await ApplyNoiseFiltersAsync(
-                            llm, requestContext.Request, result, config, fixtureCts.Token).ConfigureAwait(false);
-                    }
-
-                    status = "succeeded";
-                }
-                catch (Exception ex) when (!ct.IsCancellationRequested)
-                {
-                    var elapsedSeconds = (DateTimeOffset.UtcNow - fixtureStartedAt).TotalSeconds;
-                    var isTimeout = fixtureCts.IsCancellationRequested ||
-                        ex is OperationCanceledException ||
-                        ContainsCancellationOrTimeout(ex);
-                    var reason = isTimeout
-                        ? (fixtureCts.IsCancellationRequested
-                            ? $"hit per-fixture timeout ({options.PerFixtureTimeoutSeconds}s)"
-                            : $"LLM transport timed out: {ex.GetBaseException().Message}")
-                        : $"LLM error: {ex.GetBaseException().Message}";
-                    await output.WriteLineAsync(
-                        $"FAIL {Path.GetFileName(fixtureDirectory)} after {elapsedSeconds:F0}s ({reason}); writing empty result and continuing.")
-                        .ConfigureAwait(false);
-                    result = new ReviewResult(
-                        Summary: $"Eval fixture aborted: {reason}.",
-                        Comments: Array.Empty<InlineComment>(),
-                        ContextRequests: Array.Empty<ContextRequest>());
-                    status = isTimeout ? "timed_out" : "errored";
-                }
-            }
-
-            var outputPath = Path.Combine(options.ResultsDirectory, $"{Path.GetFileName(fixtureDirectory)}.json");
-            await File.WriteAllTextAsync(outputPath, JsonSerializer.Serialize(result, JsonOptions), ct).ConfigureAwait(false);
-            results.Add(new LiveEvalFixtureResult(
-                Path.GetFileName(fixtureDirectory),
-                outputPath,
-                result.Comments.Count,
-                requestContext.Snippets.Count,
-                result.TokenUsage));
-            manifestFixtures.Add(new LiveEvalFixtureManifest(
-                FixtureKey: Path.GetFileName(fixtureDirectory),
-                FixtureName: fixture.Metadata.Name,
-                Category: fixture.Metadata.Category,
-                ResultPath: outputPath,
-                Status: status,
-                ElapsedSeconds: (DateTimeOffset.UtcNow - fixtureStartedAt).TotalSeconds,
-                CommentCount: result.Comments.Count,
-                RetrievalSnippetCount: requestContext.Snippets.Count,
-                RetrievalSymbolsQueried: requestContext.SymbolsQueried,
-                RetrievalSnippets: requestContext.Snippets,
-                TokenUsage: result.TokenUsage));
+            var fixture = loader.Load(fixtures[index]);
+            prepared[index] = (
+                fixtures[index],
+                fixture,
+                await BuildRequestAsync(fixture, config, options, ct).ConfigureAwait(false));
         }
+
+        var slots = Math.Max(1, options.Concurrency);
+        await output.WriteLineAsync(
+            $"Running {prepared.Length} fixtures (retrieval={options.RetrievalEnabled.ToString().ToLowerInvariant()}, concurrency={slots})")
+            .ConfigureAwait(false);
+
+        // Results are collected by index and assembled in fixture order afterwards, so the
+        // manifest and the score are identical whatever order the requests finish in.
+        var completed = new (LiveEvalFixtureResult Result, LiveEvalFixtureManifest Manifest)[prepared.Length];
+        using var outputLock = new SemaphoreSlim(1, 1);
+
+        await Parallel.ForAsync(
+            0,
+            prepared.Length,
+            new ParallelOptions { MaxDegreeOfParallelism = slots, CancellationToken = ct },
+            async (index, loopCt) =>
+            {
+                completed[index] = await RunFixtureAsync(
+                    llm, prepared[index], config, options, output, outputLock, loopCt).ConfigureAwait(false);
+            })
+            .ConfigureAwait(false);
+
+        var results = completed.Select(entry => entry.Result).ToList();
+        var manifestFixtures = completed.Select(entry => entry.Manifest).ToList();
 
         var manifest = new LiveEvalManifest(
             StartedAtUtc: startedAt,
@@ -170,6 +131,189 @@ public sealed class LiveEvalRunner
             .ConfigureAwait(false);
 
         return results;
+    }
+
+    /// <summary>
+    /// Runs one fixture through the LLM (plus the noise filters, when enabled) and writes its
+    /// result file. Safe to call concurrently: every argument is either immutable or owned by
+    /// this call, and <see cref="OpenAiReviewLlm"/> builds a fresh client per request.
+    /// </summary>
+    private static async Task<(LiveEvalFixtureResult Result, LiveEvalFixtureManifest Manifest)> RunFixtureAsync(
+        IReviewLlm llm,
+        (string Directory, EvalFixture Fixture, LiveEvalRequestContext Context) prepared,
+        ReviewConfig config,
+        LiveEvalOptions options,
+        TextWriter output,
+        SemaphoreSlim outputLock,
+        CancellationToken ct)
+    {
+        var (fixtureDirectory, fixture, requestContext) = prepared;
+        var fixtureKey = Path.GetFileName(fixtureDirectory);
+        var fixtureStartedAt = DateTimeOffset.UtcNow;
+        ReviewResult result;
+        string status;
+
+        using (var fixtureCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            fixtureCts.CancelAfter(TimeSpan.FromSeconds(options.PerFixtureTimeoutSeconds));
+            try
+            {
+                result = options.EnsembleSamples > 1
+                    ? await ReviewWithEnsembleAsync(
+                        llm, requestContext.Request, fixtureKey, options, fixtureCts.Token).ConfigureAwait(false)
+                    : await llm.ReviewAsync(requestContext.Request, fixtureCts.Token).ConfigureAwait(false);
+
+                // Critique runs on the merged consensus, not on each sample: the product
+                // critiques one review, and critiquing k times would confound the two effects.
+                if (options.SelfCritique)
+                {
+                    // Mirror the worker's precision-pruning stages (MinConfidence gate +
+                    // the self-critique LLM pass) so the corpus measures real product
+                    // precision, not raw model output.
+                    result = await ApplyNoiseFiltersAsync(
+                        llm, requestContext.Request, result, config, fixtureCts.Token).ConfigureAwait(false);
+                }
+
+                status = "succeeded";
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                var elapsedSeconds = (DateTimeOffset.UtcNow - fixtureStartedAt).TotalSeconds;
+                var isTimeout = fixtureCts.IsCancellationRequested ||
+                    ex is OperationCanceledException ||
+                    ContainsCancellationOrTimeout(ex);
+                var reason = isTimeout
+                    ? (fixtureCts.IsCancellationRequested
+                        ? $"hit per-fixture timeout ({options.PerFixtureTimeoutSeconds}s)"
+                        : $"LLM transport timed out: {ex.GetBaseException().Message}")
+                    : $"LLM error: {ex.GetBaseException().Message}";
+                await WriteLineAsync(
+                    output,
+                    outputLock,
+                    $"FAIL {fixtureKey} after {elapsedSeconds:F0}s ({reason}); writing empty result and continuing.",
+                    ct).ConfigureAwait(false);
+                result = new ReviewResult(
+                    Summary: $"Eval fixture aborted: {reason}.",
+                    Comments: Array.Empty<InlineComment>(),
+                    ContextRequests: Array.Empty<ContextRequest>());
+                status = isTimeout ? "timed_out" : "errored";
+            }
+        }
+
+        var elapsed = (DateTimeOffset.UtcNow - fixtureStartedAt).TotalSeconds;
+        var outputPath = Path.Combine(options.ResultsDirectory, $"{fixtureKey}.json");
+        await File.WriteAllTextAsync(outputPath, JsonSerializer.Serialize(result, JsonOptions), ct).ConfigureAwait(false);
+        await WriteLineAsync(
+            output,
+            outputLock,
+            $"{status.ToUpperInvariant()} {fixtureKey} in {elapsed:F0}s (comments={result.Comments.Count}, snippets={requestContext.Snippets.Count})",
+            ct).ConfigureAwait(false);
+
+        return (
+            new LiveEvalFixtureResult(
+                fixtureKey,
+                outputPath,
+                result.Comments.Count,
+                requestContext.Snippets.Count,
+                result.TokenUsage),
+            new LiveEvalFixtureManifest(
+                FixtureKey: fixtureKey,
+                FixtureName: fixture.Metadata.Name,
+                Category: fixture.Metadata.Category,
+                ResultPath: outputPath,
+                Status: status,
+                ElapsedSeconds: elapsed,
+                CommentCount: result.Comments.Count,
+                RetrievalSnippetCount: requestContext.Snippets.Count,
+                RetrievalSymbolsQueried: requestContext.SymbolsQueried,
+                RetrievalSnippets: requestContext.Snippets,
+                TokenUsage: result.TokenUsage));
+    }
+
+    /// <summary>
+    /// Samples the reviewer k times, persists every sample, and returns the merged consensus.
+    /// </summary>
+    /// <remarks>
+    /// The samples are written to <c>&lt;fixture&gt;.samples.json</c> so a threshold sweep costs
+    /// one run rather than one run per threshold — re-merge them with the
+    /// <c>ensemble-rescore</c> verb. A sample that throws is dropped; k-1 samples still merge.
+    /// </remarks>
+    private static async Task<ReviewResult> ReviewWithEnsembleAsync(
+        IReviewLlm llm,
+        ReviewRequest request,
+        string fixtureKey,
+        LiveEvalOptions options,
+        CancellationToken ct)
+    {
+        var samples = new ReviewResult?[options.EnsembleSamples];
+        var failures = new Exception?[options.EnsembleSamples];
+        await Parallel.ForAsync(
+            0,
+            options.EnsembleSamples,
+            new ParallelOptions
+            {
+                // Fixtures already run concurrently, so sampling k times per fixture multiplies
+                // load; honouring the provider's own limit keeps that product bounded.
+                MaxDegreeOfParallelism = Math.Max(1, Math.Min(options.EnsembleSamples, llm.MaxConcurrentRequests)),
+                CancellationToken = ct
+            },
+            async (index, loopCt) =>
+            {
+                try
+                {
+                    samples[index] = await llm.ReviewAsync(request, loopCt).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    samples[index] = null;
+                    failures[index] = ex;
+                }
+            })
+            .ConfigureAwait(false);
+
+        var succeeded = samples.OfType<ReviewResult>().ToArray();
+        if (succeeded.Length == 0)
+        {
+            // Same reasoning as EnsembleReviewLlm: a bare count is undiagnosable, and the cause
+            // is what tells you whether to shrink the request or fix the endpoint.
+            var observed = failures.OfType<Exception>().ToArray();
+            var distinct = observed
+                .Select(failure => failure.GetBaseException().Message)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            throw new InvalidOperationException(
+                $"All {options.EnsembleSamples} ensemble samples failed for {fixtureKey}. " +
+                $"Distinct cause(s): {string.Join(" | ", distinct)}",
+                observed.FirstOrDefault());
+        }
+
+        var samplesPath = Path.Combine(options.ResultsDirectory, $"{fixtureKey}.samples.json");
+        await File.WriteAllTextAsync(samplesPath, JsonSerializer.Serialize(succeeded, JsonOptions), ct)
+            .ConfigureAwait(false);
+
+        return EnsembleMerger.Merge(
+            succeeded,
+            EnsembleMerger.ScaleAgreement(options.EnsembleMinAgreement, options.EnsembleSamples, succeeded.Length),
+            options.EnsembleLineWindow).Result;
+    }
+
+    // TextWriter is not thread-safe, so progress lines from concurrent fixtures are
+    // serialized rather than allowed to interleave mid-line.
+    private static async Task WriteLineAsync(
+        TextWriter output,
+        SemaphoreSlim outputLock,
+        string line,
+        CancellationToken ct)
+    {
+        await outputLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await output.WriteLineAsync(line).ConfigureAwait(false);
+        }
+        finally
+        {
+            outputLock.Release();
+        }
     }
 
     // Reproduces the worker's noise-pruning: the deterministic MinConfidence gate followed
@@ -242,6 +386,23 @@ public sealed class LiveEvalRunner
         return exception.InnerException is not null && ContainsCancellationOrTimeout(exception.InnerException);
     }
 
+    /// <summary>
+    /// A PR title that says what changed and nothing about whether it is wrong — the kind of
+    /// title a real PR carries. Anything richer risks re-introducing the priming this replaced.
+    /// </summary>
+    private static string NeutralPrTitle(IReadOnlyList<FileChange> files)
+    {
+        if (files.Count == 0)
+        {
+            return "Update repository";
+        }
+
+        var first = Path.GetFileName(files[0].Path);
+        return files.Count == 1
+            ? $"Update {first}"
+            : $"Update {first} and {files.Count - 1} other file{(files.Count == 2 ? string.Empty : "s")}";
+    }
+
     private static async Task<LiveEvalRequestContext> BuildRequestAsync(
         EvalFixture fixture,
         ReviewConfig config,
@@ -249,9 +410,14 @@ public sealed class LiveEvalRunner
         CancellationToken ct)
     {
         var files = EvalDiffParser.ParseFiles(fixture.DiffPatch);
+        // The fixture's name and description are the answer key ("...leaks secret state",
+        // "the reviewer should flag this as a trust-boundary leak"). Sending them as the PR
+        // title/body primes the model and inflates recall by an unmeasured margin, so the
+        // model gets a neutral title derived from the changed paths unless the fixture
+        // supplies a deliberately neutral pr_title/pr_body of its own.
         var request = new ReviewRequest(
-            PrTitle: fixture.Metadata.Name,
-            PrBody: fixture.Metadata.Description,
+            PrTitle: fixture.Metadata.PrTitle ?? NeutralPrTitle(files),
+            PrBody: fixture.Metadata.PrBody ?? string.Empty,
             BaseSha: BaseSha,
             HeadSha: HeadSha,
             Files: files,

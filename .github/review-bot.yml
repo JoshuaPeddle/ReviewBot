@@ -48,6 +48,27 @@ review:
   # Default: 0.80
   chunk_headroom: 0.80
 
+  # Self-consistency: review the same diff several times and keep only the findings that
+  # enough samples independently report. Costs samples× the tokens of a single review,
+  # which is affordable on self-hosted inference and is much of the reason to run your own.
+  #
+  # Measured on the 27-fixture eval corpus (3 runs, paired against the 15 individual
+  # samples from those runs): 5 samples at min_agreement 3 gives P 0.984 / R 0.955 / F1
+  # 0.969, against 0.899 / 0.879 / 0.887 for a single sample. It gains on both axes rather
+  # than trading one for the other — extra draws find bugs one draw misses, while
+  # hallucinations fail to reproduce and are filtered out.
+  #
+  # LEFT DISABLED FOR THIS REPOSITORY. Dogfooding PR #63 found that reviews of this repo
+  # fail to converge at a high rate: one review had 4 of 5 samples burn their entire output
+  # allowance emitting nothing, leaving agreement degraded to 1 — 5× the token cost for a
+  # review carrying none of the consensus filtering the numbers above describe. Enable it
+  # once the non-convergence is fixed; the trace records `degraded` and `failure_causes`,
+  # so the sample success rate is the thing to check first.
+  # Default: samples 1 (disabled)
+  # ensemble:
+  #   samples: 5
+  #   min_agreement: 3
+
   # Minimum confidence level for inline comments to be posted. Comments below this
   # threshold are silently dropped before posting. "low" posts everything; "high" posts
   # only comments the model is certain about.
