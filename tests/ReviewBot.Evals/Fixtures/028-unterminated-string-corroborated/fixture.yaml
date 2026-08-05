@@ -1,0 +1,11 @@
+name: Adjust Greeter prefix literal
+category: correctness
+difficulty: low
+description: |
+  Greeter.Greet changes how its prefix local is initialized.
+notes: |
+  Corroboration fixture (precision), sibling of 021. The head file has an unterminated
+  string literal, so RoslynDiagnosticProvider emits a real parser diagnostic on the same
+  line. 021 covers a missing initializer expression; this covers the newline-in-constant
+  class, where the error is reported at the opening quote rather than at the offending
+  token. Uses must_be_verified so corroboration is measured, not just refutation.

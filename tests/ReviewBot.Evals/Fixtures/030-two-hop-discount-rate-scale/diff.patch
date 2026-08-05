@@ -1,0 +1,13 @@
+diff --git a/src/Handlers/CheckoutHandler.cs b/src/Handlers/CheckoutHandler.cs
+index aaaaaaa..bbbbbbb 100644
+--- a/src/Handlers/CheckoutHandler.cs
++++ b/src/Handlers/CheckoutHandler.cs
+@@ -11,6 +11,7 @@ public sealed class CheckoutHandler
+     public decimal Checkout(decimal total, string promoCode)
+     {
+         var rate = this.orders.RateFor(promoCode);
+-        return this.orders.ApplyDiscount(total, rate);
++        var percent = rate * 100m;
++        return this.orders.ApplyDiscount(total, percent);
+     }
+ }

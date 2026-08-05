@@ -1,0 +1,17 @@
+must_flag:
+  - path: src/Demo/Greeter.cs
+    line_range: [7, 7]
+    severity_at_least: error
+    topic: syntax_error
+    must_be_verified: true
+    # The model phrases this as a string/quote problem or as a compile failure; both are
+    # correct descriptions of the same defect, so accept either rather than pinning wording.
+    must_mention_any:
+      - string
+      - quote
+      - terminat
+      - syntax
+      - compile
+      - compilation
+max_total_comments: 3
+expected_review_state: REQUEST_CHANGES

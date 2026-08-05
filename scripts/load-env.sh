@@ -17,7 +17,13 @@
 # shadows a rotated secret, because nothing tells you it happened.
 
 reviewbot_load_env() {
-  local name saved=()
+  # `local name saved=()` then expanding "${saved[@]}" while empty is an unbound-variable
+  # error under `set -u` on bash 3.2 (the macOS default), which is the *normal* path: a
+  # caller that overrides nothing has nothing to snapshot. Every use during development set
+  # REVIEWBOT_LOCAL_URL, so the plain `scripts/read-review.sh <pr>` invocation was the one
+  # case never exercised — and the one that broke.
+  local name
+  local saved=()
 
   # Snapshot every REVIEWBOT* variable the caller set. Restricting to that prefix keeps the
   # restore away from PATH and friends, which the env file has no business setting anyway.
@@ -36,7 +42,7 @@ reviewbot_load_env() {
   set +a
 
   local entry value
-  for entry in "${saved[@]}"; do
+  for entry in ${saved[@]+"${saved[@]}"}; do
     name="${entry%%=*}"
     value="${entry#*=}"
     # An empty override is treated as "not set" so `FOO= script.sh` doesn't blank the file's
